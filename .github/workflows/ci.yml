@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: vercel-labs/setup-zig@v1
+        with:
+          version: 0.16.0
+      - run: zig fmt --check build.zig build.zig.zon src
+      - run: zig build
+      - run: zig build test
