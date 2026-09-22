@@ -56,3 +56,55 @@ pub fn serialize(writer: *std.Io.Writer, value: anytype) !void {
 
     return;
 }
+
+pub fn deserialize(
+    comptime T: type,
+    reader: *std.Io.Reader,
+) !T {
+    return switch (@typeInfo(T)) {
+        .bool => blk: {
+            const byte = try reader.takeByte();
+
+            break :blk switch (byte) {
+                0x00 => false,
+                0x01 => true,
+                else => error.InvalidBoolean,
+            };
+        },
+        .array => |info| {
+            var result: T = undefined;
+
+            for (&result) |*item| {
+                item.* = try deserialize(info.child, reader);
+            }
+
+            return result;
+        },
+        .int => |info| {
+            if (info.signedness == std.builtin.Signedness.signed) {
+                @compileError("unsupported SSZ type: " ++ @typeName(T));
+            }
+
+            switch (info.bits) {
+                8, 16, 32, 64, 128, 256 => {
+                    return try reader.takeInt(T, std.builtin.Endian.little);
+                },
+                else => {
+                    @compileError("not implemented RLP signed int type: " ++ @typeName(T));
+                },
+            }
+        },
+        .@"struct" => |info| {
+            var result: T = undefined;
+
+            inline for (info.fields) |field| {
+                @field(result, field.name) = try deserialize(field.type, reader);
+            }
+
+            return result;
+        },
+        else => @compileError(
+            "unsupported SSZ type: " ++ @typeName(T),
+        ),
+    };
+}
