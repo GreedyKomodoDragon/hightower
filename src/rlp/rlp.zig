@@ -19,6 +19,8 @@
 //   the length in bytes of the length of the payload in binary form, followed by the length of the payload, followed by the
 //   concatenation of the RLP encodings of the items. The range of the first byte is thus [0xf8, 0xff] (dec. [248, 255]).
 
+// resources: https://thogiti.github.io/2024/04/30/RLP.html & https://ethereum.org/developers/docs/data-structures-and-encoding/rlp
+
 const std = @import("std");
 const encoding = @import("encoding.zig");
 
@@ -35,7 +37,7 @@ pub fn rlp(writer: *std.Io.Writer, value: anytype) !void {
             // TODO: Wire up the bytes encoder
 
             // if it is unsigned then it is always positive
-            if (info.signedness == std.Signedness.unsigned) {
+            if (info.signedness == std.builtin.Signedness.unsigned) {
                 // TODO: big-endian is required, not sure if this is
                 return std.mem.toBytes(value);
             }

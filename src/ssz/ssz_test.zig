@@ -2,12 +2,12 @@ const std = @import("std");
 const ssz = @import("ssz.zig");
 const testing = std.testing;
 
-const Example = struct {
-    count: u16,
-    slot: u64,
-};
-
 test "SSZ encodes fixed-size container" {
+    const Example = struct {
+        count: u16,
+        slot: u64,
+    };
+
     var buf: [100]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
 
@@ -396,6 +396,182 @@ test "SSZ encodes multiple nested containers" {
             0x02, 0x00,
             0x03, 0x00,
             0x04, 0x00,
+        },
+        writer.buffered(),
+    );
+}
+
+test "SSZ encodes false as 0x00" {
+    var buf: [10]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    try ssz.serialize(&writer, false);
+
+    try testing.expectEqualSlices(
+        u8,
+        &.{0x00},
+        writer.buffered(),
+    );
+}
+
+test "SSZ encodes true as 0x01" {
+    var buf: [10]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    try ssz.serialize(&writer, true);
+
+    try testing.expectEqualSlices(
+        u8,
+        &.{0x01},
+        writer.buffered(),
+    );
+}
+
+test "SSZ encodes boolean array" {
+    var buf: [10]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    const values = [_]bool{
+        true,
+        false,
+        true,
+        true,
+    };
+
+    try ssz.serialize(&writer, values);
+
+    try testing.expectEqualSlices(
+        u8,
+        &.{
+            0x01,
+            0x00,
+            0x01,
+            0x01,
+        },
+        writer.buffered(),
+    );
+}
+
+test "SSZ encodes container containing boolean" {
+    const Example = struct {
+        enabled: bool,
+        count: u16,
+    };
+
+    var buf: [10]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    const value = Example{
+        .enabled = true,
+        .count = 0x1234,
+    };
+
+    try ssz.serialize(&writer, value);
+
+    try testing.expectEqualSlices(
+        u8,
+        &.{
+            0x01,
+            0x34,
+            0x12,
+        },
+        writer.buffered(),
+    );
+}
+
+test "SSZ encodes container with multiple booleans" {
+    const Flags = struct {
+        a: bool,
+        b: bool,
+        c: bool,
+    };
+
+    var buf: [10]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    const value = Flags{
+        .a = true,
+        .b = false,
+        .c = true,
+    };
+
+    try ssz.serialize(&writer, value);
+
+    try testing.expectEqualSlices(
+        u8,
+        &.{
+            0x01,
+            0x00,
+            0x01,
+        },
+        writer.buffered(),
+    );
+}
+
+test "SSZ deeply nested fixed-size structs" {
+    const Level4 = struct {
+        a: u16,
+        b: bool,
+    };
+
+    const Level3 = struct {
+        x: u32,
+        inner: Level4,
+    };
+
+    const Level2 = struct {
+        flag: bool,
+        inner: Level3,
+        count: u8,
+    };
+
+    const Level1 = struct {
+        slot: u64,
+        inner: Level2,
+    };
+
+    var buf: [100]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    const value = Level1{
+        .slot = 1,
+        .inner = .{
+            .flag = true,
+            .inner = .{
+                .x = 0x12345678,
+                .inner = .{
+                    .a = 0xabcd,
+                    .b = false,
+                },
+            },
+            .count = 0x7f,
+        },
+    };
+
+    try ssz.serialize(&writer, value);
+
+    try testing.expectEqualSlices(
+        u8,
+        &.{
+            // slot: u64 = 1
+            0x01, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+
+            // flag: true
+            0x01,
+
+            // x: u32 = 0x12345678
+            0x78, 0x56, 0x34,
+            0x12,
+
+            // a: u16 = 0xabcd
+            0xcd, 0xab,
+
+            // b: false
+            0x00,
+
+            // count: u8
+            0x7f,
         },
         writer.buffered(),
     );

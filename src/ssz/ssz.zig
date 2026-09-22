@@ -15,11 +15,31 @@ pub fn serialize(writer: *std.Io.Writer, value: anytype) !void {
     const T = @TypeOf(value);
 
     switch (@typeInfo(T)) {
-        .int => {
-            @compileError("not implemented RLP int type: " ++ @typeName(T));
+        .int => |info| {
+            if (info.signedness == std.builtin.Signedness.signed) {
+                @compileError("not implemented RLP signed int type: " ++ @typeName(T));
+            }
+
+            switch (info.bits) {
+                8, 16, 32, 64, 128, 256 => {
+                    var buf: [info.bits / 8]u8 = undefined;
+                    std.mem.writeInt(T, &buf, value, .little);
+
+                    try writer.writeAll(&buf);
+                },
+                else => {
+                    @compileError("not implemented RLP signed int type: " ++ @typeName(T));
+                },
+            }
         },
         .array => {
-            @compileError("not implemented RLP type: " ++ @typeName(T));
+            for (value) |item| {
+                // calling the serialize to recursively
+                try serialize(writer, item);
+            }
+        },
+        .bool => {
+            try writer.writeByte(if (value) 0x01 else 0x00);
         },
         .@"struct" => |info| {
             inline for (info.fields) |field| {
