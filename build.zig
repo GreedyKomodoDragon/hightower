@@ -143,13 +143,23 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    const ssz_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/ssz/tests.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
     const run_tests = b.addRunArtifact(rlp_tests);
+    const run_tests_ssz = b.addRunArtifact(ssz_tests);
 
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_tests.step);
+    test_step.dependOn(&run_tests_ssz.step);
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
