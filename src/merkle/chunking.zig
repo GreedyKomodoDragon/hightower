@@ -58,28 +58,18 @@ pub fn Chunk(allocator: std.mem.Allocator, value: anytype) ![][32]u8 {
                 @compileError("not implemented merkleize signed int type: " ++ @typeName(T));
             }
 
-            switch (info.bits) {
-                8, 16, 32, 64, 128, 256 => {
-                    // fill the array with zeros
-                    var chunk: [32]u8 = [_]u8{0} ** 32;
+            var currentChunk = [_]u8{0} ** 32;
+            const result = try allocator.alloc([32]u8, 1);
 
-                    const byte_len = info.bits / 8;
-                    std.mem.writeInt(
-                        T,
-                        chunk[0..byte_len],
-                        value,
-                        .little,
-                    );
+            writeIntToChunk(
+                T,
+                &currentChunk,
+                0,
+                value,
+            );
 
-                    const result = try allocator.alloc([32]u8, 1);
-                    result[0] = chunk;
-
-                    return result;
-                },
-                else => {
-                    @compileError("not implemented RLP signed int type: " ++ @typeName(T));
-                },
-            }
+            result[0] = currentChunk;
+            return result;
         },
         .bool => {
             // fill the array with zeros
@@ -91,19 +81,51 @@ pub fn Chunk(allocator: std.mem.Allocator, value: anytype) ![][32]u8 {
 
             return result;
         },
-        .array => {
-            // for (value) |item| {
-            //     // calling the serialize to recursively
-            //     // try serialize(writer, item);
-            // }
-        },
-        // .@"struct" => |info| {
-        // inline for (info.fields) |field| {
-        //     // const field_value = @field(value, field.name);
+        .array => |info| {
+            const Item = info.child;
 
-        //     // try serialize(writer, field_value);
-        // }
-        // },
+            // chunk count
+            const total_bytes: usize = info.len * @sizeOf(Item);
+            const chunk_count: usize = (total_bytes + 31) / 32;
+
+            var offset: u64 = 0;
+            var chunkNum: u64 = 0;
+
+            var currentChunk = [_]u8{0} ** 32;
+            const result = try allocator.alloc([32]u8, chunk_count);
+            errdefer allocator.free(result);
+
+            switch (@typeInfo(Item)) {
+                .int => {
+                    for (value) |item| {
+                        writeIntToChunk(
+                            Item,
+                            &currentChunk,
+                            offset,
+                            item,
+                        );
+
+                        offset += @sizeOf(Item);
+                        if (offset >= 32) {
+                            result[chunkNum] = currentChunk;
+                            chunkNum += 1;
+
+                            currentChunk = [_]u8{0} ** 32;
+                            offset = 0;
+                        }
+                    }
+
+                    // any unwritten chunks
+                    if (offset > 0) {
+                        result[chunkNum] = currentChunk;
+                    }
+
+                    return result;
+                },
+
+                else => {},
+            }
+        },
 
         else => {
             @compileError("unsupported RLP type: " ++ @typeName(T));
@@ -111,4 +133,25 @@ pub fn Chunk(allocator: std.mem.Allocator, value: anytype) ![][32]u8 {
     }
 
     return;
+}
+
+fn writeIntToChunk(
+    comptime T: type,
+    chunk: *[32]u8,
+    offset: usize,
+    value: T,
+) void {
+    var int_bytes: [@sizeOf(T)]u8 = undefined;
+
+    std.mem.writeInt(
+        T,
+        &int_bytes,
+        value,
+        .little,
+    );
+
+    @memcpy(
+        chunk[offset .. offset + @sizeOf(T)],
+        &int_bytes,
+    );
 }

@@ -88,3 +88,89 @@ test "MerkleizeChunks false produces zero chunk" {
         &chunks[0],
     );
 }
+
+test "Chunk packs short u8 array into one chunk" {
+    const allocator = testing.allocator;
+
+    const value = [_]u8{
+        13,
+        45,
+        67,
+    };
+
+    const chunks = try merkle.Chunk(allocator, value);
+    defer allocator.free(chunks);
+
+    try testing.expectEqual(
+        @as(usize, 1),
+        chunks.len,
+    );
+
+    var expected = [_]u8{0} ** 32;
+    expected[0] = 13;
+    expected[1] = 45;
+    expected[2] = 67;
+
+    try testing.expectEqualSlices(
+        u8,
+        &expected,
+        &chunks[0],
+    );
+}
+
+test "Chunk packs exactly 32 u8 values into one chunk" {
+    const allocator = testing.allocator;
+
+    var value: [32]u8 = undefined;
+
+    for (&value, 0..) |*item, i| {
+        item.* = @intCast(i);
+    }
+
+    const chunks = try merkle.Chunk(allocator, value);
+    defer allocator.free(chunks);
+
+    try testing.expectEqual(
+        @as(usize, 1),
+        chunks.len,
+    );
+
+    try testing.expectEqualSlices(
+        u8,
+        &value,
+        &chunks[0],
+    );
+}
+
+test "Chunk splits 33 u8 values across two chunks" {
+    const allocator = testing.allocator;
+
+    var value: [33]u8 = undefined;
+
+    for (&value, 0..) |*item, i| {
+        item.* = @intCast(i + 1);
+    }
+
+    const chunks = try merkle.Chunk(allocator, value);
+    defer allocator.free(chunks);
+
+    try testing.expectEqual(
+        @as(usize, 2),
+        chunks.len,
+    );
+
+    try testing.expectEqualSlices(
+        u8,
+        value[0..32],
+        &chunks[0],
+    );
+
+    var expected_second = [_]u8{0} ** 32;
+    expected_second[0] = 33;
+
+    try testing.expectEqualSlices(
+        u8,
+        &expected_second,
+        &chunks[1],
+    );
+}
