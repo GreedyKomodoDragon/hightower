@@ -85,42 +85,12 @@ pub fn GetChunks(allocator: std.mem.Allocator, value: anytype) ![][32]u8 {
             const Item = info.child;
 
             switch (@typeInfo(Item)) {
-                .int => {
-                    // chunk count
-                    const total_bytes: usize = info.len * @sizeOf(Item);
-                    const chunk_count: usize = (total_bytes + 31) / 32;
-
-                    var offset: u64 = 0;
-                    var chunkNum: u64 = 0;
-
-                    var currentChunk = [_]u8{0} ** 32;
-                    const result = try allocator.alloc([32]u8, chunk_count);
-                    errdefer allocator.free(result);
-
-                    for (value) |item| {
-                        writeIntToChunk(
-                            Item,
-                            &currentChunk,
-                            offset,
-                            item,
-                        );
-
-                        offset += @sizeOf(Item);
-                        if (offset >= 32) {
-                            result[chunkNum] = currentChunk;
-                            chunkNum += 1;
-
-                            currentChunk = [_]u8{0} ** 32;
-                            offset = 0;
-                        }
-                    }
-
-                    // any unwritten chunks
-                    if (offset > 0) {
-                        result[chunkNum] = currentChunk;
-                    }
-
-                    return result;
+                .int, .bool => {
+                    return packBasicArray(
+                        Item,
+                        allocator,
+                        value,
+                    );
                 },
                 .@"struct" => {
                     const result = try allocator.alloc([32]u8, info.len);
@@ -266,4 +236,61 @@ pub fn Merkleize(
     }
 
     return level[0];
+}
+
+fn packBasicArray(
+    comptime Item: type,
+    allocator: std.mem.Allocator,
+    value: anytype,
+) ![][32]u8 {
+    const item_size: usize = switch (@typeInfo(Item)) {
+        .int => @sizeOf(Item),
+        .bool => 1,
+        else => @compileError("not a basic SSZ type"),
+    };
+
+    const total_bytes = value.len * item_size;
+    const chunk_count = (total_bytes + 31) / 32;
+
+    const result = try allocator.alloc([32]u8, chunk_count);
+    errdefer allocator.free(result);
+
+    var current_chunk = [_]u8{0} ** 32;
+    var offset: usize = 0;
+    var chunk_num: usize = 0;
+
+    for (value) |item| {
+        switch (@typeInfo(Item)) {
+            .int => {
+                writeIntToChunk(
+                    Item,
+                    &current_chunk,
+                    offset,
+                    item,
+                );
+            },
+
+            .bool => {
+                current_chunk[offset] = if (item) 1 else 0;
+            },
+
+            else => unreachable,
+        }
+
+        offset += item_size;
+
+        if (offset == 32) {
+            result[chunk_num] = current_chunk;
+            chunk_num += 1;
+
+            current_chunk = [_]u8{0} ** 32;
+            offset = 0;
+        }
+    }
+
+    if (offset > 0) {
+        result[chunk_num] = current_chunk;
+    }
+
+    return result;
 }
