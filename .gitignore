@@ -13,6 +13,9 @@ zig-out/
 *.sublime-workspace
 .DS_Store
 
+# SSZ test vectors (fetched via `just ssz-vectors`)
+testdata/
+*.tar.gz
 # Debug / profiling output
 *.log
 callgrind.out.*

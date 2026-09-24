@@ -49,7 +49,7 @@
 
 const std = @import("std");
 
-pub fn Chunk(allocator: std.mem.Allocator, value: anytype) ![][32]u8 {
+pub fn GetChunks(allocator: std.mem.Allocator, value: anytype) ![][32]u8 {
     const T = @TypeOf(value);
 
     switch (@typeInfo(T)) {
@@ -84,19 +84,19 @@ pub fn Chunk(allocator: std.mem.Allocator, value: anytype) ![][32]u8 {
         .array => |info| {
             const Item = info.child;
 
-            // chunk count
-            const total_bytes: usize = info.len * @sizeOf(Item);
-            const chunk_count: usize = (total_bytes + 31) / 32;
-
-            var offset: u64 = 0;
-            var chunkNum: u64 = 0;
-
-            var currentChunk = [_]u8{0} ** 32;
-            const result = try allocator.alloc([32]u8, chunk_count);
-            errdefer allocator.free(result);
-
             switch (@typeInfo(Item)) {
                 .int => {
+                    // chunk count
+                    const total_bytes: usize = info.len * @sizeOf(Item);
+                    const chunk_count: usize = (total_bytes + 31) / 32;
+
+                    var offset: u64 = 0;
+                    var chunkNum: u64 = 0;
+
+                    var currentChunk = [_]u8{0} ** 32;
+                    const result = try allocator.alloc([32]u8, chunk_count);
+                    errdefer allocator.free(result);
+
                     for (value) |item| {
                         writeIntToChunk(
                             Item,
@@ -122,17 +122,47 @@ pub fn Chunk(allocator: std.mem.Allocator, value: anytype) ![][32]u8 {
 
                     return result;
                 },
+                .@"struct" => {
+                    const result = try allocator.alloc([32]u8, info.len);
+                    errdefer allocator.free(result);
 
-                else => {},
+                    for (value, 0..) |item, i| {
+                        result[i] = try HashTreeRoot(
+                            allocator,
+                            item,
+                        );
+                    }
+
+                    return result;
+                },
+                else => {
+                    @compileError(
+                        "unsupported SSZ array item type: " ++ @typeName(Item),
+                    );
+                },
             }
         },
+        .@"struct" => |info| {
+            const result = try allocator.alloc([32]u8, info.fields.len);
+            errdefer allocator.free(result);
 
+            inline for (info.fields, 0..) |field, i| {
+                const field_value = @field(value, field.name);
+
+                result[i] = try HashTreeRoot(
+                    allocator,
+                    field_value,
+                );
+            }
+
+            return result;
+        },
         else => {
             @compileError("unsupported RLP type: " ++ @typeName(T));
         },
     }
 
-    return;
+    @compileError("unsupported RLP type");
 }
 
 fn writeIntToChunk(
@@ -154,4 +184,86 @@ fn writeIntToChunk(
         chunk[offset .. offset + @sizeOf(T)],
         &int_bytes,
     );
+}
+
+// HashTreeRoot will be used in the following:
+//
+// beacon code
+//     uses HashTreeRoot(...)
+
+// SSZ code
+//     HashTreeRoot(...)
+//         calls GetChunks(...)
+//         calls Merkleize(...)
+pub fn HashTreeRoot(
+    allocator: std.mem.Allocator,
+    value: anytype,
+) ![32]u8 {
+    // get all the chunks for a specifc value
+    const chunks = try GetChunks(allocator, value);
+    defer allocator.free(chunks);
+
+    // then do the pairwise SHA-256 reduction
+    return Merkleize(allocator, chunks);
+}
+
+// Merkleize will do something like this:
+//
+//      ROOT
+//     /    \
+//   H0      H1
+//  / \      / \
+// A   B    C   D
+pub fn Merkleize(
+    allocator: std.mem.Allocator,
+    chunks: []const [32]u8,
+) ![32]u8 {
+    if (chunks.len == 0) {
+        return [_]u8{0} ** 32;
+    }
+
+    if (chunks.len == 1) {
+        return chunks[0];
+    }
+
+    // take a positive integer and round it up to the next power of two
+    const leaf_count = std.math.ceilPowerOfTwo(usize, chunks.len) catch unreachable;
+
+    var level = try allocator.alloc([32]u8, leaf_count);
+    defer allocator.free(level);
+
+    @memset(level, [_]u8{0} ** 32);
+
+    for (chunks, 0..) |chunk, i| {
+        level[i] = chunk;
+    }
+
+    var current_len = leaf_count;
+
+    while (current_len > 1) {
+        var i: usize = 0;
+        var parent: usize = 0;
+
+        while (i < current_len) : ({
+            i += 2;
+            parent += 1;
+        }) {
+            var input: [64]u8 = undefined;
+
+            @memcpy(input[0..32], &level[i]);
+            @memcpy(input[32..64], &level[i + 1]);
+
+            // block is taking two 32-byte child nodes and hashing them into one 32-byte parent node
+            // done compress many leaves into one cryptographic commitment
+            std.crypto.hash.sha2.Sha256.hash(
+                &input,
+                &level[parent],
+                .{},
+            );
+        }
+
+        current_len /= 2;
+    }
+
+    return level[0];
 }
