@@ -143,11 +143,47 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    // Shared library modules. Test roots import these by name
+    // (@import("ssz") etc.) instead of relative paths, so files can
+    // live in different directories. Relative imports escaping the
+    // test root's directory fail with "import of file outside
+    // module path", and Filenames are case-sensitive on Linux CI.
+    const types_mod = b.createModule(.{
+        .root_source_file = b.path("src/types/type.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const bitlist_mod = b.createModule(.{
+        .root_source_file = b.path("src/merkle/bitlist.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const ssz_mod = b.createModule(.{
+        .root_source_file = b.path("src/ssz/ssz.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "types", .module = types_mod },
+            .{ .name = "bitlist", .module = bitlist_mod },
+        },
+    });
+    const merkle_mod = b.createModule(.{
+        .root_source_file = b.path("src/merkle/chunking.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "bitlist", .module = bitlist_mod },
+        },
+    });
+
     const ssz_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/ssz/tests.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "ssz", .module = ssz_mod },
+            },
         }),
     });
 
@@ -156,6 +192,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/merkle/tests.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "bitlist", .module = bitlist_mod },
+            },
         }),
     });
 
@@ -176,28 +215,6 @@ pub fn build(b: *std.Build) void {
     // Official ssz-specs vectors (src/ssz/vectors/): 117 tests, many for
     // unimplemented types, so they live on their own step and stay out of
     // the default `test` run until they pass.
-
-    const types_mod = b.createModule(.{
-        .root_source_file = b.path("src/types/type.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const ssz_mod = b.createModule(.{
-        .root_source_file = b.path("src/ssz/ssz.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "types", .module = types_mod },
-        },
-    });
-
-    const merkle_mod = b.createModule(.{
-        .root_source_file = b.path("src/merkle/chunking.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
     const vectors_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/ssz/vectors/tests.zig"),
@@ -207,6 +224,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "ssz", .module = ssz_mod },
                 .{ .name = "merkle", .module = merkle_mod },
                 .{ .name = "types", .module = types_mod },
+                .{ .name = "bitlist", .module = bitlist_mod },
             },
         }),
     });

@@ -11,7 +11,7 @@
 
 const std = @import("std");
 const types = @import("types");
-const bitList = @import("bitlist.zig");
+const bitList = @import("bitlist");
 
 pub fn serialize(writer: *std.Io.Writer, value: anytype) !void {
     const T = @TypeOf(value);

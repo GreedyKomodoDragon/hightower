@@ -48,7 +48,7 @@
 //  type and reducing it to a single 32-byte Merkle root.
 
 const std = @import("std");
-const bitList = @import("bitlist.zig");
+const bitList = @import("bitlist");
 
 pub fn GetChunks(allocator: std.mem.Allocator, value: anytype) ![][32]u8 {
     const T = @TypeOf(value);

@@ -1,5 +1,5 @@
 const std = @import("std");
-const ssz = @import("ssz.zig");
+const ssz = @import("ssz");
 const testing = std.testing;
 
 test "SSZ encodes fixed-size container" {
