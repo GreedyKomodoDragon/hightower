@@ -41,16 +41,11 @@ zig build
 zig build run
 zig build run -- arg1 arg2
 
-# run all wired-in tests (rlp + ssz + lib + exe)
+# run all wired-in tests
 zig build test
 
 # run with test fuzzer
 zig build test -- --fuzz
-
-# merkle tests are not yet wired into build.zig — run directly:
-zig test src/merkle/tests.zig
-zig test src/rlp/tests.zig
-zig test src/ssz/tests.zig
 ```
 
 The compiled binary lands in `zig-out/bin/hightower`.
