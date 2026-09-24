@@ -173,6 +173,50 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
+    // Official ssz-specs vectors (src/ssz/vectors/): 117 tests, many for
+    // unimplemented types, so they live on their own step and stay out of
+    // the default `test` run until they pass.
+
+    const types_mod = b.createModule(.{
+        .root_source_file = b.path("src/types/type.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const ssz_mod = b.createModule(.{
+        .root_source_file = b.path("src/ssz/ssz.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "types", .module = types_mod },
+        },
+    });
+
+    const merkle_mod = b.createModule(.{
+        .root_source_file = b.path("src/merkle/chunking.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const vectors_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/ssz/vectors/tests.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "ssz", .module = ssz_mod },
+                .{ .name = "merkle", .module = merkle_mod },
+                .{ .name = "types", .module = types_mod },
+            },
+        }),
+    });
+    const run_vectors_tests = b.addRunArtifact(vectors_tests);
+    if (b.args) |args| {
+        run_vectors_tests.addArgs(args);
+    }
+    const vectors_step = b.step("test-vectors", "Run official SSZ test vectors");
+    vectors_step.dependOn(&run_vectors_tests.step);
+
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
     // The Zig build system is entirely implemented in userland, which means

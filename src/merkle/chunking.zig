@@ -48,6 +48,7 @@
 //  type and reducing it to a single 32-byte Merkle root.
 
 const std = @import("std");
+const bitList = @import("bitlist.zig");
 
 pub fn GetChunks(allocator: std.mem.Allocator, value: anytype) ![][32]u8 {
     const T = @TypeOf(value);
@@ -113,6 +114,20 @@ pub fn GetChunks(allocator: std.mem.Allocator, value: anytype) ![][32]u8 {
             }
         },
         .@"struct" => |info| {
+            if (@hasDecl(T, "ssz_kind")) {
+                switch (T.ssz_kind) {
+                    .bitlist => {
+                        return bitList.writeBitListToChunk(
+                            allocator,
+                            value,
+                        );
+                    },
+                    else => {
+                        @compileError("unsupported RLP type: " ++ @typeName(T));
+                    },
+                }
+            }
+
             const result = try allocator.alloc([32]u8, info.fields.len);
             errdefer allocator.free(result);
 
@@ -169,6 +184,32 @@ pub fn HashTreeRoot(
     allocator: std.mem.Allocator,
     value: anytype,
 ) ![32]u8 {
+    const T = @TypeOf(value);
+
+    if (@typeInfo(T) == .@"struct" and @hasDecl(T, "ssz_kind")) {
+        switch (T.ssz_kind) {
+            .bitlist => {
+                const chunks = try GetChunks(
+                    allocator,
+                    value,
+                );
+                defer allocator.free(chunks);
+
+                const content_root = try Merkleize(
+                    allocator,
+                    chunks,
+                );
+
+                return bitList.mixInLength(
+                    content_root,
+                    value.data.len,
+                );
+            },
+
+            else => {},
+        }
+    }
+
     // get all the chunks for a specifc value
     const chunks = try GetChunks(allocator, value);
     defer allocator.free(chunks);
@@ -269,7 +310,6 @@ fn packBasicArray(
                     item,
                 );
             },
-
             .bool => {
                 current_chunk[offset] = if (item) 1 else 0;
             },

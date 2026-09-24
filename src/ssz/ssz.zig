@@ -10,6 +10,8 @@
 // uint256
 
 const std = @import("std");
+const types = @import("types");
+const bitList = @import("bitlist.zig");
 
 pub fn serialize(writer: *std.Io.Writer, value: anytype) !void {
     const T = @TypeOf(value);
@@ -42,13 +44,27 @@ pub fn serialize(writer: *std.Io.Writer, value: anytype) !void {
             try writer.writeByte(if (value) 0x01 else 0x00);
         },
         .@"struct" => |info| {
+            if (@hasDecl(T, "ssz_kind")) {
+                switch (T.ssz_kind) {
+                    .bitlist => {
+                        return bitList.serializeBitList(
+                            T,
+                            writer,
+                            value,
+                        );
+                    },
+                    else => {
+                        @compileError("unsupported RLP type: " ++ @typeName(T));
+                    },
+                }
+            }
+
             inline for (info.fields) |field| {
                 const field_value = @field(value, field.name);
 
                 try serialize(writer, field_value);
             }
         },
-
         else => {
             @compileError("unsupported RLP type: " ++ @typeName(T));
         },

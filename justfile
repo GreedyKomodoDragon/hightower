@@ -26,6 +26,26 @@ test:
 fuzz:
     zig build test -- --fuzz
 
+# run official SSZ test vectors (expects failures for unimplemented types)
+test-vectors:
+    zig build test-vectors --summary all
+
+# run one vector test by name substring, e.g. just test-vector bitlist_at_limit
+test-vector NAME:
+    #!/usr/bin/env bash
+    out=$(zig build test-vectors 2>&1 || true)
+    echo "$out" | grep -E "{{NAME}}" | head -n 10
+    if echo "$out" | grep -qE "error: '[^']*{{NAME}}[^']*' failed"; then \
+        echo "RESULT: vectors.{{NAME}} FAILED"; \
+    else \
+        echo "RESULT: vectors.{{NAME}} PASSED (no failure reported)"; \
+    fi
+
+# regenerate src/ssz/vectors/*.zig from downloaded fixtures
+gen-vectors:
+    python3 scripts/gen_ssz_vectors.py
+    zig fmt src/ssz/vectors/ >/dev/null
+
 # format source
 fmt:
     zig fmt build.zig build.zig.zon src
