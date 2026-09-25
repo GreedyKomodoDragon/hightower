@@ -1,9 +1,8 @@
 // tests/fillers/ssz/test_merkleization_boundaries.py::test_bitlist_filled_to_chunk_boundary_limit[ssz_test]
 // typeName: BoundaryBitList256
-// value: {"data": [true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, … (truncated)
+// value: {"data": [true × 256]}
 // serialized: 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff01
 // root: 0xbc16fae79b58a2e3dac0429d25b79cada399106276e08c5d3cfc3726db02b8ba
-// TODO: BoundaryBitList256 is not implemented in src/ssz/ssz.zig yet.
 
 const std = @import("std");
 const testing = std.testing;
@@ -22,7 +21,11 @@ test "vectors.test_bitlist_filled_to_chunk_boundary_limit" {
         .data = &bits,
     };
 
-    var buf: [33]u8 = undefined;
+    // ----------------------------
+    // serialization
+    // ----------------------------
+
+    var buf: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
 
     try ssz.serialize(
@@ -30,21 +33,17 @@ test "vectors.test_bitlist_filled_to_chunk_boundary_limit" {
         value,
     );
 
+    const expected_serialized = [_]u8{0xff} ** 32 ++ [_]u8{0x01};
+
     try testing.expectEqualSlices(
         u8,
-        &.{
-            0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff,
-            0x01,
-        },
+        &expected_serialized,
         writer.buffered(),
     );
+
+    // ----------------------------
+    // hash_tree_root
+    // ----------------------------
 
     const root = try merkle.HashTreeRoot(
         allocator,

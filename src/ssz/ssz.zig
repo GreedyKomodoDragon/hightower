@@ -111,6 +111,13 @@ pub fn deserialize(
             }
         },
         .@"struct" => |info| {
+            // Custom SSZ kinds (bitlist, etc.) are not plain structs.
+            // Fail at runtime so one unimplemented type does not stop
+            // the whole test binary from compiling.
+            if (@hasDecl(T, "ssz_kind")) {
+                return error.SszNotImplemented;
+            }
+
             var result: T = undefined;
 
             inline for (info.fields) |field| {
@@ -119,8 +126,6 @@ pub fn deserialize(
 
             return result;
         },
-        else => @compileError(
-            "unsupported SSZ type: " ++ @typeName(T),
-        ),
+        else => return error.SszNotImplemented,
     };
 }
