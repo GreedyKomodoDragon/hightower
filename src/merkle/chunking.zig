@@ -122,6 +122,13 @@ pub fn GetChunks(allocator: std.mem.Allocator, value: anytype) ![][32]u8 {
                             value,
                         );
                     },
+                    .bitvector => {
+                        return bitList.writeBitVectorToChunk(
+                            T,
+                            allocator,
+                            value,
+                        );
+                    },
                     else => {
                         @compileError("unsupported RLP type: " ++ @typeName(T));
                     },

@@ -12,6 +12,7 @@
 const std = @import("std");
 const types = @import("types");
 const bitList = @import("bitlist.zig");
+const bitvector = @import("bitvector.zig");
 
 pub fn serialize(writer: *std.Io.Writer, value: anytype) !void {
     const T = @TypeOf(value);
@@ -48,6 +49,13 @@ pub fn serialize(writer: *std.Io.Writer, value: anytype) !void {
                 switch (T.ssz_kind) {
                     .bitlist => {
                         return bitList.serializeBitList(
+                            T,
+                            writer,
+                            value,
+                        );
+                    },
+                    .bitvector => {
+                        return bitvector.serializeBitVector(
                             T,
                             writer,
                             value,

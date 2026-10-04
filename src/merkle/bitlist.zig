@@ -39,6 +39,37 @@ pub fn writeBitListToChunk(
     return result;
 }
 
+pub fn writeBitVectorToChunk(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    value: T,
+) ![][32]u8 {
+    const bit_count = T.bit_length;
+
+    const packed_bytes = (bit_count + 7) / 8;
+    const chunk_count = (packed_bytes + 31) / 32;
+
+    const result = try allocator.alloc([32]u8, chunk_count);
+    errdefer allocator.free(result);
+
+    @memset(result, [_]u8{0} ** 32);
+
+    for (value.data, 0..) |bit, i| {
+        if (!bit) continue;
+
+        const byte_index = i / 8;
+        const bit_index: u3 = @intCast(i % 8);
+
+        const chunk_index = byte_index / 32;
+        const byte_offset = byte_index % 32;
+
+        result[chunk_index][byte_offset] |=
+            (@as(u8, 1) << bit_index);
+    }
+
+    return result;
+}
+
 pub fn mixInLength(
     root: [32]u8,
     length: usize,
