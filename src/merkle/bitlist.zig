@@ -101,3 +101,25 @@ pub fn mixInLength(
 
     return result;
 }
+
+pub fn writeByteListToChunk(
+    allocator: std.mem.Allocator,
+    value: anytype,
+) ![][32]u8 {
+    const byte_count = value.data.len;
+    const chunk_count = (byte_count + 31) / 32;
+
+    const result = try allocator.alloc([32]u8, chunk_count);
+    errdefer allocator.free(result);
+
+    @memset(result, [_]u8{0} ** 32);
+
+    for (value.data, 0..) |byte, i| {
+        const chunk_index = i / 32;
+        const byte_offset = i % 32;
+
+        result[chunk_index][byte_offset] = byte;
+    }
+
+    return result;
+}

@@ -129,8 +129,14 @@ pub fn GetChunks(allocator: std.mem.Allocator, value: anytype) ![][32]u8 {
                             value,
                         );
                     },
+                    .bytelist => {
+                        return bitList.writeByteListToChunk(
+                            allocator,
+                            value,
+                        );
+                    },
                     else => {
-                        @compileError("unsupported RLP type: " ++ @typeName(T));
+                        return error.SszNotImplemented;
                     },
                 }
             }
@@ -205,6 +211,25 @@ pub fn HashTreeRoot(
                 const content_root = try Merkleize(
                     allocator,
                     chunks,
+                    limitChunks(T),
+                );
+
+                return bitList.mixInLength(
+                    content_root,
+                    value.data.len,
+                );
+            },
+            .bytelist => {
+                const chunks = try GetChunks(
+                    allocator,
+                    value,
+                );
+                defer allocator.free(chunks);
+
+                const content_root = try Merkleize(
+                    allocator,
+                    chunks,
+                    limitChunks(T),
                 );
 
                 return bitList.mixInLength(
@@ -222,7 +247,7 @@ pub fn HashTreeRoot(
     defer allocator.free(chunks);
 
     // then do the pairwise SHA-256 reduction
-    return Merkleize(allocator, chunks);
+    return Merkleize(allocator, chunks, null);
 }
 
 // Merkleize will do something like this:
@@ -235,19 +260,27 @@ pub fn HashTreeRoot(
 pub fn Merkleize(
     allocator: std.mem.Allocator,
     chunks: []const [32]u8,
+    limit: ?usize,
 ) ![32]u8 {
-    if (chunks.len == 0) {
+    const count = chunks.len;
+
+    // A capacity sets the tree width instead, rounded up to a power of two.
+    const width = if (limit) |l| blk: {
+        if (l < count) return error.MerkleizeLimit;
+        break :blk nextPow2(l);
+    } else nextPow2(count);
+
+    // No data under a capacity roots to that width's zero tree.
+    if (count == 0) {
+        if (limit != null) return zeroTreeRoot(width);
         return [_]u8{0} ** 32;
     }
 
-    if (chunks.len == 1) {
+    if (width == 1) {
         return chunks[0];
     }
 
-    // take a positive integer and round it up to the next power of two
-    const leaf_count = std.math.ceilPowerOfTwo(usize, chunks.len) catch unreachable;
-
-    var level = try allocator.alloc([32]u8, leaf_count);
+    var level = try allocator.alloc([32]u8, width);
     defer allocator.free(level);
 
     @memset(level, [_]u8{0} ** 32);
@@ -256,7 +289,7 @@ pub fn Merkleize(
         level[i] = chunk;
     }
 
-    var current_len = leaf_count;
+    var current_len = width;
 
     while (current_len > 1) {
         var i: usize = 0;
@@ -284,6 +317,35 @@ pub fn Merkleize(
     }
 
     return level[0];
+}
+
+/// Smallest power of two greater than or equal to x. Returns 1 for 0.
+fn nextPow2(x: usize) usize {
+    if (x <= 1) return 1;
+    return std.math.ceilPowerOfTwo(usize, x) catch unreachable;
+}
+
+/// Root of the all-zero perfect binary tree spanning `width` leaves.
+/// `width` must be a power of two.
+fn zeroTreeRoot(width: usize) [32]u8 {
+    var node = [_]u8{0} ** 32;
+    var n = width;
+    while (n > 1) : (n /= 2) {
+        var input: [64]u8 = undefined;
+        @memcpy(input[0..32], &node);
+        @memcpy(input[32..64], &node);
+        std.crypto.hash.sha2.Sha256.hash(&input, &node, .{});
+    }
+    return node;
+}
+
+/// Chunk capacity of a variable-size SSZ type from its declared limit,
+/// or null when the type packs exactly what it holds.
+fn limitChunks(comptime T: type) ?usize {
+    if (@hasDecl(T, "max_bytes")) return (T.max_bytes + 31) / 32;
+    if (@hasDecl(T, "max_bits")) return (T.max_bits + 255) / 256;
+    if (@hasDecl(T, "bit_length")) return (T.bit_length + 255) / 256;
+    return null;
 }
 
 fn packBasicArray(

@@ -25,3 +25,12 @@ pub fn BitVector(comptime length: usize) type {
         data: [length]bool,
     };
 }
+
+pub fn ByteList(comptime limit: usize) type {
+    return struct {
+        pub const ssz_kind = .bytelist;
+        pub const max_bytes = limit;
+
+        data: []const u8,
+    };
+}

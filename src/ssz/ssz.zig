@@ -13,6 +13,7 @@ const std = @import("std");
 const types = @import("types");
 const bitList = @import("bitlist.zig");
 const bitvector = @import("bitvector.zig");
+const bytelist = @import("bytelist.zig");
 
 pub fn serialize(writer: *std.Io.Writer, value: anytype) !void {
     const T = @TypeOf(value);
@@ -61,8 +62,11 @@ pub fn serialize(writer: *std.Io.Writer, value: anytype) !void {
                             value,
                         );
                     },
+                    .bytelist => {
+                        return bytelist.serializeByteList(T, writer, value);
+                    },
                     else => {
-                        @compileError("unsupported RLP type: " ++ @typeName(T));
+                        return error.SszNotImplemented;
                     },
                 }
             }
