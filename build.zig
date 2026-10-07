@@ -183,6 +183,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "ssz", .module = ssz_mod },
+                .{ .name = "types", .module = types_mod },
             },
         }),
     });

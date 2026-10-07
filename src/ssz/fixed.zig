@@ -80,7 +80,7 @@ pub fn isFixedSize(comptime T: type) bool {
                     .bitlist => return false,
                     .bitvector => return true,
                     .bytelist => return false,
-                    // .bytevector => return true,
+                    .bytevector => return true,
 
                     else => @compileError(
                         "isFixedSize not implemented for SSZ type: " ++

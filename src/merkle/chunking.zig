@@ -135,6 +135,12 @@ pub fn GetChunks(allocator: std.mem.Allocator, value: anytype) ![][32]u8 {
                             value,
                         );
                     },
+                    .bytevector => {
+                        return bitList.writeByteListToChunk(
+                            allocator,
+                            value,
+                        );
+                    },
                     else => {
                         return error.SszNotImplemented;
                     },
