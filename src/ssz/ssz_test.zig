@@ -1139,3 +1139,486 @@ test "SSZ ByteVector embeds fixed-size in container" {
     try testing.expectEqual(original.id, decoded.id);
     try testing.expectEqualSlices(u8, &original.hash.data, &decoded.hash.data);
 }
+
+test "SSZ round trip container with list field" {
+    const types = @import("types");
+    const allocator = testing.allocator;
+
+    const Example = struct {
+        id: u16,
+        vals: types.List(u32, 16),
+    };
+
+    const items = [_]u32{ 1, 2, 3 };
+    const original = Example{
+        .id = 0x1234,
+        .vals = .{ .data = &items },
+    };
+
+    var buf: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try ssz.serialize(&writer, original);
+
+    // id ++ offset(6) ++ payload
+    try testing.expectEqualSlices(
+        u8,
+        &.{
+            0x34, 0x12,
+            0x06, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00,
+            0x02, 0x00, 0x00, 0x00,
+            0x03, 0x00, 0x00, 0x00,
+        },
+        writer.buffered(),
+    );
+
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    const decoded = try ssz.deserializeAlloc(allocator, Example, &reader);
+    defer ssz.freeDecoded(allocator, Example, decoded);
+
+    try testing.expectEqual(original.id, decoded.id);
+    try testing.expectEqualSlices(u32, &items, decoded.vals.data);
+}
+
+test "SSZ round trip container with mixed fixed variable fixed" {
+    const types = @import("types");
+    const allocator = testing.allocator;
+
+    const Example = struct {
+        a: u8,
+        xs: types.List(u16, 8),
+        b: u32,
+    };
+
+    const items = [_]u16{ 0xabcd, 0x1234 };
+    const original = Example{
+        .a = 0x7f,
+        .xs = .{ .data = &items },
+        .b = 0x01020304,
+    };
+
+    var buf: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try ssz.serialize(&writer, original);
+
+    try testing.expectEqualSlices(
+        u8,
+        &.{
+            0x7f,
+            0x09, 0x00, 0x00, 0x00,
+            0x04, 0x03, 0x02, 0x01,
+            0xcd, 0xab,
+            0x34, 0x12,
+        },
+        writer.buffered(),
+    );
+
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    const decoded = try ssz.deserializeAlloc(allocator, Example, &reader);
+    defer ssz.freeDecoded(allocator, Example, decoded);
+
+    try testing.expectEqual(original.a, decoded.a);
+    try testing.expectEqualSlices(u16, &items, decoded.xs.data);
+    try testing.expectEqual(original.b, decoded.b);
+}
+
+test "SSZ round trip nested variable containers" {
+    const types = @import("types");
+    const allocator = testing.allocator;
+
+    const Inner = struct {
+        flag: bool,
+        vals: types.List(u8, 8),
+    };
+    const Outer = struct {
+        tag: u8,
+        inner: Inner,
+        tail: u16,
+    };
+
+    const bytes = [_]u8{ 9, 8, 7 };
+    const original = Outer{
+        .tag = 0xaa,
+        .inner = .{
+            .flag = true,
+            .vals = .{ .data = &bytes },
+        },
+        .tail = 0x1234,
+    };
+
+    var buf: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try ssz.serialize(&writer, original);
+
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    const decoded = try ssz.deserializeAlloc(allocator, Outer, &reader);
+    defer ssz.freeDecoded(allocator, Outer, decoded);
+
+    try testing.expectEqual(original.tag, decoded.tag);
+    try testing.expectEqual(original.inner.flag, decoded.inner.flag);
+    try testing.expectEqualSlices(u8, &bytes, decoded.inner.vals.data);
+    try testing.expectEqual(original.tail, decoded.tail);
+}
+
+test "SSZ round trip fixed array of lists" {
+    const types = @import("types");
+    const allocator = testing.allocator;
+
+    const Example = struct {
+        groups: [2]types.List(u16, 4),
+    };
+
+    const g0 = [_]u16{1};
+    const g1 = [_]u16{ 2, 3 };
+    const original = Example{
+        .groups = .{
+            .{ .data = &g0 },
+            .{ .data = &g1 },
+        },
+    };
+
+    var buf: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try ssz.serialize(&writer, original);
+
+    // container offset(4) ++ [off0, off1] ++ payloads
+    try testing.expectEqualSlices(
+        u8,
+        &.{
+            0x04, 0x00, 0x00, 0x00,
+            0x08, 0x00, 0x00, 0x00,
+            0x0a, 0x00, 0x00, 0x00,
+            0x01, 0x00,
+            0x02, 0x00,
+            0x03, 0x00,
+        },
+        writer.buffered(),
+    );
+
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    const decoded = try ssz.deserializeAlloc(allocator, Example, &reader);
+    defer ssz.freeDecoded(allocator, Example, decoded);
+
+    try testing.expectEqualSlices(u16, &g0, decoded.groups[0].data);
+    try testing.expectEqualSlices(u16, &g1, decoded.groups[1].data);
+}
+
+test "SSZ rejects container with bad first offset" {
+    const types = @import("types");
+    const allocator = testing.allocator;
+
+    const Example = struct {
+        id: u16,
+        vals: types.List(u32, 16),
+    };
+
+    // offset 7 instead of 6
+    const input = [_]u8{
+        0x34, 0x12,
+        0x07, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00,
+    };
+
+    var reader: std.Io.Reader = .fixed(&input);
+    try testing.expectError(
+        error.InvalidOffset,
+        ssz.deserializeAlloc(allocator, Example, &reader),
+    );
+}
+
+test "SSZ rejects container with decreasing offsets" {
+    const types = @import("types");
+    const allocator = testing.allocator;
+
+    const Example = struct {
+        a: types.List(u8, 8),
+        b: types.List(u8, 8),
+    };
+
+    // fixed section 8 bytes; second offset goes backwards
+    const input = [_]u8{
+        0x08, 0x00, 0x00, 0x00,
+        0x05, 0x00, 0x00, 0x00,
+        0xaa, 0xbb,
+    };
+
+    var reader: std.Io.Reader = .fixed(&input);
+    try testing.expectError(
+        error.InvalidOffset,
+        ssz.deserializeAlloc(allocator, Example, &reader),
+    );
+}
+
+test "SSZ rejects container with offset past end" {
+    const types = @import("types");
+    const allocator = testing.allocator;
+
+    const Example = struct {
+        id: u16,
+        vals: types.List(u32, 16),
+    };
+
+    const input = [_]u8{
+        0x34, 0x12,
+        0xff, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00,
+    };
+
+    var reader: std.Io.Reader = .fixed(&input);
+    try testing.expectError(
+        error.InvalidOffset,
+        ssz.deserializeAlloc(allocator, Example, &reader),
+    );
+}
+
+test "SSZ rejects truncated container" {
+    const types = @import("types");
+    const allocator = testing.allocator;
+
+    const Example = struct {
+        id: u16,
+        vals: types.List(u32, 16),
+    };
+
+    const input = [_]u8{ 0x34, 0x12, 0x06 };
+
+    var reader: std.Io.Reader = .fixed(&input);
+    try testing.expectError(
+        error.EndOfStream,
+        ssz.deserializeAlloc(allocator, Example, &reader),
+    );
+}
+
+test "SSZ rejects trailing byte on fixed container" {
+    const allocator = testing.allocator;
+
+    const Example = struct {
+        a: u16,
+        b: u8,
+    };
+
+    const input = [_]u8{ 0x34, 0x12, 0x7f, 0x00 };
+
+    var reader: std.Io.Reader = .fixed(&input);
+    try testing.expectError(
+        error.TrailingBytes,
+        ssz.deserializeAlloc(allocator, Example, &reader),
+    );
+}
+
+test "SSZ plain deserialize refuses variable container" {
+    const types = @import("types");
+
+    const Example = struct {
+        id: u16,
+        vals: types.List(u32, 16),
+    };
+
+    const input = [_]u8{
+        0x34, 0x12,
+        0x06, 0x00, 0x00, 0x00,
+    };
+
+    var reader: std.Io.Reader = .fixed(&input);
+    try testing.expectError(
+        error.NeedsAllocator,
+        ssz.deserialize(Example, &reader),
+    );
+}
+
+test "SSZ round trip bytelist" {
+    const types = @import("types");
+    const allocator = testing.allocator;
+
+    const T = types.ByteList(16);
+    const bytes = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    const original = T{ .data = &bytes };
+
+    var buf: [16]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try ssz.serialize(&writer, original);
+    try testing.expectEqualSlices(u8, &bytes, writer.buffered());
+
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    const decoded = try ssz.deserializeAlloc(allocator, T, &reader);
+    defer ssz.freeDecoded(allocator, T, decoded);
+    try testing.expectEqualSlices(u8, &bytes, decoded.data);
+}
+
+test "SSZ round trip empty bytelist" {
+    const types = @import("types");
+    const allocator = testing.allocator;
+
+    const T = types.ByteList(16);
+    const original = T{ .data = &.{} };
+
+    var buf: [1]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try ssz.serialize(&writer, original);
+    try testing.expectEqual(@as(usize, 0), writer.buffered().len);
+
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    const decoded = try ssz.deserializeAlloc(allocator, T, &reader);
+    defer ssz.freeDecoded(allocator, T, decoded);
+    try testing.expectEqual(@as(usize, 0), decoded.data.len);
+}
+
+test "SSZ rejects bytelist over limit" {
+    const types = @import("types");
+    const allocator = testing.allocator;
+
+    const T = types.ByteList(2);
+    const input = [_]u8{ 0x01, 0x02, 0x03 };
+
+    var reader: std.Io.Reader = .fixed(&input);
+    try testing.expectError(
+        error.ByteListTooLong,
+        ssz.deserializeAlloc(allocator, T, &reader),
+    );
+}
+
+test "SSZ round trip bitlist" {
+    const types = @import("types");
+    const allocator = testing.allocator;
+
+    const T = types.BitList(16);
+    const bits = [_]bool{ true, false, true, true, false };
+    const original = T{ .data = &bits };
+
+    var buf: [8]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try ssz.serialize(&writer, original);
+    try testing.expectEqualSlices(u8, &.{0x2d}, writer.buffered());
+
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    const decoded = try ssz.deserializeAlloc(allocator, T, &reader);
+    defer ssz.freeDecoded(allocator, T, decoded);
+    try testing.expectEqualSlices(bool, &bits, decoded.data);
+}
+
+test "SSZ round trip empty bitlist" {
+    const types = @import("types");
+    const allocator = testing.allocator;
+
+    const T = types.BitList(16);
+    const bits = [_]bool{};
+    const original = T{ .data = &bits };
+
+    var buf: [8]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try ssz.serialize(&writer, original);
+    try testing.expectEqualSlices(u8, &.{0x01}, writer.buffered());
+
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    const decoded = try ssz.deserializeAlloc(allocator, T, &reader);
+    defer ssz.freeDecoded(allocator, T, decoded);
+    try testing.expectEqual(@as(usize, 0), decoded.data.len);
+}
+
+test "SSZ round trip single-bit bitlists" {
+    const types = @import("types");
+    const allocator = testing.allocator;
+
+    const T = types.BitList(16);
+
+    const t = [_]bool{true};
+    var buf: [8]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try ssz.serialize(&writer, T{ .data = &t });
+    try testing.expectEqualSlices(u8, &.{0x03}, writer.buffered());
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    const dt = try ssz.deserializeAlloc(allocator, T, &reader);
+    defer ssz.freeDecoded(allocator, T, dt);
+    try testing.expectEqualSlices(bool, &t, dt.data);
+
+    const f = [_]bool{false};
+    var buf2: [8]u8 = undefined;
+    var writer2: std.Io.Writer = .fixed(&buf2);
+    try ssz.serialize(&writer2, T{ .data = &f });
+    try testing.expectEqualSlices(u8, &.{0x02}, writer2.buffered());
+    var reader2: std.Io.Reader = .fixed(writer2.buffered());
+    const df = try ssz.deserializeAlloc(allocator, T, &reader2);
+    defer ssz.freeDecoded(allocator, T, df);
+    try testing.expectEqualSlices(bool, &f, df.data);
+}
+
+test "SSZ rejects bitlist without delimiter" {
+    const types = @import("types");
+    const allocator = testing.allocator;
+
+    const T = types.BitList(16);
+
+    const zero = [_]u8{0x00};
+    var reader: std.Io.Reader = .fixed(&zero);
+    try testing.expectError(
+        error.NoDelimiterBit,
+        ssz.deserializeAlloc(allocator, T, &reader),
+    );
+
+    const trailing_zero = [_]u8{ 0x01, 0x00 };
+    var reader2: std.Io.Reader = .fixed(&trailing_zero);
+    try testing.expectError(
+        error.NoDelimiterBit,
+        ssz.deserializeAlloc(allocator, T, &reader2),
+    );
+
+    const empty = [_]u8{};
+    var reader3: std.Io.Reader = .fixed(&empty);
+    try testing.expectError(
+        error.EndOfStream,
+        ssz.deserializeAlloc(allocator, T, &reader3),
+    );
+}
+
+test "SSZ rejects bitlist over limit" {
+    const types = @import("types");
+    const allocator = testing.allocator;
+
+    const T = types.BitList(8);
+    const input = [_]u8{ 0x00, 0x10 };
+
+    var reader: std.Io.Reader = .fixed(&input);
+    try testing.expectError(
+        error.BitListTooLong,
+        ssz.deserializeAlloc(allocator, T, &reader),
+    );
+}
+
+test "SSZ plain deserialize refuses bitlist and bytelist" {
+    const types = @import("types");
+
+    const BL = types.BitList(8);
+    const input = [_]u8{0x03};
+    var reader: std.Io.Reader = .fixed(&input);
+    try testing.expectError(
+        error.NeedsAllocator,
+        ssz.deserialize(BL, &reader),
+    );
+
+    const YL = types.ByteList(8);
+    var reader2: std.Io.Reader = .fixed(&input);
+    try testing.expectError(
+        error.NeedsAllocator,
+        ssz.deserialize(YL, &reader2),
+    );
+}
+
+test "SSZ round trip multi-byte bitlist" {
+    const types = @import("types");
+    const allocator = testing.allocator;
+
+    const T = types.BitList(16);
+    const bits = [_]bool{ true, false, true, false, true, false, true, false, true };
+    const original = T{ .data = &bits };
+
+    var buf: [8]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try ssz.serialize(&writer, original);
+    // 9 data bits + delimiter in second byte: 0x55, 0x03
+    try testing.expectEqualSlices(u8, &.{ 0x55, 0x03 }, writer.buffered());
+
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    const decoded = try ssz.deserializeAlloc(allocator, T, &reader);
+    defer ssz.freeDecoded(allocator, T, decoded);
+    try testing.expectEqualSlices(bool, &bits, decoded.data);
+}

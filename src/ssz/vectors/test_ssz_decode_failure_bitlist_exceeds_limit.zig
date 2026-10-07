@@ -10,16 +10,17 @@ const ssz = @import("ssz");
 const types = @import("types");
 
 test "vectors.test_ssz_decode_failure_bitlist_exceeds_limit" {
+    const allocator = testing.allocator;
     const SmokeBitList8 = types.BitList(8);
 
-    // The fixture input decodes to more bits than the limit allows,
-    // so deserialization must fail.
+    // The fixture input decodes to 12 bits, more than the limit
+    // allows, so deserialization must fail.
     const input = [_]u8{ 0x00, 0x10 };
 
     var reader: std.Io.Reader = .fixed(&input);
 
     try testing.expectError(
         error.BitListTooLong,
-        ssz.deserialize(SmokeBitList8, &reader),
+        ssz.deserializeAlloc(allocator, SmokeBitList8, &reader),
     );
 }
