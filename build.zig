@@ -158,6 +158,16 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const descriptor_mod = b.createModule(.{
+        .root_source_file = b.path("src/ssz/type_descriptor.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const ssz_errors_mod = b.createModule(.{
+        .root_source_file = b.path("src/ssz/errors.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const ssz_mod = b.createModule(.{
         .root_source_file = b.path("src/ssz/ssz.zig"),
         .target = target,
@@ -165,6 +175,8 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "types", .module = types_mod },
             .{ .name = "bitlist", .module = bitlist_mod },
+            .{ .name = "type_descriptor", .module = descriptor_mod },
+            .{ .name = "ssz_errors", .module = ssz_errors_mod },
         },
     });
     const merkle_mod = b.createModule(.{
@@ -184,6 +196,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "ssz", .module = ssz_mod },
                 .{ .name = "types", .module = types_mod },
+                .{ .name = "type_descriptor", .module = descriptor_mod },
             },
         }),
     });
