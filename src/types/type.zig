@@ -43,3 +43,13 @@ pub fn ByteList(comptime limit: usize) type {
         data: []const u8,
     };
 }
+
+pub fn List(comptime Child: type, comptime limit: usize) type {
+    return struct {
+        pub const ssz_kind = .list;
+        pub const Element = Child;
+        pub const max_length = limit;
+
+        data: []const Child,
+    };
+}
