@@ -141,6 +141,13 @@ pub fn GetChunks(allocator: std.mem.Allocator, value: anytype) ![][32]u8 {
                             value,
                         );
                     },
+                    .list => {
+                        return writeListToChunks(
+                            T,
+                            allocator,
+                            value.data,
+                        );
+                    },
                     else => {
                         return error.SszNotImplemented;
                     },
@@ -268,6 +275,24 @@ pub fn HashTreeRoot(
                     value.data.len,
                 );
             },
+            .list => {
+                const chunks = try GetChunks(
+                    allocator,
+                    value,
+                );
+                defer allocator.free(chunks);
+
+                const content_root = try Merkleize(
+                    allocator,
+                    chunks,
+                    limitChunks(T),
+                );
+
+                return bitList.mixInLength(
+                    content_root,
+                    value.data.len,
+                );
+            },
 
             else => {},
         }
@@ -376,7 +401,114 @@ fn limitChunks(comptime T: type) ?usize {
     if (@hasDecl(T, "max_bytes")) return (T.max_bytes + 31) / 32;
     if (@hasDecl(T, "max_bits")) return (T.max_bits + 255) / 256;
     if (@hasDecl(T, "bit_length")) return (T.bit_length + 255) / 256;
+    if (@hasDecl(T, "max_length")) return maxChunks(T.Element, T.max_length);
     return null;
+}
+
+/// Worst-case chunk count for `count` items of element type E.
+/// Basic items pack densely; composite items cost one chunk each.
+fn maxChunks(comptime E: type, count: usize) usize {
+    switch (@typeInfo(E)) {
+        .int => return (count * @sizeOf(E) + 31) / 32,
+        .bool => return (count + 31) / 32,
+        .array => |info| {
+            switch (@typeInfo(info.child)) {
+                .int, .bool => return (count * flatByteSize(E) + 31) / 32,
+                else => return count * maxChunks(info.child, info.len),
+            }
+        },
+        else => return count,
+    }
+}
+
+/// Serialized byte size of a fixed-size basic/array element.
+fn flatByteSize(comptime E: type) usize {
+    switch (@typeInfo(E)) {
+        .int => return @sizeOf(E),
+        .bool => return 1,
+        .array => |info| return info.len * flatByteSize(info.child),
+        else => @compileError("not a fixed-size basic SSZ type: " ++ @typeName(E)),
+    }
+}
+
+/// Chunk view of a List payload: basic elements pack densely,
+/// composite elements contribute one hash-tree root each.
+fn writeListToChunks(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    data: []const T.Element,
+) ![][32]u8 {
+    const E = T.Element;
+
+    switch (@typeInfo(E)) {
+        .int, .bool => {
+            return packBasicArray(E, allocator, data);
+        },
+        .array => |info| {
+            switch (@typeInfo(info.child)) {
+                .int, .bool => return packFixedArrays(E, allocator, data),
+                else => {},
+            }
+        },
+        else => {},
+    }
+
+    const result = try allocator.alloc([32]u8, data.len);
+    errdefer allocator.free(result);
+
+    for (data, 0..) |item, i| {
+        result[i] = try HashTreeRoot(allocator, item);
+    }
+
+    return result;
+}
+
+/// Pack a slice of fixed-size array elements (e.g. [32]u8) into chunks.
+fn packFixedArrays(
+    comptime E: type,
+    allocator: std.mem.Allocator,
+    data: []const E,
+) ![][32]u8 {
+    const elem_size = flatByteSize(E);
+    const total = data.len * elem_size;
+    const chunk_count = (total + 31) / 32;
+
+    const flat = try allocator.alloc(u8, total);
+    defer allocator.free(flat);
+
+    var off: usize = 0;
+    for (data) |item| {
+        writeFlat(E, flat[off..], item);
+        off += elem_size;
+    }
+
+    const result = try allocator.alloc([32]u8, chunk_count);
+    errdefer allocator.free(result);
+    @memset(result, [_]u8{0} ** 32);
+
+    for (flat, 0..) |byte, i| {
+        result[i / 32][i % 32] = byte;
+    }
+
+    return result;
+}
+
+fn writeFlat(comptime E: type, out: []u8, item: E) void {
+    switch (@typeInfo(E)) {
+        .int => {
+            std.mem.writeInt(E, out[0..@sizeOf(E)], item, .little);
+        },
+        .bool => {
+            out[0] = if (item) 1 else 0;
+        },
+        .array => |info| {
+            const stride = flatByteSize(info.child);
+            for (item, 0..) |sub, i| {
+                writeFlat(info.child, out[i * stride ..], sub);
+            }
+        },
+        else => @compileError("not a fixed-size basic SSZ type: " ++ @typeName(E)),
+    }
 }
 
 /// One leaf per layout position of a progressive container (EIP-7495).

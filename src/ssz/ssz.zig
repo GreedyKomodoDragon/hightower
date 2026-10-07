@@ -74,6 +74,38 @@ pub fn serialize(writer: *std.Io.Writer, value: anytype) !void {
                         try writer.writeAll(value.data[0..]);
                         return;
                     },
+                    .list => {
+                        if (value.data.len > T.max_length) {
+                            return error.ListTooLong;
+                        }
+
+                        if (fixed.isFixedSize(T.Element)) {
+                            for (value.data) |item| {
+                                try serialize(writer, item);
+                            }
+                            return;
+                        }
+
+                        // Variable-size elements: offset table then payloads.
+                        var variable_offset: usize = value.data.len * 4;
+
+                        for (value.data) |item| {
+                            var offset_bytes: [4]u8 = undefined;
+                            std.mem.writeInt(
+                                u32,
+                                &offset_bytes,
+                                @intCast(variable_offset),
+                                .little,
+                            );
+                            try writer.writeAll(&offset_bytes);
+                            variable_offset += serializedSize(item);
+                        }
+
+                        for (value.data) |item| {
+                            try serialize(writer, item);
+                        }
+                        return;
+                    },
 
                     else => {
                         return error.SszNotImplemented;
@@ -204,6 +236,20 @@ fn serializedSize(value: anytype) usize {
                         return T.byte_length;
                     },
 
+                    .list => {
+                        if (fixed.isFixedSize(T.Element)) {
+                            return value.data.len * fixed.fixedSize(T.Element);
+                        }
+
+                        var size: usize = value.data.len * 4;
+
+                        for (value.data) |item| {
+                            size += serializedSize(item);
+                        }
+
+                        return size;
+                    },
+
                     else => {
                         @compileError(
                             "serializedSize not implemented for: " ++
@@ -305,6 +351,7 @@ pub fn deserialize(
                         if (n != T.byte_length) return error.EndOfStream;
                         return result;
                     },
+                    .list => return error.ListNeedsAllocator,
                     else => return error.SszNotImplemented,
                 }
             }
@@ -319,4 +366,100 @@ pub fn deserialize(
         },
         else => return error.SszNotImplemented,
     };
+}
+
+/// Allocator-aware deserialize for variable-size SSZ types whose
+/// decoded form owns memory (List today; ByteList/BitList later).
+/// Fixed-size types forward to `deserialize` and allocate nothing.
+pub fn deserializeAlloc(
+    allocator: std.mem.Allocator,
+    comptime T: type,
+    reader: *std.Io.Reader,
+) !T {
+    if (@typeInfo(T) == .@"struct" and @hasDecl(T, "ssz_kind")) {
+        switch (T.ssz_kind) {
+            .list => return deserializeList(allocator, T, reader),
+            else => return deserialize(T, reader),
+        }
+    }
+
+    if (@typeInfo(T) == .@"struct" and !fixed.isFixedSize(T)) {
+        return error.VariableContainerNotImplemented;
+    }
+
+    return deserialize(T, reader);
+}
+
+fn deserializeList(
+    allocator: std.mem.Allocator,
+    comptime T: type,
+    reader: *std.Io.Reader,
+) !T {
+    const E = T.Element;
+
+    const bytes = try reader.allocRemaining(allocator, .unlimited);
+    defer allocator.free(bytes);
+
+    if (fixed.isFixedSize(E)) {
+        const elem_size = fixed.fixedSize(E);
+
+        if (elem_size == 0) {
+            if (bytes.len != 0) return error.InvalidLength;
+            return T{ .data = try allocator.alloc(E, 0) };
+        }
+
+        if (bytes.len % elem_size != 0) return error.InvalidLength;
+
+        const count = bytes.len / elem_size;
+        if (count > T.max_length) return error.ListTooLong;
+
+        const data = try allocator.alloc(E, count);
+        errdefer allocator.free(data);
+
+        var sub: std.Io.Reader = .fixed(bytes);
+        for (data) |*item| {
+            item.* = try deserializeAlloc(allocator, E, &sub);
+        }
+
+        return T{ .data = data };
+    }
+
+    // Variable-size elements: leading offset table, then payloads.
+    if (bytes.len == 0) {
+        return T{ .data = try allocator.alloc(E, 0) };
+    }
+    if (bytes.len < 4) return error.InvalidOffset;
+
+    var sub: std.Io.Reader = .fixed(bytes);
+    const first = try sub.takeInt(u32, std.builtin.Endian.little);
+    if (first % 4 != 0 or first > bytes.len) return error.InvalidOffset;
+
+    const count: usize = @intCast(first / 4);
+    if (count == 0 or count > T.max_length) return error.InvalidOffset;
+    if (bytes.len < first) return error.InvalidOffset;
+
+    const offsets = try allocator.alloc(usize, count + 1);
+    defer allocator.free(offsets);
+    offsets[0] = first;
+    for (offsets[1..count]) |*slot| {
+        const off = try sub.takeInt(u32, std.builtin.Endian.little);
+        slot.* = off;
+    }
+    offsets[count] = bytes.len;
+
+    for (offsets[0..count], offsets[1..]) |start, end| {
+        if (end < start or end > bytes.len) return error.InvalidOffset;
+    }
+
+    const data = try allocator.alloc(E, count);
+    errdefer allocator.free(data);
+
+    for (data, 0..) |*item, i| {
+        var elem_reader: std.Io.Reader = .fixed(bytes[offsets[i]..offsets[i + 1]]);
+        item.* = try deserializeAlloc(allocator, E, &elem_reader);
+        // Trailing bytes inside an element are malformed.
+        if (elem_reader.bufferedLen() != 0) return error.TrailingBytes;
+    }
+
+    return T{ .data = data };
 }
