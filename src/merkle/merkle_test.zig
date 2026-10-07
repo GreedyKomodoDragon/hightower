@@ -28,6 +28,7 @@ test "Merkleize one chunk returns chunk unchanged" {
     const root = try merkle.Merkleize(
         allocator,
         &.{a},
+        null,
     );
 
     try testing.expectEqualSlices(
@@ -48,6 +49,7 @@ test "Merkleize two chunks hashes pair" {
     const root = try merkle.Merkleize(
         allocator,
         &.{ a, b },
+        null,
     );
 
     try testing.expectEqualSlices(
@@ -73,6 +75,7 @@ test "Merkleize three chunks pads fourth leaf with zero chunk" {
     const root = try merkle.Merkleize(
         allocator,
         &.{ a, b, c },
+        null,
     );
 
     try testing.expectEqualSlices(
@@ -98,6 +101,7 @@ test "Merkleize four chunks builds two tree levels" {
     const root = try merkle.Merkleize(
         allocator,
         &.{ a, b, c, d },
+        null,
     );
 
     try testing.expectEqualSlices(
@@ -133,6 +137,7 @@ test "Merkleize five chunks pads tree to eight leaves" {
     const root = try merkle.Merkleize(
         allocator,
         &.{ a, b, c, d, e },
+        null,
     );
 
     try testing.expectEqualSlices(
