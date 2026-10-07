@@ -14,6 +14,7 @@ const types = @import("types");
 const bitList = @import("bitlist.zig");
 const bitvector = @import("bitvector.zig");
 const bytelist = @import("bytelist.zig");
+const fixed = @import("fixed.zig");
 
 pub fn serialize(writer: *std.Io.Writer, value: anytype) !void {
     const T = @TypeOf(value);
@@ -45,7 +46,7 @@ pub fn serialize(writer: *std.Io.Writer, value: anytype) !void {
         .bool => {
             try writer.writeByte(if (value) 0x01 else 0x00);
         },
-        .@"struct" => |info| {
+        .@"struct" => {
             if (@hasDecl(T, "ssz_kind")) {
                 switch (T.ssz_kind) {
                     .bitlist => {
@@ -63,19 +64,23 @@ pub fn serialize(writer: *std.Io.Writer, value: anytype) !void {
                         );
                     },
                     .bytelist => {
-                        return bytelist.serializeByteList(T, writer, value);
+                        return bytelist.serializeByteList(
+                            T,
+                            writer,
+                            value,
+                        );
                     },
+
                     else => {
                         return error.SszNotImplemented;
                     },
                 }
             }
 
-            inline for (info.fields) |field| {
-                const field_value = @field(value, field.name);
-
-                try serialize(writer, field_value);
-            }
+            return serializeContainer(
+                writer,
+                value,
+            );
         },
         else => {
             @compileError("unsupported RLP type: " ++ @typeName(T));
@@ -83,6 +88,168 @@ pub fn serialize(writer: *std.Io.Writer, value: anytype) !void {
     }
 
     return;
+}
+
+fn serializeContainer(
+    writer: *std.Io.Writer,
+    value: anytype,
+) !void {
+    const T = @TypeOf(value);
+    const info = @typeInfo(T).@"struct";
+
+    const fixed_section_size =
+        containerFixedSectionSize(T);
+
+    // This points to where the next variable payload
+    // will start.
+    var variable_offset: usize = fixed_section_size;
+
+    // ---------------------------------
+    // Pass 1: write the fixed section
+    // ---------------------------------
+
+    inline for (info.fields) |field| {
+        const field_value = @field(value, field.name);
+
+        if (fixed.isFixedSize(field.type)) {
+            // Fixed fields live directly in the fixed section.
+            try serialize(
+                writer,
+                field_value,
+            );
+        } else {
+            // Variable fields get a 4-byte offset.
+            var offset_bytes: [4]u8 = undefined;
+
+            std.mem.writeInt(
+                u32,
+                &offset_bytes,
+                @intCast(variable_offset),
+                .little,
+            );
+
+            try writer.writeAll(&offset_bytes);
+
+            // Advance to where the NEXT variable payload starts.
+            variable_offset += serializedSize(field_value);
+        }
+    }
+
+    // ---------------------------------
+    // Pass 2: write variable payloads
+    // ---------------------------------
+
+    inline for (info.fields) |field| {
+        if (!fixed.isFixedSize(field.type)) {
+            const field_value = @field(value, field.name);
+
+            try serialize(
+                writer,
+                field_value,
+            );
+        }
+    }
+}
+
+fn serializedSize(value: anytype) usize {
+    const T = @TypeOf(value);
+
+    switch (@typeInfo(T)) {
+        .int => |info| {
+            return info.bits / 8;
+        },
+
+        .bool => {
+            return 1;
+        },
+
+        .array => {
+            if (fixed.isFixedSize(T)) {
+                return fixed.fixedSize(T);
+            }
+
+            // Vector containing variable-size elements:
+            //
+            // [offset][offset][offset]...[payloads]
+            var size: usize = value.len * 4;
+
+            for (value) |item| {
+                size += serializedSize(item);
+            }
+
+            return size;
+        },
+
+        .@"struct" => |info| {
+            if (@hasDecl(T, "ssz_kind")) {
+                switch (T.ssz_kind) {
+                    .bitlist => {
+                        // +1 bit for BitList delimiter.
+                        return (value.data.len + 1 + 7) / 8;
+                    },
+
+                    .bitvector => {
+                        return (T.bit_length + 7) / 8;
+                    },
+
+                    .bytelist => {
+                        return value.data.len;
+                    },
+
+                    .bytevector => {
+                        return T.byte_length;
+                    },
+
+                    else => {
+                        @compileError(
+                            "serializedSize not implemented for: " ++
+                                @typeName(T),
+                        );
+                    },
+                }
+            }
+
+            if (fixed.isFixedSize(T)) {
+                return fixed.fixedSize(T);
+            }
+
+            // Variable-size container.
+            var size = containerFixedSectionSize(T);
+
+            inline for (info.fields) |field| {
+                if (!fixed.isFixedSize(field.type)) {
+                    const field_value = @field(value, field.name);
+                    size += serializedSize(field_value);
+                }
+            }
+
+            return size;
+        },
+
+        else => {
+            @compileError(
+                "serializedSize unsupported for: " ++ @typeName(T),
+            );
+        },
+    }
+}
+
+fn containerFixedSectionSize(comptime T: type) usize {
+    const info = @typeInfo(T).@"struct";
+
+    var size: usize = 0;
+
+    inline for (info.fields) |field| {
+        if (fixed.isFixedSize(field.type)) {
+            size += fixed.fixedSize(field.type);
+        } else {
+            // Variable-size fields occupy a 4-byte offset
+            // in the fixed section.
+            size += 4;
+        }
+    }
+
+    return size;
 }
 
 pub fn deserialize(

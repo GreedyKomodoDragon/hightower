@@ -141,6 +141,13 @@ pub fn GetChunks(allocator: std.mem.Allocator, value: anytype) ![][32]u8 {
                 }
             }
 
+            if (@hasDecl(T, "ssz_active_fields")) {
+                return progressiveContainerLeaves(
+                    allocator,
+                    value,
+                );
+            }
+
             const result = try allocator.alloc([32]u8, info.fields.len);
             errdefer allocator.free(result);
 
@@ -198,6 +205,24 @@ pub fn HashTreeRoot(
     value: anytype,
 ) ![32]u8 {
     const T = @TypeOf(value);
+
+    // Progressive containers merkleize one leaf per layout position
+    // over a spine, then mix the layout word in (EIP-7495).
+    if (@typeInfo(T) == .@"struct" and @hasDecl(T, "ssz_active_fields")) {
+        const chunks = try progressiveContainerLeaves(allocator, value);
+        defer allocator.free(chunks);
+
+        const spine = try merkleizeProgressive(allocator, chunks, 1);
+
+        var input: [64]u8 = undefined;
+        @memcpy(input[0..32], &spine);
+        @memcpy(input[32..64], &activeFieldsWord(T));
+
+        var out: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(&input, &out, .{});
+
+        return out;
+    }
 
     if (@typeInfo(T) == .@"struct" and @hasDecl(T, "ssz_kind")) {
         switch (T.ssz_kind) {
@@ -346,6 +371,94 @@ fn limitChunks(comptime T: type) ?usize {
     if (@hasDecl(T, "max_bits")) return (T.max_bits + 255) / 256;
     if (@hasDecl(T, "bit_length")) return (T.bit_length + 255) / 256;
     return null;
+}
+
+/// One leaf per layout position of a progressive container (EIP-7495).
+/// Active positions hold the field root, gaps hold zero chunks.
+/// The n-th field maps to the n-th set bit of `ssz_active_fields`.
+fn progressiveContainerLeaves(
+    allocator: std.mem.Allocator,
+    value: anytype,
+) ![][32]u8 {
+    const T = @TypeOf(value);
+    const info = @typeInfo(T).@"struct";
+    const active = T.ssz_active_fields;
+
+    if (comptime active.len > 256) {
+        @compileError(
+            "progressive layout exceeds 256 positions: " ++ @typeName(T),
+        );
+    }
+
+    comptime var field_count: usize = 0;
+    inline for (active) |occupied| {
+        if (occupied) field_count += 1;
+    }
+
+    if (comptime field_count != info.fields.len) {
+        @compileError(
+            "progressive layout/field count mismatch: " ++ @typeName(T),
+        );
+    }
+
+    const result = try allocator.alloc([32]u8, active.len);
+    errdefer allocator.free(result);
+
+    comptime var field_index: usize = 0;
+    inline for (active, 0..) |occupied, position| {
+        if (occupied) {
+            result[position] = try HashTreeRoot(
+                allocator,
+                @field(value, info.fields[field_index].name),
+            );
+            field_index += 1;
+        } else {
+            result[position] = [_]u8{0} ** 32;
+        }
+    }
+
+    return result;
+}
+
+/// The layout word a progressive container mixes in: bit i set when
+/// position i is occupied, little-endian, one 32-byte word.
+fn activeFieldsWord(comptime T: type) [32]u8 {
+    const active = T.ssz_active_fields;
+
+    var word = [_]u8{0} ** 32;
+
+    inline for (active, 0..) |occupied, position| {
+        if (occupied) {
+            word[position / 8] |= @as(u8, 1) << @intCast(position % 8);
+        }
+    }
+
+    return word;
+}
+
+/// Progressive spine root over chunks (EIP-7916): level n holds
+/// 4**(n-1) chunks as one binary subtree, closed by a zero node.
+fn merkleizeProgressive(
+    allocator: std.mem.Allocator,
+    chunks: []const [32]u8,
+    width: usize,
+) ![32]u8 {
+    if (chunks.len == 0) {
+        return [_]u8{0} ** 32;
+    }
+
+    const take = @min(chunks.len, width);
+    const left = try Merkleize(allocator, chunks[0..take], width);
+    const right = try merkleizeProgressive(allocator, chunks[take..], width * 4);
+
+    var input: [64]u8 = undefined;
+    @memcpy(input[0..32], &left);
+    @memcpy(input[32..64], &right);
+
+    var out: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(&input, &out, .{});
+
+    return out;
 }
 
 fn packBasicArray(
