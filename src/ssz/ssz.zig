@@ -15,8 +15,11 @@ const bitList = @import("bitlist.zig");
 const bitvector = @import("bitvector.zig");
 const bytelist = @import("bytelist.zig");
 const fixed = @import("fixed.zig");
+const errors = @import("ssz_errors");
 
-pub fn serialize(writer: *std.Io.Writer, value: anytype) !void {
+pub const SszError = errors.SszError;
+
+pub fn serialize(writer: *std.Io.Writer, value: anytype) (std.Io.Writer.Error || SszError)!void {
     const T = @TypeOf(value);
 
     switch (@typeInfo(T)) {
@@ -327,7 +330,7 @@ fn containerFixedSectionSize(comptime T: type) usize {
 pub fn deserialize(
     comptime T: type,
     reader: *std.Io.Reader,
-) !T {
+) (std.Io.Reader.Error || SszError)!T {
     return switch (@typeInfo(T)) {
         .bool => blk: {
             const byte = try reader.takeByte();
@@ -407,7 +410,7 @@ pub fn deserializeAlloc(
     allocator: std.mem.Allocator,
     comptime T: type,
     reader: *std.Io.Reader,
-) !T {
+) (std.Io.Reader.Error || std.mem.Allocator.Error || SszError)!T {
     switch (@typeInfo(T)) {
         .@"struct" => {
             if (@hasDecl(T, "ssz_kind")) {
