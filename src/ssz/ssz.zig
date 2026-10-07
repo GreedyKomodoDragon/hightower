@@ -70,6 +70,10 @@ pub fn serialize(writer: *std.Io.Writer, value: anytype) !void {
                             value,
                         );
                     },
+                    .bytevector => {
+                        try writer.writeAll(value.data[0..]);
+                        return;
+                    },
 
                     else => {
                         return error.SszNotImplemented;
@@ -294,7 +298,15 @@ pub fn deserialize(
             // Fail at runtime so one unimplemented type does not stop
             // the whole test binary from compiling.
             if (@hasDecl(T, "ssz_kind")) {
-                return error.SszNotImplemented;
+                switch (T.ssz_kind) {
+                    .bytevector => {
+                        var result: T = undefined;
+                        const n = try reader.readSliceShort(result.data[0..]);
+                        if (n != T.byte_length) return error.EndOfStream;
+                        return result;
+                    },
+                    else => return error.SszNotImplemented,
+                }
             }
 
             var result: T = undefined;

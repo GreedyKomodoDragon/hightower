@@ -1082,3 +1082,60 @@ test "SSZ round trip whole struct equality" {
 
     try testing.expectEqual(original, decoded);
 }
+
+test "SSZ ByteVector round trip" {
+    const types = @import("types");
+    const T = types.ByteVector(4);
+
+    const original = T{ .data = .{ 0xde, 0xad, 0xbe, 0xef } };
+
+    var buf: [8]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    try ssz.serialize(&writer, original);
+
+    try testing.expectEqualSlices(
+        u8,
+        &.{ 0xde, 0xad, 0xbe, 0xef },
+        writer.buffered(),
+    );
+
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+
+    const decoded = try ssz.deserialize(T, &reader);
+
+    try testing.expectEqualSlices(u8, &original.data, &decoded.data);
+}
+
+test "SSZ ByteVector embeds fixed-size in container" {
+    const types = @import("types");
+    const T = types.ByteVector(4);
+
+    const Example = struct {
+        id: u16,
+        hash: T,
+    };
+
+    const original = Example{
+        .id = 1,
+        .hash = .{ .data = .{ 0xde, 0xad, 0xbe, 0xef } },
+    };
+
+    var buf: [16]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    try ssz.serialize(&writer, original);
+
+    try testing.expectEqualSlices(
+        u8,
+        &.{ 0x01, 0x00, 0xde, 0xad, 0xbe, 0xef },
+        writer.buffered(),
+    );
+
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+
+    const decoded = try ssz.deserialize(Example, &reader);
+
+    try testing.expectEqual(original.id, decoded.id);
+    try testing.expectEqualSlices(u8, &original.hash.data, &decoded.hash.data);
+}
