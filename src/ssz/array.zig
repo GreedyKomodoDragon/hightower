@@ -60,7 +60,7 @@ pub fn deserializeArrayVar(
 
     for (&result, 0..) |*item, i| {
         var sub: std.Io.Reader = .fixed(bytes[offsets[i]..offsets[i + 1]]);
-        item.* = try deserialize_mod.deserializeAlloc(allocator, info.child, &sub);
+        item.* = try deserialize_mod.deserialize(allocator, info.child, &sub);
         if (sub.bufferedLen() != 0) return error.TrailingBytes;
         done += 1;
     }

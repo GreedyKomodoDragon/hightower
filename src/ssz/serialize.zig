@@ -12,8 +12,24 @@ const byte_vector_mod = @import("bytevector.zig");
 const list_mod = @import("list.zig");
 const array_mod = @import("array.zig");
 const container_mod = @import("container.zig");
+const size_mod = @import("size.zig");
 
 pub const SszError = errors.SszError;
+
+/// Serialize `value` to an owned slice, sized exactly via
+/// `size.serializedSize` (no buffer guessing, no growth).
+pub fn serializeAlloc(
+    allocator: std.mem.Allocator,
+    value: anytype,
+) (std.mem.Allocator.Error || std.Io.Writer.Error || SszError)![]u8 {
+    const buf = try allocator.alloc(u8, size_mod.serializedSize(value));
+    errdefer allocator.free(buf);
+
+    var writer: std.Io.Writer = .fixed(buf);
+    try serialize(&writer, value);
+
+    return buf;
+}
 
 pub fn serialize(writer: *std.Io.Writer, value: anytype) (std.Io.Writer.Error || SszError)!void {
     const T = @TypeOf(value);

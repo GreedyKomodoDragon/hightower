@@ -27,6 +27,6 @@ test "vectors.test_uint16_vector3_zero" {
     try testing.expectEqualSlices(u8, &expected_root, &root);
 
     var reader: std.Io.Reader = .fixed(&expected_serialized);
-    const decoded = try ssz.deserialize([3]u16, &reader);
+    const decoded = try ssz.deserialize(allocator, [3]u16, &reader);
     try testing.expectEqual(value, decoded);
 }

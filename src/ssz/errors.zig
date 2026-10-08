@@ -13,8 +13,6 @@ pub const SszError = error{
     TrailingBytes,
     EndOfStream,
     ListTooLong,
-    ListNeedsAllocator,
-    NeedsAllocator,
     SszNotImplemented,
     BitListTooLong,
     ByteListTooLong,

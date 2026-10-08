@@ -21,6 +21,6 @@ test "vectors.test_ssz_decode_failure_bitlist_exceeds_limit" {
 
     try testing.expectError(
         error.BitListTooLong,
-        ssz.deserializeAlloc(allocator, SmokeBitList8, &reader),
+        ssz.deserialize(allocator, SmokeBitList8, &reader),
     );
 }

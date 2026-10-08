@@ -10,6 +10,8 @@ const testing = std.testing;
 const ssz = @import("ssz");
 
 test "vectors.test_progressive_container_decode_failure_trailing_byte" {
+    const allocator = testing.allocator;
+
     const SampleSquare = struct {
         side: u16,
         color: u8,
@@ -17,14 +19,12 @@ test "vectors.test_progressive_container_decode_failure_trailing_byte" {
 
     // The fixture appends a spare 0x00 byte to the valid encoding
     // 0x341256. Strict decoding must reject the trailing byte.
-    // NOTE: error.TrailingByte is a placeholder; the implementation
-    // may name the rejection error differently, update this test then.
     const input = [_]u8{ 0x34, 0x12, 0x56, 0x00 };
 
     var reader: std.Io.Reader = .fixed(&input);
 
     try testing.expectError(
-        error.TrailingByte,
-        ssz.deserialize(SampleSquare, &reader),
+        error.TrailingBytes,
+        ssz.deserialize(allocator, SampleSquare, &reader),
     );
 }

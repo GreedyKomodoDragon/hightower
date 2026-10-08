@@ -27,6 +27,6 @@ test "vectors.test_boolean_true" {
     try testing.expectEqualSlices(u8, &expected_root, &root);
 
     var reader: std.Io.Reader = .fixed(&expected_serialized);
-    const decoded = try ssz.deserialize(bool, &reader);
+    const decoded = try ssz.deserialize(allocator, bool, &reader);
     try testing.expectEqual(value, decoded);
 }

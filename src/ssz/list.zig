@@ -95,6 +95,8 @@ pub fn decodeFixedItems(
     bytes: []const u8,
     count: usize,
 ) ![]E {
+    const elem_size = comptime desc_mod.SszType(E).fixed_size.?;
+
     const data = try allocator.alloc(E, count);
     var done: usize = 0;
     errdefer {
@@ -104,9 +106,12 @@ pub fn decodeFixedItems(
         allocator.free(data);
     }
 
-    var sub: std.Io.Reader = .fixed(bytes);
-    for (data) |*item| {
-        item.* = try deserialize_mod.deserializeAlloc(allocator, E, &sub);
+    // Per-element slices: nested values slurp their own reader,
+    // so sequential streaming would over-read into siblings.
+    for (data, 0..) |*item, i| {
+        var sub: std.Io.Reader = .fixed(bytes[i * elem_size ..][0..elem_size]);
+        item.* = try deserialize_mod.deserialize(allocator, E, &sub);
+        if (sub.bufferedLen() != 0) return error.TrailingBytes;
         done += 1;
     }
 
@@ -133,7 +138,7 @@ pub fn decodeVariableItems(
 
     for (data, 0..) |*item, i| {
         var elem_reader: std.Io.Reader = .fixed(bytes[offsets[i]..offsets[i + 1]]);
-        item.* = try deserialize_mod.deserializeAlloc(allocator, E, &elem_reader);
+        item.* = try deserialize_mod.deserialize(allocator, E, &elem_reader);
         // Trailing bytes inside an element are malformed.
         if (elem_reader.bufferedLen() != 0) return error.TrailingBytes;
         done += 1;

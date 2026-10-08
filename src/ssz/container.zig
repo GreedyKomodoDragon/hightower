@@ -70,10 +70,18 @@ pub fn deserializeContainer(
     if (var_count == 0) {
         if (bytes.len != fixed_section) return error.TrailingBytes;
 
-        var sub: std.Io.Reader = .fixed(bytes);
+        // Decode each field from its exact slice: nested values
+        // slurp their own reader, so sequential streaming would
+        // over-read into following fields.
         var result: T = undefined;
+        var pos: usize = 0;
         inline for (info.fields) |field| {
-            @field(result, field.name) = try deserialize_mod.deserializeAlloc(allocator, field.type, &sub);
+            const field_desc = comptime desc_mod.SszType(field.type);
+            const size = field_desc.fixed_size.?;
+            var sub: std.Io.Reader = .fixed(bytes[pos..][0..size]);
+            @field(result, field.name) = try deserialize_mod.deserialize(allocator, field.type, &sub);
+            if (sub.bufferedLen() != 0) return error.TrailingBytes;
+            pos += size;
         }
         return result;
     }
@@ -118,12 +126,12 @@ pub fn deserializeContainer(
         if (comptime !field_desc.is_variable) {
             const size = field_desc.fixed_size.?;
             var sub: std.Io.Reader = .fixed(bytes[fixed_pos..][0..size]);
-            @field(result, field.name) = try deserialize_mod.deserializeAlloc(allocator, field.type, &sub);
+            @field(result, field.name) = try deserialize_mod.deserialize(allocator, field.type, &sub);
             if (sub.bufferedLen() != 0) return error.TrailingBytes;
             fixed_pos += size;
         } else {
             var sub: std.Io.Reader = .fixed(bytes[offsets[var_index]..offsets[var_index + 1]]);
-            @field(result, field.name) = try deserialize_mod.deserializeAlloc(allocator, field.type, &sub);
+            @field(result, field.name) = try deserialize_mod.deserialize(allocator, field.type, &sub);
             if (sub.bufferedLen() != 0) return error.TrailingBytes;
             fixed_pos += 4;
             var_index += 1;

@@ -27,6 +27,6 @@ test "vectors.test_uint32_mid" {
     try testing.expectEqualSlices(u8, &expected_root, &root);
 
     var reader: std.Io.Reader = .fixed(&expected_serialized);
-    const decoded = try ssz.deserialize(u32, &reader);
+    const decoded = try ssz.deserialize(allocator, u32, &reader);
     try testing.expectEqual(value, decoded);
 }
