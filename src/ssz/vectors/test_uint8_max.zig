@@ -27,6 +27,6 @@ test "vectors.test_uint8_max" {
     try testing.expectEqualSlices(u8, &expected_root, &root);
 
     var reader: std.Io.Reader = .fixed(&expected_serialized);
-    const decoded = try ssz.deserialize(u8, &reader);
+    const decoded = try ssz.deserialize(allocator, u8, &reader);
     try testing.expectEqual(value, decoded);
 }

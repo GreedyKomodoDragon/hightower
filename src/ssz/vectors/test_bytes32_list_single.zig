@@ -29,7 +29,7 @@ test "vectors.test_bytes32_list_single" {
     try testing.expectEqualSlices(u8, &expected_root, &root);
 
     var reader: std.Io.Reader = .fixed(writer.buffered());
-    const decoded = try ssz.deserializeAlloc(allocator, T, &reader);
+    const decoded = try ssz.deserialize(allocator, T, &reader);
     defer allocator.free(decoded.data);
     try testing.expectEqualSlices([32]u8, &items, decoded.data);
 }

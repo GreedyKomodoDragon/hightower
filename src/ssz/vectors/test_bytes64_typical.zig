@@ -28,6 +28,6 @@ test "vectors.test_bytes64_typical" {
     try testing.expectEqualSlices(u8, &expected_root, &root);
 
     var reader: std.Io.Reader = .fixed(&expected_serialized);
-    const decoded = try ssz.deserialize([64]u8, &reader);
+    const decoded = try ssz.deserialize(allocator, [64]u8, &reader);
     try testing.expectEqual(value, decoded);
 }
