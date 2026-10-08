@@ -185,6 +185,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "bitlist", .module = bitlist_mod },
+            .{ .name = "type_descriptor", .module = descriptor_mod },
         },
     });
 
@@ -208,6 +209,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "bitlist", .module = bitlist_mod },
+                .{ .name = "type_descriptor", .module = descriptor_mod },
             },
         }),
     });
