@@ -21,3 +21,27 @@ pub fn serializeBitVector(
 
     try writer.writeAll(&buf);
 }
+
+pub fn deserializeBitVector(
+    comptime T: type,
+    reader: *std.Io.Reader,
+) !T {
+    const byte_count = (T.bit_length + 7) / 8;
+
+    var raw: [byte_count]u8 = undefined;
+    const n = try reader.readSliceShort(&raw);
+    if (n != byte_count) return error.EndOfStream;
+
+    // Bits past bit_length in the last byte are padding and must be zero.
+    const excess = byte_count * 8 - T.bit_length;
+    if (excess > 0) {
+        const mask: u8 = @as(u8, 0xff) << @intCast(8 - excess);
+        if (raw[byte_count - 1] & mask != 0) return error.NonZeroPaddingBits;
+    }
+
+    var result: T = undefined;
+    for (&result.data, 0..) |*bit, i| {
+        bit.* = (raw[i / 8] >> @as(u3, @intCast(i % 8)) & 1) != 0;
+    }
+    return result;
+}

@@ -2,6 +2,9 @@
 //! 32-byte chunks, with optional limit-aware width and zero padding.
 
 const std = @import("std");
+const errors = @import("ssz_errors");
+
+pub const SszError = errors.SszError;
 
 // Merkleize will do something like this:
 //
@@ -14,7 +17,7 @@ pub fn Merkleize(
     allocator: std.mem.Allocator,
     chunks: []const [32]u8,
     limit: ?usize,
-) ![32]u8 {
+) (std.mem.Allocator.Error || SszError)![32]u8 {
     const count = chunks.len;
 
     // A capacity sets the tree width instead, rounded up to a power of two.

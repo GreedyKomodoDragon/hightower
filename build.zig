@@ -153,11 +153,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const bitlist_mod = b.createModule(.{
-        .root_source_file = b.path("src/merkle/bitlist.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
     const descriptor_mod = b.createModule(.{
         .root_source_file = b.path("src/ssz/type_descriptor.zig"),
         .target = target,
@@ -174,7 +169,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "types", .module = types_mod },
-            .{ .name = "bitlist", .module = bitlist_mod },
             .{ .name = "type_descriptor", .module = descriptor_mod },
             .{ .name = "ssz_errors", .module = ssz_errors_mod },
         },
@@ -184,8 +178,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "bitlist", .module = bitlist_mod },
             .{ .name = "type_descriptor", .module = descriptor_mod },
+            .{ .name = "ssz_errors", .module = ssz_errors_mod },
         },
     });
 
@@ -208,8 +202,8 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "bitlist", .module = bitlist_mod },
                 .{ .name = "type_descriptor", .module = descriptor_mod },
+                .{ .name = "ssz_errors", .module = ssz_errors_mod },
             },
         }),
     });
@@ -240,7 +234,6 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "ssz", .module = ssz_mod },
                 .{ .name = "merkle", .module = merkle_mod },
                 .{ .name = "types", .module = types_mod },
-                .{ .name = "bitlist", .module = bitlist_mod },
             },
         }),
     });

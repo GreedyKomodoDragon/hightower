@@ -1770,3 +1770,142 @@ test "SSZ round trip list of containers" {
         try testing.expectEqual(expected.value, actual.value);
     }
 }
+
+test "SSZ round trip bitvector" {
+    const types = @import("types");
+    const allocator = testing.allocator;
+
+    const T = types.BitVector(8);
+    const bits = [_]bool{ true, false, true, false, true, false, true, false };
+    const original = T{ .data = bits };
+
+    var buf: [8]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try ssz.serialize(&writer, original);
+    try testing.expectEqualSlices(u8, &.{0x55}, writer.buffered());
+
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    const decoded = try ssz.deserialize(allocator, T, &reader);
+    try testing.expectEqualSlices(bool, &bits, &decoded.data);
+}
+
+test "SSZ round trip odd-length bitvector" {
+    const types = @import("types");
+    const allocator = testing.allocator;
+
+    const T = types.BitVector(9);
+    const bits = [_]bool{ true, false, true, false, true, false, true, false, true };
+    const original = T{ .data = bits };
+
+    var buf: [8]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try ssz.serialize(&writer, original);
+    try testing.expectEqualSlices(u8, &.{ 0x55, 0x01 }, writer.buffered());
+
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    const decoded = try ssz.deserialize(allocator, T, &reader);
+    try testing.expectEqualSlices(bool, &bits, &decoded.data);
+}
+
+test "SSZ rejects bitvector with non-zero padding" {
+    const types = @import("types");
+    const allocator = testing.allocator;
+
+    const T = types.BitVector(4);
+    const input = [_]u8{0xff};
+
+    var reader: std.Io.Reader = .fixed(&input);
+    try testing.expectError(
+        error.NonZeroPaddingBits,
+        ssz.deserialize(allocator, T, &reader),
+    );
+}
+
+test "SSZ rejects short bitvector" {
+    const types = @import("types");
+    const allocator = testing.allocator;
+
+    const T = types.BitVector(16);
+    const input = [_]u8{0x55};
+
+    var reader: std.Io.Reader = .fixed(&input);
+    try testing.expectError(
+        error.EndOfStream,
+        ssz.deserialize(allocator, T, &reader),
+    );
+}
+
+test "SSZ viewByteList borrows without copying" {
+    const types = @import("types");
+
+    const T = types.ByteList(16);
+    const bytes = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+
+    const v = try ssz.viewByteList(T, &bytes);
+    try testing.expectEqualSlices(u8, &bytes, v.data);
+    // Same backing memory: zero-copy proven by pointer identity.
+    try testing.expectEqual(bytes[0..].ptr, v.data.ptr);
+}
+
+test "SSZ viewByteList rejects over-limit input" {
+    const types = @import("types");
+
+    const T = types.ByteList(2);
+    const bytes = [_]u8{ 0x01, 0x02, 0x03 };
+
+    try testing.expectError(
+        error.ByteListTooLong,
+        ssz.viewByteList(T, &bytes),
+    );
+}
+
+test "SSZ viewList decodes lazily" {
+    const types = @import("types");
+
+    const T = types.List(u32, 16);
+    const bytes = [_]u8{
+        0x2a, 0x00, 0x00, 0x00,
+        0x64, 0x00, 0x00, 0x00,
+    };
+
+    const v = try ssz.viewList(T, &bytes);
+    try testing.expectEqual(@as(usize, 2), v.len());
+    try testing.expectEqual(@as(u32, 42), try v.get(0));
+    try testing.expectEqual(@as(u32, 100), try v.get(1));
+    try testing.expectError(error.IndexOutOfBounds, v.get(2));
+}
+
+test "SSZ viewList validates layout" {
+    const types = @import("types");
+
+    const T = types.List(u32, 16);
+
+    const misaligned = [_]u8{ 0x01, 0x02, 0x03 };
+    try testing.expectError(
+        error.InvalidLength,
+        ssz.viewList(T, &misaligned),
+    );
+
+    const T1 = types.List(u32, 1);
+    const too_many = [_]u8{ 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00 };
+    try testing.expectError(
+        error.ListTooLong,
+        ssz.viewList(T1, &too_many),
+    );
+}
+
+test "SSZ view dispatches on kind" {
+    const types = @import("types");
+
+    const YT = types.ByteList(16);
+    const bytes = [_]u8{ 0xaa, 0xbb };
+    const yv = try ssz.view(YT, &bytes);
+    try testing.expectEqualSlices(u8, &bytes, yv.data);
+
+    const LT = types.List(u16, 8);
+    const lbytes = [_]u8{ 0x34, 0x12, 0x78, 0x56 };
+    const lv = try ssz.view(LT, &lbytes);
+    try testing.expectEqual(@as(usize, 2), lv.len());
+    try testing.expectEqual(@as(u16, 0x1234), try lv.get(0));
+    try testing.expectEqual(@as(u16, 0x5678), try lv.get(1));
+}

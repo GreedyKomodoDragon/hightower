@@ -1,15 +1,18 @@
 //! Chunk extraction: map an SSZ value onto its 32-byte chunks.
-//! Thin kind-dispatch; packing rules live in `strategy`, bit
-//! packing in `bitlist`, layout positions in `progressive`.
+//! Thin kind-dispatch; packing rules live in `strategy`, layout
+//! positions in `progressive`.
 
 const std = @import("std");
 const desc_mod = @import("type_descriptor");
-const bit_list_mod = @import("bitlist");
+const errors = @import("ssz_errors");
+
 const strategy_mod = @import("strategy.zig");
 const progressive_mod = @import("progressive.zig");
 const htr_mod = @import("hash_tree_root.zig");
 
-pub fn GetChunks(allocator: std.mem.Allocator, value: anytype) ![][32]u8 {
+pub const SszError = errors.SszError;
+
+pub fn GetChunks(allocator: std.mem.Allocator, value: anytype) (std.mem.Allocator.Error || SszError)![][32]u8 {
     const T = @TypeOf(value);
     const desc = comptime desc_mod.SszType(T);
 
@@ -51,20 +54,20 @@ pub fn GetChunks(allocator: std.mem.Allocator, value: anytype) ![][32]u8 {
             return result;
         },
         .BitList => {
-            return bit_list_mod.writeBitListToChunk(
+            return strategy_mod.writeBitListToChunk(
                 allocator,
                 value,
             );
         },
         .BitVector => {
-            return bit_list_mod.writeBitVectorToChunk(
+            return strategy_mod.writeBitVectorToChunk(
                 T,
                 allocator,
                 value,
             );
         },
         .ByteList, .ByteVector => {
-            return bit_list_mod.writeByteListToChunk(
+            return strategy_mod.writeByteListToChunk(
                 allocator,
                 value,
             );

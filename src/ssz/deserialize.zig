@@ -8,6 +8,7 @@ const std = @import("std");
 const desc_mod = @import("type_descriptor");
 const errors = @import("ssz_errors");
 const basic_mod = @import("basic.zig");
+const bit_vector_mod = @import("bitvector.zig");
 const byte_vector_mod = @import("bytevector.zig");
 const list_mod = @import("list.zig");
 const array_mod = @import("array.zig");
@@ -53,8 +54,9 @@ pub fn deserialize(
 }
 
 /// Streaming decode for fixed-size types. Reads sequentially, allocates
-/// nothing: safe to call with a failing allocator.
-fn deserializeFixed(
+/// nothing: safe to call with a failing allocator. Also backs lazy
+/// element access in `view.ListView`.
+pub fn deserializeFixed(
     comptime T: type,
     reader: *std.Io.Reader,
 ) (std.Io.Reader.Error || SszError)!T {
@@ -74,6 +76,9 @@ fn deserializeFixed(
         .ByteVector => {
             return byte_vector_mod.deserializeByteVector(T, reader);
         },
+        .BitVector => {
+            return bit_vector_mod.deserializeBitVector(T, reader);
+        },
         .Array => {
             var result: T = undefined;
             const info = @typeInfo(T).array;
@@ -89,7 +94,6 @@ fn deserializeFixed(
             }
             return result;
         },
-        // BitVector decode is not implemented yet.
         else => {
             return error.SszNotImplemented;
         },
