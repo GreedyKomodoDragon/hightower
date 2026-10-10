@@ -271,3 +271,98 @@ fn writeIntToChunk(
         &int_bytes,
     );
 }
+
+/// Pack BitList data bits (no delimiter) into chunks.
+pub fn writeBitListToChunk(
+    allocator: std.mem.Allocator,
+    value: anytype,
+) ![][32]u8 {
+    const bit_count = value.data.len;
+
+    // Number of bytes needed to hold the actual data bits.
+    const packed_bytes = (bit_count + 7) / 8;
+
+    // Number of 32-byte Merkle chunks needed.
+    const chunk_count = (packed_bytes + 31) / 32;
+
+    const result = try allocator.alloc([32]u8, chunk_count);
+    errdefer allocator.free(result);
+
+    @memset(result, [_]u8{0} ** 32);
+
+    for (value.data, 0..) |bit, i| {
+        if (!bit) continue;
+
+        // Which packed byte contains this bit?
+        const byte_index = i / 8;
+
+        // Which bit within that byte?
+        const bit_index: u3 = @intCast(i % 8);
+
+        // Which 32-byte Merkle chunk?
+        const chunk_index = byte_index / 32;
+
+        // Which byte inside that chunk?
+        const byte_offset = byte_index % 32;
+
+        result[chunk_index][byte_offset] |=
+            (@as(u8, 1) << bit_index);
+    }
+
+    return result;
+}
+
+/// Pack BitVector data bits into chunks.
+pub fn writeBitVectorToChunk(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    value: T,
+) ![][32]u8 {
+    const bit_count = T.bit_length;
+
+    const packed_bytes = (bit_count + 7) / 8;
+    const chunk_count = (packed_bytes + 31) / 32;
+
+    const result = try allocator.alloc([32]u8, chunk_count);
+    errdefer allocator.free(result);
+
+    @memset(result, [_]u8{0} ** 32);
+
+    for (value.data, 0..) |bit, i| {
+        if (!bit) continue;
+
+        const byte_index = i / 8;
+        const bit_index: u3 = @intCast(i % 8);
+
+        const chunk_index = byte_index / 32;
+        const byte_offset = byte_index % 32;
+
+        result[chunk_index][byte_offset] |=
+            (@as(u8, 1) << bit_index);
+    }
+
+    return result;
+}
+
+/// Pack raw bytes (ByteList / ByteVector payload) into chunks.
+pub fn writeByteListToChunk(
+    allocator: std.mem.Allocator,
+    value: anytype,
+) ![][32]u8 {
+    const byte_count = value.data.len;
+    const chunk_count = (byte_count + 31) / 32;
+
+    const result = try allocator.alloc([32]u8, chunk_count);
+    errdefer allocator.free(result);
+
+    @memset(result, [_]u8{0} ** 32);
+
+    for (value.data, 0..) |byte, i| {
+        const chunk_index = i / 32;
+        const byte_offset = i % 32;
+
+        result[chunk_index][byte_offset] = byte;
+    }
+
+    return result;
+}

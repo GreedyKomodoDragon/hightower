@@ -19,4 +19,10 @@ pub const SszError = error{
     NoDelimiterBit,
     /// A bounded read overflowed its limit (`Reader.allocRemaining`).
     StreamTooLong,
+    /// Merkleization met more chunks than the type limit allows.
+    MerkleizeLimit,
+    /// Fixed BitVector had non-zero padding bits beyond its length.
+    NonZeroPaddingBits,
+    /// Lazy view element index outside the validated length.
+    IndexOutOfBounds,
 };

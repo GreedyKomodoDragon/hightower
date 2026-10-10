@@ -17,11 +17,13 @@
 //!
 //! Ownership: `deserialize` takes an allocator but only touches it
 //! for variable-size types (fixed types decode without allocating).
-//! Owned output must be released with `freeDecoded`.
+//! Owned output must be released with `freeDecoded`. `view` borrows
+//! input bytes with no allocation at all (see `view.zig`).
 
 const serialize_mod = @import("serialize.zig");
 const deserialize_mod = @import("deserialize.zig");
 const free_mod = @import("free.zig");
+const view_mod = @import("view.zig");
 const desc_mod = @import("type_descriptor");
 const errors = @import("ssz_errors");
 
@@ -29,6 +31,11 @@ pub const serialize = serialize_mod.serialize;
 pub const serializeAlloc = serialize_mod.serializeAlloc;
 pub const deserialize = deserialize_mod.deserialize;
 pub const freeDecoded = free_mod.freeDecoded;
+pub const view = view_mod.view;
+pub const viewByteList = view_mod.viewByteList;
+pub const viewList = view_mod.viewList;
+pub const ListView = view_mod.ListView;
+pub const ViewOf = view_mod.ViewOf;
 
 pub const SszError = errors.SszError;
 pub const SszType = desc_mod.SszType;
