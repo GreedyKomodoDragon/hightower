@@ -4,13 +4,13 @@
 
 This inventory uses the Fulu v1.6.1 specification pinned at commit `5fa6edcca8ab4cf548653e6680b17b9d3e04d225` and the minimal preset. Fulu builds on Electra; the schemas below include the relevant inherited Phase0, Altair, Bellatrix, Capella, Deneb, and Electra definitions, then apply the Fulu `BeaconState` extension. See [the lock](FULU-SPEC-LOCK.md), [FULU-001](https://github.com/GreedyKomodoDragon/hightower/issues/12), [FULU-002](https://github.com/GreedyKomodoDragon/hightower/issues/13), [pinned Fulu spec](https://github.com/ethereum/consensus-specs/blob/v1.6.1/specs/fulu/beacon-chain.md), and [pinned Electra spec](https://github.com/ethereum/consensus-specs/blob/v1.6.1/specs/electra/beacon-chain.md).
 
-The recorded test baseline is [127/127 wired tests passing and 79/118 generic SSZ vectors passing](TEST-BASELINE.md). The 39 remaining generic vector tests explicitly return `VectorNotImplemented`; they cover compatible unions and progressive types, which do not appear in the Fulu beacon schema closure inventoried here.
+The recorded baseline predates the block fixture tests. The 39 remaining generic vector tests explicitly return `VectorNotImplemented`; they cover compatible unions and progressive types, which do not appear in the Fulu beacon schema closure inventoried here.
 
 ## Support key
 
 The SSZ library has generic encode/decode routes for unsigned integers through 256 bits, booleans, fixed arrays, bitvectors, bitlists, bytevectors, bytelists, lists, and regular containers. Its hash-tree-root path covers those same required kinds, including nested containers, vectors, and lists. Relevant routes are in [`type_descriptor.zig`](../src/ssz/type_descriptor.zig), [`serialize.zig`](../src/ssz/serialize.zig), [`deserialize.zig`](../src/ssz/deserialize.zig), [`hash_tree_root.zig`](../src/merkle/hash_tree_root.zig), and [`get_chunks.zig`](../src/merkle/get_chunks.zig).
 
-**Generic route only** means the kind can be processed when supplied as a Zig type; there is currently no concrete Beacon schema declaration or Fulu fixture runner in `src/types/` or the build. Therefore none of the Beacon types below is currently decodable or rootable as a named project type. “Fixture cases” counts the pinned test bundle’s cases on disk, not cases currently executed by Hightower.
+**Generic route only** means the kind can be processed when supplied as a Zig type, but no named Fulu type exists for it yet. [`fulu.zig`](../src/types/fulu.zig) declares shared types and the block schema. [`fulu_test.zig`](../src/types/fulu_test.zig) checks basic block type structure; SSZ roots, round trips, and pinned fixtures live in [`fulu_fixture_test.zig`](../src/ssz/fulu_fixture_test.zig). That test covers zero roots for 13 shared types, nonzero `SyncAggregate` and `SyncCommittee` fixtures, and three `BeaconBlock` cases. The two random block cases are embedded as raw SSZ under [`src/ssz/fixtures`](../src/ssz/fixtures) and checked against the pinned roots. `BeaconState` and `ExecutionPayloadHeader` remain incomplete. “Fixture cases” counts the pinned test bundle’s cases on disk, not cases currently executed by Hightower.
 
 ## BeaconState fields
 
@@ -21,45 +21,45 @@ Each field in the Fulu state is listed explicitly. Bounds are resolved against t
 | `genesis_time` | `uint64` | Generic route only; `BeaconState` fixture |
 | `genesis_validators_root` | `Root` (`Bytes32`) | Generic route only; `BeaconState` fixture |
 | `slot` | `Slot` (`uint64`) | Generic route only; `BeaconState` fixture |
-| `fork` | `Fork` container | Generic route only; `Fork` fixture |
-| `latest_block_header` | `BeaconBlockHeader` container | Generic route only; `BeaconBlockHeader` fixture |
+| `fork` | `Fork` container | `Fork` implemented; BeaconState field not yet declared |
+| `latest_block_header` | `BeaconBlockHeader` container | `BeaconBlockHeader` implemented; BeaconState field not yet declared |
 | `block_roots` | `Vector[Root, 64]` | Generic route only; `BeaconState` fixture |
 | `state_roots` | `Vector[Root, 64]` | Generic route only; `BeaconState` fixture |
 | `historical_roots` | `List[Root, 16,777,216]` | Generic route only; `BeaconState` fixture |
-| `eth1_data` | `Eth1Data` container | Generic route only; `Eth1Data` fixture |
+| `eth1_data` | `Eth1Data` container | `Eth1Data` implemented; BeaconState field not yet declared |
 | `eth1_data_votes` | `List[Eth1Data, 32]` (`4 × 8`) | Generic route only; `BeaconState` fixture |
 | `eth1_deposit_index` | `uint64` | Generic route only; `BeaconState` fixture |
-| `validators` | `List[Validator, 1,099,511,627,776]` | Generic route only; `Validator` fixture |
+| `validators` | `List[Validator, 1,099,511,627,776]` | `Validator` implemented; BeaconState field not yet declared |
 | `balances` | `List[Gwei, 1,099,511,627,776]` (`Gwei = uint64`) | Generic route only; `BeaconState` fixture |
 | `randao_mixes` | `Vector[Bytes32, 64]` | Generic route only; `BeaconState` fixture |
 | `slashings` | `Vector[Gwei, 64]` (`Gwei = uint64`) | Generic route only; `BeaconState` fixture |
 | `previous_epoch_participation` | `List[ParticipationFlags, 1,099,511,627,776]` (`ParticipationFlags = uint8`) | Generic route only; `BeaconState` fixture |
 | `current_epoch_participation` | `List[ParticipationFlags, 1,099,511,627,776]` (`ParticipationFlags = uint8`) | Generic route only; `BeaconState` fixture |
 | `justification_bits` | `Bitvector[4]` | Generic route only; `BeaconState` fixture |
-| `previous_justified_checkpoint` | `Checkpoint` container | Generic route only; `Checkpoint` fixture |
-| `current_justified_checkpoint` | `Checkpoint` container | Generic route only; `Checkpoint` fixture |
-| `finalized_checkpoint` | `Checkpoint` container | Generic route only; `Checkpoint` fixture |
+| `previous_justified_checkpoint` | `Checkpoint` container | `Checkpoint` implemented; BeaconState field not yet declared |
+| `current_justified_checkpoint` | `Checkpoint` container | `Checkpoint` implemented; BeaconState field not yet declared |
+| `finalized_checkpoint` | `Checkpoint` container | `Checkpoint` implemented; BeaconState field not yet declared |
 | `inactivity_scores` | `List[uint64, 1,099,511,627,776]` | Generic route only; `BeaconState` fixture |
-| `current_sync_committee` | `SyncCommittee` container | Generic route only; `SyncCommittee` fixture |
-| `next_sync_committee` | `SyncCommittee` container | Generic route only; `SyncCommittee` fixture |
+| `current_sync_committee` | `SyncCommittee` container | `SyncCommittee` implemented; BeaconState field not yet declared |
+| `next_sync_committee` | `SyncCommittee` container | `SyncCommittee` implemented; BeaconState field not yet declared |
 | `latest_execution_payload_header` | `ExecutionPayloadHeader` container | Generic route only; `ExecutionPayloadHeader` fixture |
 | `next_withdrawal_index` | `WithdrawalIndex` (`uint64`) | Generic route only; `BeaconState` fixture |
 | `next_withdrawal_validator_index` | `ValidatorIndex` (`uint64`) | Generic route only; `BeaconState` fixture |
-| `historical_summaries` | `List[HistoricalSummary, 16,777,216]` | Generic route only; `HistoricalSummary` fixture |
+| `historical_summaries` | `List[HistoricalSummary, 16,777,216]` | `HistoricalSummary` implemented; BeaconState field not yet declared |
 | `deposit_requests_start_index` | `uint64` | Generic route only; `BeaconState` fixture |
 | `deposit_balance_to_consume` | `Gwei` (`uint64`) | Generic route only; `BeaconState` fixture |
 | `exit_balance_to_consume` | `Gwei` (`uint64`) | Generic route only; `BeaconState` fixture |
 | `earliest_exit_epoch` | `Epoch` (`uint64`) | Generic route only; `BeaconState` fixture |
 | `consolidation_balance_to_consume` | `Gwei` (`uint64`) | Generic route only; `BeaconState` fixture |
 | `earliest_consolidation_epoch` | `Epoch` (`uint64`) | Generic route only; `BeaconState` fixture |
-| `pending_deposits` | `List[PendingDeposit, 134,217,728]` | Generic route only; `PendingDeposit` fixture |
-| `pending_partial_withdrawals` | `List[PendingPartialWithdrawal, 64]` | Generic route only; `PendingPartialWithdrawal` fixture |
-| `pending_consolidations` | `List[PendingConsolidation, 64]` | Generic route only; `PendingConsolidation` fixture |
+| `pending_deposits` | `List[PendingDeposit, 134,217,728]` | `PendingDeposit` implemented; BeaconState field not yet declared |
+| `pending_partial_withdrawals` | `List[PendingPartialWithdrawal, 64]` | `PendingPartialWithdrawal` implemented; BeaconState field not yet declared |
+| `pending_consolidations` | `List[PendingConsolidation, 64]` | `PendingConsolidation` implemented; BeaconState field not yet declared |
 | `proposer_lookahead` | `Vector[ValidatorIndex, 16]` (`(1 + 1) × 8`) | Generic route only; `BeaconState` fixture |
 
 ## Recursive container schemas
 
-Fields are given as `field: SSZ type`; aliases follow the pinned consensus specifications. For each row, the implementation status is **generic route only** for serialization, deserialization, and hash-tree-root. Every listed type has 123 expected-root cases in `testdata/consensus-specs-v1.6.1/tests/minimal/fulu/ssz_static/<Type>/`, across `ssz_lengthy`, `ssz_max`, `ssz_nil`, `ssz_one`, `ssz_random`, `ssz_random_chaos`, and `ssz_zero`.
+Fields are given as `field: SSZ type`; aliases follow the pinned consensus specifications. Every listed type has 123 expected-root cases in `testdata/consensus-specs-v1.6.1/tests/minimal/fulu/ssz_static/<Type>/`, across `ssz_lengthy`, `ssz_max`, `ssz_nil`, `ssz_one`, `ssz_random`, `ssz_random_chaos`, and `ssz_zero`. The shared types have concrete declarations, but only the 13 foundational shared types currently get zero-root checks. The block fixture tests currently use `BeaconBlock/ssz_nil/case_0` and random cases 7 and 22; the two checked-in raw SSZ files are decompressed copies of each case's `serialized.ssz_snappy`. Tests decode them, check the root from the adjacent `roots.yaml`, and verify byte-for-byte reserialization. Most of the pinned cases remain unwired.
 
 | Type (kind) | Schema fields and bounds | Fixture cases |
 | --- | --- | --- |
@@ -105,8 +105,8 @@ The `blob_kzg_commitments` SSZ bound is the fixed minimal-preset `MAX_BLOB_COMMI
 
 | Rank | Gap | Evidence and consequence |
 | --- | --- | --- |
-| 1 | Concrete Beacon schema declarations are absent | `src/types/type.zig` defines generic SSZ wrappers only. Although the generic codecs and root code cover the kinds in this closure, Hightower has no `BeaconState`, `BeaconBlock`, or nested Beacon types to instantiate them with; the complete state and block roots therefore cannot currently be computed through named project types. The pinned per-type `ssz_static` fixtures provide direct expected serialization and roots. |
-| 2 | Fulu fixtures are not wired into the project test build | The bundle has 123 cases for each of the 34 schema types, but `build.zig` wires only the generic vectors and existing unit tests. Until a fixture runner connects the schemas to those cases, the expected roots do not validate the project implementation. |
+| 1 | BeaconState and ExecutionPayloadHeader schemas remain incomplete | `BeaconBlock`, `BeaconBlockBody`, `SignedBeaconBlock`, and their block-specific nested types are declared and three pinned minimal block fixtures pass SSZ decoding, reserialization, and root checks. State and execution header roots still cannot be computed through named project types. |
+| 2 | Most Fulu static fixtures are not wired into the project test build | `src/ssz/fulu_fixture_test.zig` covers shared zero roots, nonzero sync types, and three `BeaconBlock` examples. The broader fixture selection and integration tracked by FULU-004 and FULU-009 remain outstanding. |
 | Out of scope | Generic compatible-union and progressive-type gaps | The 39 baseline placeholders cover those features; none occurs in the Fulu schema closure above. Generalized-index proof helpers are also outside SSZ serialization and hash-tree-root for these values. |
 
-No generic primitive or container-kind gap was found in this schema closure. The required next implementation work is to define and wire the concrete schema types, then exercise them against the pinned fixtures; this issue records the inventory only.
+No generic primitive or container-kind gap was found in this schema closure. The next implementation work is to complete the state schema and extend fixture execution to the set selected by FULU-004.
