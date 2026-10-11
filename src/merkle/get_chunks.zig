@@ -34,10 +34,8 @@ pub fn GetChunks(allocator: std.mem.Allocator, value: anytype) (std.mem.Allocato
         },
         .Array => {
             const E = desc.element.?;
-            if (comptime strategy_mod.isDensePackable(E)) {
-                if (comptime @typeInfo(E) == .array) {
-                    return strategy_mod.packFixedArrays(E, allocator, value);
-                }
+            if (comptime @typeInfo(E) == .int or @typeInfo(E) == .bool) {
+                // SSZ packs basic array elements together; composite elements need separate roots.
                 return strategy_mod.packBasicArray(E, allocator, value);
             }
             const info = @typeInfo(T).array;
