@@ -153,6 +153,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    mod.addImport("types", types_mod);
     const descriptor_mod = b.createModule(.{
         .root_source_file = b.path("src/ssz/type_descriptor.zig"),
         .target = target,

@@ -20,5 +20,5 @@ test "basic add functionality" {
 }
 
 test "Fulu shared types are exported" {
-    _ = fulu.Fork;
+    _ = @sizeOf(fulu.SyncAggregate);
 }
