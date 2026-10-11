@@ -153,6 +153,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    mod.addImport("types", types_mod);
     const descriptor_mod = b.createModule(.{
         .root_source_file = b.path("src/ssz/type_descriptor.zig"),
         .target = target,
@@ -192,6 +193,13 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "ssz", .module = ssz_mod },
                 .{ .name = "types", .module = types_mod },
                 .{ .name = "type_descriptor", .module = descriptor_mod },
+                .{ .name = "fulu", .module = b.createModule(.{
+                    .root_source_file = b.path("src/types/fulu.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{.{ .name = "types", .module = types_mod }},
+                }) },
+                .{ .name = "merkle", .module = merkle_mod },
             },
         }),
     });
@@ -208,9 +216,26 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    const fulu_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/types/fulu_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "fulu", .module = b.createModule(.{
+                    .root_source_file = b.path("src/types/fulu.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{.{ .name = "types", .module = types_mod }},
+                }) },
+            },
+        }),
+    });
+
     const run_tests = b.addRunArtifact(rlp_tests);
     const run_tests_ssz = b.addRunArtifact(ssz_tests);
     const run_tests_merkle = b.addRunArtifact(merkle_tests);
+    const run_fulu_tests = b.addRunArtifact(fulu_tests);
 
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
@@ -219,6 +244,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_tests.step);
     test_step.dependOn(&run_tests_ssz.step);
     test_step.dependOn(&run_tests_merkle.step);
+    test_step.dependOn(&run_fulu_tests.step);
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
