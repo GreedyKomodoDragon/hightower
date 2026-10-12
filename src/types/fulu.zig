@@ -222,6 +222,26 @@ pub const ExecutionPayload = struct {
     excess_blob_gas: u64,
 };
 
+pub const ExecutionPayloadHeader = struct {
+    parent_hash: Hash32,
+    fee_recipient: ExecutionAddress,
+    state_root: Bytes32,
+    receipts_root: Bytes32,
+    logs_bloom: [256]u8,
+    prev_randao: Bytes32,
+    block_number: u64,
+    gas_limit: u64,
+    gas_used: u64,
+    timestamp: u64,
+    extra_data: types.ByteList(32),
+    base_fee_per_gas: u256,
+    block_hash: Hash32,
+    transactions_root: Root,
+    withdrawals_root: Root,
+    blob_gas_used: u64,
+    excess_blob_gas: u64,
+};
+
 pub const ExecutionRequests = struct {
     deposits: types.List(DepositRequest, 8192),
     withdrawals: types.List(WithdrawalRequest, 16),
