@@ -10,9 +10,8 @@
 //! header, historical roots, Eth1 data, validators and balances, sync
 //! committees, the latest execution payload header, pending queues, and
 //! proposer lookahead. This file defines the Fulu block and shared nested
-//! containers; BeaconState is still defined by separate schema work. Struct
-//! field order is SSZ field order. Fixed vectors use Zig arrays, while
-//! variable lists use the generic SSZ List type.
+//! containers. Struct field order is SSZ field order. Fixed vectors use Zig
+//! arrays, while variable lists use the generic SSZ List type.
 
 const types = @import("types");
 
@@ -275,4 +274,46 @@ pub const BeaconBlock = struct {
 pub const SignedBeaconBlock = struct {
     message: BeaconBlock,
     signature: BLSSignature,
+};
+
+/// Beacon state schema for the Fulu minimal preset, in consensus-spec field order.
+pub const BeaconState = struct {
+    genesis_time: u64,
+    genesis_validators_root: Root,
+    slot: Slot,
+    fork: Fork,
+    latest_block_header: BeaconBlockHeader,
+    block_roots: [64]Root,
+    state_roots: [64]Root,
+    historical_roots: types.List(Root, 16_777_216),
+    eth1_data: Eth1Data,
+    eth1_data_votes: types.List(Eth1Data, 32),
+    eth1_deposit_index: u64,
+    validators: types.List(Validator, 1_099_511_627_776),
+    balances: types.List(Gwei, 1_099_511_627_776),
+    randao_mixes: [64]Bytes32,
+    slashings: [64]Gwei,
+    previous_epoch_participation: types.List(ParticipationFlags, 1_099_511_627_776),
+    current_epoch_participation: types.List(ParticipationFlags, 1_099_511_627_776),
+    justification_bits: types.BitVector(4),
+    previous_justified_checkpoint: Checkpoint,
+    current_justified_checkpoint: Checkpoint,
+    finalized_checkpoint: Checkpoint,
+    inactivity_scores: types.List(u64, 1_099_511_627_776),
+    current_sync_committee: SyncCommittee,
+    next_sync_committee: SyncCommittee,
+    latest_execution_payload_header: ExecutionPayloadHeader,
+    next_withdrawal_index: WithdrawalIndex,
+    next_withdrawal_validator_index: ValidatorIndex,
+    historical_summaries: types.List(HistoricalSummary, 16_777_216),
+    deposit_requests_start_index: u64,
+    deposit_balance_to_consume: Gwei,
+    exit_balance_to_consume: Gwei,
+    earliest_exit_epoch: Epoch,
+    consolidation_balance_to_consume: Gwei,
+    earliest_consolidation_epoch: Epoch,
+    pending_deposits: types.List(PendingDeposit, 134_217_728),
+    pending_partial_withdrawals: types.List(PendingPartialWithdrawal, 64),
+    pending_consolidations: types.List(PendingConsolidation, 64),
+    proposer_lookahead: [16]ValidatorIndex,
 };
