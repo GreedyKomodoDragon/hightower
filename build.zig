@@ -161,6 +161,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "types", .module = types_mod }},
     });
+    mod.addImport("fulu", fulu_mod);
+    mod.addImport("blst", blst);
     const descriptor_mod = b.createModule(.{
         .root_source_file = b.path("src/ssz/type_descriptor.zig"),
         .target = target,
@@ -190,6 +192,8 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ssz_errors", .module = ssz_errors_mod },
         },
     });
+    mod.addImport("ssz", ssz_mod);
+    mod.addImport("merkle", merkle_mod);
 
     const ssz_tests = b.addTest(.{
         .root_module = b.createModule(.{

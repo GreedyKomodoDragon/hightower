@@ -9,8 +9,9 @@ test {
     _ = @import("snappy.zig");
     _ = @import("fixture_runner.zig");
     _ = @import("transition.zig");
-    _ = @import("epoch.zig");
     _ = @import("lookahead.zig");
+    _ = @import("execution_engine.zig");
+    _ = @import("block.zig");
     _ = @import("pending_consolidations.zig");
     _ = @import("pending_deposits.zig");
 }

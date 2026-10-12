@@ -2,7 +2,8 @@
 const std = @import("std");
 const Io = std.Io;
 
-pub const fulu = @import("types/fulu.zig");
+pub const fulu = @import("fulu");
+pub const consensus = @import("consensus/root.zig");
 
 /// This is a documentation comment to explain the `printAnotherMessage` function below.
 ///
@@ -21,4 +22,6 @@ test "basic add functionality" {
 
 test "Fulu shared types are exported" {
     _ = @sizeOf(fulu.SyncAggregate);
+    const run: *const fn (std.mem.Allocator, *fulu.BeaconState, fulu.SignedBeaconBlock, consensus.ExecutionEngine) anyerror!void = consensus.stateTransition;
+    _ = run;
 }
