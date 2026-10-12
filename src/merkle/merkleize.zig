@@ -36,7 +36,8 @@ pub fn Merkleize(
         return chunks[0];
     }
 
-    var level = try allocator.alloc([32]u8, width);
+    const populated_width = nextPow2(count);
+    var level = try allocator.alloc([32]u8, populated_width);
     defer allocator.free(level);
 
     @memset(level, [_]u8{0} ** 32);
@@ -45,7 +46,7 @@ pub fn Merkleize(
         level[i] = chunk;
     }
 
-    var current_len = width;
+    var current_len = populated_width;
 
     while (current_len > 1) {
         var i: usize = 0;
@@ -55,24 +56,27 @@ pub fn Merkleize(
             i += 2;
             parent += 1;
         }) {
-            var input: [64]u8 = undefined;
-
-            @memcpy(input[0..32], &level[i]);
-            @memcpy(input[32..64], &level[i + 1]);
-
-            // block is taking two 32-byte child nodes and hashing them into one 32-byte parent node
-            // done compress many leaves into one cryptographic commitment
-            std.crypto.hash.sha2.Sha256.hash(
-                &input,
-                &level[parent],
-                .{},
-            );
+            level[parent] = hashPair(level[i], level[i + 1]);
         }
 
         current_len /= 2;
     }
 
-    return level[0];
+    var root = level[0];
+    var subtree_width = populated_width;
+    while (subtree_width < width) : (subtree_width *= 2) {
+        root = hashPair(root, zeroTreeRoot(subtree_width));
+    }
+    return root;
+}
+
+fn hashPair(left: [32]u8, right: [32]u8) [32]u8 {
+    var input: [64]u8 = undefined;
+    @memcpy(input[0..32], &left);
+    @memcpy(input[32..64], &right);
+    var root: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(&input, &root, .{});
+    return root;
 }
 
 /// Smallest power of two greater than or equal to x. Returns 1 for 0.
