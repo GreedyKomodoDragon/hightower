@@ -4,13 +4,13 @@
 
 This inventory uses the Fulu v1.6.1 specification pinned at commit `5fa6edcca8ab4cf548653e6680b17b9d3e04d225` and the minimal preset. Fulu builds on Electra; the schemas below include the relevant inherited Phase0, Altair, Bellatrix, Capella, Deneb, and Electra definitions, then apply the Fulu `BeaconState` extension. See [the lock](FULU-SPEC-LOCK.md), [FULU-001](https://github.com/GreedyKomodoDragon/hightower/issues/12), [FULU-002](https://github.com/GreedyKomodoDragon/hightower/issues/13), [pinned Fulu spec](https://github.com/ethereum/consensus-specs/blob/v1.6.1/specs/fulu/beacon-chain.md), and [pinned Electra spec](https://github.com/ethereum/consensus-specs/blob/v1.6.1/specs/electra/beacon-chain.md).
 
-The recorded baseline predates the block fixture tests. The 39 remaining generic vector tests explicitly return `VectorNotImplemented`; they cover compatible unions and progressive types, which do not appear in the Fulu beacon schema closure inventoried here.
+The 39 remaining generic vector tests explicitly return `VectorNotImplemented`; they cover compatible unions and progressive types, which do not appear in the Fulu beacon schema closure inventoried here.
 
 ## Support key
 
 The SSZ library has generic encode/decode routes for unsigned integers through 256 bits, booleans, fixed arrays, bitvectors, bitlists, bytevectors, bytelists, lists, and regular containers. Its hash-tree-root path covers those same required kinds, including nested containers, vectors, and lists. Relevant routes are in [`type_descriptor.zig`](../src/ssz/type_descriptor.zig), [`serialize.zig`](../src/ssz/serialize.zig), [`deserialize.zig`](../src/ssz/deserialize.zig), [`hash_tree_root.zig`](../src/merkle/hash_tree_root.zig), and [`get_chunks.zig`](../src/merkle/get_chunks.zig).
 
-**Generic route only** means the kind can be processed when supplied as a Zig type, but no named Fulu type exists for it yet. [`fulu.zig`](../src/types/fulu.zig) declares shared types and the block schema. [`fulu_test.zig`](../src/types/fulu_test.zig) checks basic block type structure; SSZ roots, round trips, and pinned fixtures live in [`fulu_fixture_test.zig`](../src/ssz/fulu_fixture_test.zig). That test covers zero roots for 13 shared types, nonzero `SyncAggregate` and `SyncCommittee` fixtures, and three `BeaconBlock` cases. The two random block cases are embedded as raw SSZ under [`src/ssz/fixtures`](../src/ssz/fixtures) and checked against the pinned roots. `BeaconState` and `ExecutionPayloadHeader` remain incomplete. “Fixture cases” counts the pinned test bundle’s cases on disk, not cases currently executed by Hightower.
+**Generic route only** means the kind can be processed when supplied as a Zig type, but no named Fulu type exists for it yet. [`fulu.zig`](../src/types/fulu.zig) declares shared types, block schemas, and `ExecutionPayloadHeader`. [`fulu_test.zig`](../src/types/fulu_test.zig) checks basic block type structure; SSZ roots, round trips, and pinned fixtures live in [`fulu_fixture_test.zig`](../src/ssz/fulu_fixture_test.zig). That test covers one `ssz_nil` fixture for each listed Fulu block schema and nested type, plus random `BeaconBlock` cases 7 and 22. The raw SSZ fixtures are checked in under [`src/ssz/fixtures`](../src/ssz/fixtures), decoded and re-encoded byte-for-byte, and checked against the roots from the pinned fixture tree. `BeaconState` remains incomplete. “Fixture cases” counts the pinned test bundle’s cases on disk, not cases currently executed by Hightower.
 
 ## BeaconState fields
 
@@ -42,7 +42,7 @@ Each field in the Fulu state is listed explicitly. Bounds are resolved against t
 | `inactivity_scores` | `List[uint64, 1,099,511,627,776]` | Generic route only; `BeaconState` fixture |
 | `current_sync_committee` | `SyncCommittee` container | `SyncCommittee` implemented; BeaconState field not yet declared |
 | `next_sync_committee` | `SyncCommittee` container | `SyncCommittee` implemented; BeaconState field not yet declared |
-| `latest_execution_payload_header` | `ExecutionPayloadHeader` container | Generic route only; `ExecutionPayloadHeader` fixture |
+| `latest_execution_payload_header` | `ExecutionPayloadHeader` container | `ExecutionPayloadHeader` implemented; BeaconState field not yet declared |
 | `next_withdrawal_index` | `WithdrawalIndex` (`uint64`) | Generic route only; `BeaconState` fixture |
 | `next_withdrawal_validator_index` | `ValidatorIndex` (`uint64`) | Generic route only; `BeaconState` fixture |
 | `historical_summaries` | `List[HistoricalSummary, 16,777,216]` | `HistoricalSummary` implemented; BeaconState field not yet declared |
@@ -59,7 +59,7 @@ Each field in the Fulu state is listed explicitly. Bounds are resolved against t
 
 ## Recursive container schemas
 
-Fields are given as `field: SSZ type`; aliases follow the pinned consensus specifications. Every listed type has 123 expected-root cases in `testdata/consensus-specs-v1.6.1/tests/minimal/fulu/ssz_static/<Type>/`, across `ssz_lengthy`, `ssz_max`, `ssz_nil`, `ssz_one`, `ssz_random`, `ssz_random_chaos`, and `ssz_zero`. The shared types have concrete declarations, but only the 13 foundational shared types currently get zero-root checks. The block fixture tests currently use `BeaconBlock/ssz_nil/case_0` and random cases 7 and 22; the two checked-in raw SSZ files are decompressed copies of each case's `serialized.ssz_snappy`. Tests decode them, check the root from the adjacent `roots.yaml`, and verify byte-for-byte reserialization. Most of the pinned cases remain unwired.
+Fields are given as `field: SSZ type`; aliases follow the pinned consensus specifications. Every listed type has 123 expected-root cases in `testdata/consensus-specs-v1.6.1/tests/minimal/fulu/ssz_static/<Type>/`, across `ssz_lengthy`, `ssz_max`, `ssz_nil`, `ssz_one`, `ssz_random`, `ssz_random_chaos`, and `ssz_zero`. The fixture test uses `ssz_nil/case_0` for each listed block schema and nested type, including `ExecutionPayloadHeader`, plus random `BeaconBlock` cases 7 and 22. The checked-in raw SSZ files are decompressed copies of each case's `serialized.ssz_snappy`; tests decode them, check the root from the adjacent `roots.yaml`, and verify byte-for-byte reserialization. Most pinned cases remain unwired.
 
 | Type (kind) | Schema fields and bounds | Fixture cases |
 | --- | --- | --- |
@@ -105,8 +105,8 @@ The `blob_kzg_commitments` SSZ bound is the fixed minimal-preset `MAX_BLOB_COMMI
 
 | Rank | Gap | Evidence and consequence |
 | --- | --- | --- |
-| 1 | BeaconState and ExecutionPayloadHeader schemas remain incomplete | `BeaconBlock`, `BeaconBlockBody`, `SignedBeaconBlock`, and their block-specific nested types are declared and three pinned minimal block fixtures pass SSZ decoding, reserialization, and root checks. State and execution header roots still cannot be computed through named project types. |
-| 2 | Most Fulu static fixtures are not wired into the project test build | `src/ssz/fulu_fixture_test.zig` covers shared zero roots, nonzero sync types, and three `BeaconBlock` examples. The broader fixture selection and integration tracked by FULU-004 and FULU-009 remain outstanding. |
+| 1 | BeaconState schema remains incomplete | `BeaconBlock`, `BeaconBlockBody`, `SignedBeaconBlock`, their nested types, and `ExecutionPayloadHeader` are declared and have pinned minimal fixture coverage. The complete Fulu state root still cannot be computed through a named project type. |
+| 2 | Most Fulu static fixtures are not wired into the project test build | `src/ssz/fulu_fixture_test.zig` covers one `ssz_nil` case per block schema and nested type plus two random `BeaconBlock` cases. The broader fixture selection and integration tracked by FULU-004 and FULU-009 remain outstanding. |
 | Out of scope | Generic compatible-union and progressive-type gaps | The 39 baseline placeholders cover those features; none occurs in the Fulu schema closure above. Generalized-index proof helpers are also outside SSZ serialization and hash-tree-root for these values. |
 
 No generic primitive or container-kind gap was found in this schema closure. The next implementation work is to complete the state schema and extend fixture execution to the set selected by FULU-004.
