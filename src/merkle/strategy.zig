@@ -73,6 +73,8 @@ pub fn containerLeaves(
     allocator: std.mem.Allocator,
     value: anytype,
 ) ![][32]u8 {
+    // Wide schemas such as BeaconState need more comptime branches to unroll.
+    @setEvalBranchQuota(20_000);
     const T = @TypeOf(value);
     const info = @typeInfo(T).@"struct";
 

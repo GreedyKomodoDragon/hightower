@@ -68,3 +68,10 @@ test "Fulu BeaconBlock matches pinned random fixtures" {
         "1934cedbde590d7bea2f78c7c675d376061db508ef146fd75a42cf7996a4575f",
     );
 }
+
+test "Fulu BeaconState matches pinned static fixtures" {
+    try expectSerializedFixture(fulu.BeaconState, @embedFile("fixtures/fulu_static/BeaconState_ssz_nil.ssz"), "01320be217af530e3534c0522a51208f5aef449e3891f02755487012998ed143");
+    try expectSerializedFixture(fulu.BeaconState, @embedFile("fixtures/fulu_static/BeaconState_ssz_zero.ssz"), "719e0056a623b67447f671cff7a5700c82467716d9934d7dea63a0e0c42f039f");
+    try expectSerializedFixture(fulu.BeaconState, @embedFile("fixtures/fulu_static/BeaconState_ssz_one.ssz"), "0707081c5c0c9bae38f7a4cda1dfe877ca4ebb30582c23508f8b0b614ab3cb9e");
+    try expectSerializedFixture(fulu.BeaconState, @embedFile("fixtures/fulu_static/BeaconState_ssz_random.ssz"), "26e29f8812013544d8423ebecf94340d55bca179ad51ffdf8fb3fc627635a2cd");
+}

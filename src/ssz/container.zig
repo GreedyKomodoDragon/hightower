@@ -11,6 +11,8 @@ const offset_mod = @import("offset.zig");
 const free_mod = @import("free.zig");
 
 pub fn serializeContainer(writer: *std.Io.Writer, value: anytype) !void {
+    // Wide schemas such as BeaconState need more comptime branches to unroll.
+    @setEvalBranchQuota(20_000);
     const T = @TypeOf(value);
     const info = @typeInfo(T).@"struct";
 
@@ -53,6 +55,8 @@ pub fn deserializeContainer(
     comptime T: type,
     reader: *std.Io.Reader,
 ) !T {
+    // Wide schemas such as BeaconState need more comptime branches to unroll.
+    @setEvalBranchQuota(20_000);
     const info = @typeInfo(T).@"struct";
 
     const bytes = try reader.allocRemaining(allocator, .unlimited);

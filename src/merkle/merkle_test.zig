@@ -20,6 +20,13 @@ fn hashPair(left: [32]u8, right: [32]u8) [32]u8 {
     return out;
 }
 
+fn zeroTreeRoot(width: usize) [32]u8 {
+    var node = [_]u8{0} ** 32;
+    var leaves = width;
+    while (leaves > 1) : (leaves /= 2) node = hashPair(node, node);
+    return node;
+}
+
 test "Merkleize one chunk returns chunk unchanged" {
     const allocator = testing.allocator;
 
@@ -145,4 +152,17 @@ test "Merkleize five chunks pads tree to eight leaves" {
         &expected,
         &root,
     );
+}
+
+test "Merkleize sparse chunks under a huge limit without allocating the limit" {
+    const a = [_]u8{0x11} ** 32;
+    var expected = a;
+    var subtree_width: usize = 1;
+    const width: usize = 1 << 40;
+    while (subtree_width < width) : (subtree_width *= 2) {
+        expected = hashPair(expected, zeroTreeRoot(subtree_width));
+    }
+
+    const root = try merkle.Merkleize(testing.allocator, &.{a}, width);
+    try testing.expectEqualSlices(u8, &expected, &root);
 }
