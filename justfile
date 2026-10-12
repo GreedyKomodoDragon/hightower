@@ -22,6 +22,10 @@ run *ARGS:
 test:
     zig build test
 
+# run selected Fulu transition fixture checks
+fulu-transition-test:
+    zig build test-transition --summary all
+
 # run tests with the Zig test fuzzer
 fuzz:
     zig build test -- --fuzz
