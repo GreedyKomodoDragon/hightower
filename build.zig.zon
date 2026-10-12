@@ -32,6 +32,10 @@
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
     .dependencies = .{
+        .blst = .{
+            .url = "https://github.com/supranational/blst/archive/refs/tags/v0.3.17.tar.gz",
+            .hash = "blst-0.3.17-pWUN_nxeLgAMRveed9s7nBMqCLdWMTjX_WNto9K4Oozb",
+        },
         // See `zig fetch --save <url>` for a command-line interface for adding dependencies.
         //.example = .{
         //    // When updating this field to a new URL, be sure to delete the corresponding
