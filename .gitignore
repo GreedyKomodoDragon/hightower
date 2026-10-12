@@ -4,6 +4,7 @@ zig-out/
 
 # Zig package manager
 .zig/
+zig-pkg/
 
 # IDE / editor
 .vscode/
