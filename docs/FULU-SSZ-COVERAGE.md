@@ -10,7 +10,7 @@ The 39 remaining generic vector tests explicitly return `VectorNotImplemented`; 
 
 The SSZ library has generic encode/decode routes for unsigned integers through 256 bits, booleans, fixed arrays, bitvectors, bitlists, bytevectors, bytelists, lists, and regular containers. Its hash-tree-root path covers those same required kinds, including nested containers, vectors, and lists. Relevant routes are in [`type_descriptor.zig`](../src/ssz/type_descriptor.zig), [`serialize.zig`](../src/ssz/serialize.zig), [`deserialize.zig`](../src/ssz/deserialize.zig), [`hash_tree_root.zig`](../src/merkle/hash_tree_root.zig), and [`get_chunks.zig`](../src/merkle/get_chunks.zig).
 
-**Generic route only** means the kind can be processed when supplied as a Zig type, but no named Fulu type exists for it yet. [`fulu.zig`](../src/types/fulu.zig) declares shared types, block schemas, and `ExecutionPayloadHeader`. [`fulu_test.zig`](../src/types/fulu_test.zig) checks basic block type structure; SSZ roots, round trips, and pinned fixtures live in [`fulu_fixture_test.zig`](../src/ssz/fulu_fixture_test.zig). That test covers one `ssz_nil` fixture for each listed Fulu block schema and nested type, plus random `BeaconBlock` cases 7 and 22. The raw SSZ fixtures are checked in under [`src/ssz/fixtures`](../src/ssz/fixtures), decoded and re-encoded byte-for-byte, and checked against the roots from the pinned fixture tree. `BeaconState` remains incomplete. “Fixture cases” counts the pinned test bundle’s cases on disk, not cases currently executed by Hightower.
+**Generic route only** means the kind can be processed when supplied as a Zig type, but no named Fulu type exists for it yet. [`fulu.zig`](../src/types/fulu.zig) declares shared types, block schemas, `ExecutionPayloadHeader`, and the 38-field Fulu `BeaconState`. [`fulu_test.zig`](../src/types/fulu_test.zig) checks basic block type structure; SSZ roots, round trips, and pinned fixtures live in [`fulu_fixture_test.zig`](../src/ssz/fulu_fixture_test.zig). That test covers one `ssz_nil` fixture for each listed Fulu block schema and nested type, plus random `BeaconBlock` cases 7 and 22 and `BeaconState` cases `ssz_nil`, `ssz_zero`, `ssz_one`, and `ssz_random` (case 0). The raw SSZ fixtures are checked in under [`src/ssz/fixtures`](../src/ssz/fixtures), decoded and re-encoded byte-for-byte, and checked against the roots from the pinned fixture tree. “Fixture cases” counts the pinned test bundle’s cases on disk, not cases currently executed by Hightower.
 
 ## BeaconState fields
 
@@ -18,44 +18,44 @@ Each field in the Fulu state is listed explicitly. Bounds are resolved against t
 
 | Field | SSZ type and minimal bound | Code / fixture |
 | --- | --- | --- |
-| `genesis_time` | `uint64` | Generic route only; `BeaconState` fixture |
-| `genesis_validators_root` | `Root` (`Bytes32`) | Generic route only; `BeaconState` fixture |
-| `slot` | `Slot` (`uint64`) | Generic route only; `BeaconState` fixture |
-| `fork` | `Fork` container | `Fork` implemented; BeaconState field not yet declared |
-| `latest_block_header` | `BeaconBlockHeader` container | `BeaconBlockHeader` implemented; BeaconState field not yet declared |
-| `block_roots` | `Vector[Root, 64]` | Generic route only; `BeaconState` fixture |
-| `state_roots` | `Vector[Root, 64]` | Generic route only; `BeaconState` fixture |
-| `historical_roots` | `List[Root, 16,777,216]` | Generic route only; `BeaconState` fixture |
-| `eth1_data` | `Eth1Data` container | `Eth1Data` implemented; BeaconState field not yet declared |
-| `eth1_data_votes` | `List[Eth1Data, 32]` (`4 × 8`) | Generic route only; `BeaconState` fixture |
-| `eth1_deposit_index` | `uint64` | Generic route only; `BeaconState` fixture |
-| `validators` | `List[Validator, 1,099,511,627,776]` | `Validator` implemented; BeaconState field not yet declared |
-| `balances` | `List[Gwei, 1,099,511,627,776]` (`Gwei = uint64`) | Generic route only; `BeaconState` fixture |
-| `randao_mixes` | `Vector[Bytes32, 64]` | Generic route only; `BeaconState` fixture |
-| `slashings` | `Vector[Gwei, 64]` (`Gwei = uint64`) | Generic route only; `BeaconState` fixture |
-| `previous_epoch_participation` | `List[ParticipationFlags, 1,099,511,627,776]` (`ParticipationFlags = uint8`) | Generic route only; `BeaconState` fixture |
-| `current_epoch_participation` | `List[ParticipationFlags, 1,099,511,627,776]` (`ParticipationFlags = uint8`) | Generic route only; `BeaconState` fixture |
-| `justification_bits` | `Bitvector[4]` | Generic route only; `BeaconState` fixture |
-| `previous_justified_checkpoint` | `Checkpoint` container | `Checkpoint` implemented; BeaconState field not yet declared |
-| `current_justified_checkpoint` | `Checkpoint` container | `Checkpoint` implemented; BeaconState field not yet declared |
-| `finalized_checkpoint` | `Checkpoint` container | `Checkpoint` implemented; BeaconState field not yet declared |
-| `inactivity_scores` | `List[uint64, 1,099,511,627,776]` | Generic route only; `BeaconState` fixture |
-| `current_sync_committee` | `SyncCommittee` container | `SyncCommittee` implemented; BeaconState field not yet declared |
-| `next_sync_committee` | `SyncCommittee` container | `SyncCommittee` implemented; BeaconState field not yet declared |
-| `latest_execution_payload_header` | `ExecutionPayloadHeader` container | `ExecutionPayloadHeader` implemented; BeaconState field not yet declared |
-| `next_withdrawal_index` | `WithdrawalIndex` (`uint64`) | Generic route only; `BeaconState` fixture |
-| `next_withdrawal_validator_index` | `ValidatorIndex` (`uint64`) | Generic route only; `BeaconState` fixture |
-| `historical_summaries` | `List[HistoricalSummary, 16,777,216]` | `HistoricalSummary` implemented; BeaconState field not yet declared |
-| `deposit_requests_start_index` | `uint64` | Generic route only; `BeaconState` fixture |
-| `deposit_balance_to_consume` | `Gwei` (`uint64`) | Generic route only; `BeaconState` fixture |
-| `exit_balance_to_consume` | `Gwei` (`uint64`) | Generic route only; `BeaconState` fixture |
-| `earliest_exit_epoch` | `Epoch` (`uint64`) | Generic route only; `BeaconState` fixture |
-| `consolidation_balance_to_consume` | `Gwei` (`uint64`) | Generic route only; `BeaconState` fixture |
-| `earliest_consolidation_epoch` | `Epoch` (`uint64`) | Generic route only; `BeaconState` fixture |
-| `pending_deposits` | `List[PendingDeposit, 134,217,728]` | `PendingDeposit` implemented; BeaconState field not yet declared |
-| `pending_partial_withdrawals` | `List[PendingPartialWithdrawal, 64]` | `PendingPartialWithdrawal` implemented; BeaconState field not yet declared |
-| `pending_consolidations` | `List[PendingConsolidation, 64]` | `PendingConsolidation` implemented; BeaconState field not yet declared |
-| `proposer_lookahead` | `Vector[ValidatorIndex, 16]` (`(1 + 1) × 8`) | Generic route only; `BeaconState` fixture |
+| `genesis_time` | `uint64` | Declared in `BeaconState`; static fixture |
+| `genesis_validators_root` | `Root` (`Bytes32`) | Declared in `BeaconState`; static fixture |
+| `slot` | `Slot` (`uint64`) | Declared in `BeaconState`; static fixture |
+| `fork` | `Fork` container | Declared in `BeaconState`; reuses `Fork` |
+| `latest_block_header` | `BeaconBlockHeader` container | Declared in `BeaconState`; reuses `BeaconBlockHeader` |
+| `block_roots` | `Vector[Root, 64]` | Declared in `BeaconState`; static fixture |
+| `state_roots` | `Vector[Root, 64]` | Declared in `BeaconState`; static fixture |
+| `historical_roots` | `List[Root, 16,777,216]` | Declared in `BeaconState`; static fixture |
+| `eth1_data` | `Eth1Data` container | Declared in `BeaconState`; reuses `Eth1Data` |
+| `eth1_data_votes` | `List[Eth1Data, 32]` (`4 × 8`) | Declared in `BeaconState`; static fixture |
+| `eth1_deposit_index` | `uint64` | Declared in `BeaconState`; static fixture |
+| `validators` | `List[Validator, 1,099,511,627,776]` | Declared in `BeaconState`; reuses `Validator` |
+| `balances` | `List[Gwei, 1,099,511,627,776]` (`Gwei = uint64`) | Declared in `BeaconState`; static fixture |
+| `randao_mixes` | `Vector[Bytes32, 64]` | Declared in `BeaconState`; static fixture |
+| `slashings` | `Vector[Gwei, 64]` (`Gwei = uint64`) | Declared in `BeaconState`; static fixture |
+| `previous_epoch_participation` | `List[ParticipationFlags, 1,099,511,627,776]` (`ParticipationFlags = uint8`) | Declared in `BeaconState`; static fixture |
+| `current_epoch_participation` | `List[ParticipationFlags, 1,099,511,627,776]` (`ParticipationFlags = uint8`) | Declared in `BeaconState`; static fixture |
+| `justification_bits` | `Bitvector[4]` | Declared in `BeaconState`; static fixture |
+| `previous_justified_checkpoint` | `Checkpoint` container | Declared in `BeaconState`; reuses `Checkpoint` |
+| `current_justified_checkpoint` | `Checkpoint` container | Declared in `BeaconState`; reuses `Checkpoint` |
+| `finalized_checkpoint` | `Checkpoint` container | Declared in `BeaconState`; reuses `Checkpoint` |
+| `inactivity_scores` | `List[uint64, 1,099,511,627,776]` | Declared in `BeaconState`; static fixture |
+| `current_sync_committee` | `SyncCommittee` container | Declared in `BeaconState`; reuses `SyncCommittee` |
+| `next_sync_committee` | `SyncCommittee` container | Declared in `BeaconState`; reuses `SyncCommittee` |
+| `latest_execution_payload_header` | `ExecutionPayloadHeader` container | Declared in `BeaconState`; reuses `ExecutionPayloadHeader` |
+| `next_withdrawal_index` | `WithdrawalIndex` (`uint64`) | Declared in `BeaconState`; static fixture |
+| `next_withdrawal_validator_index` | `ValidatorIndex` (`uint64`) | Declared in `BeaconState`; static fixture |
+| `historical_summaries` | `List[HistoricalSummary, 16,777,216]` | Declared in `BeaconState`; reuses `HistoricalSummary` |
+| `deposit_requests_start_index` | `uint64` | Declared in `BeaconState`; static fixture |
+| `deposit_balance_to_consume` | `Gwei` (`uint64`) | Declared in `BeaconState`; static fixture |
+| `exit_balance_to_consume` | `Gwei` (`uint64`) | Declared in `BeaconState`; static fixture |
+| `earliest_exit_epoch` | `Epoch` (`uint64`) | Declared in `BeaconState`; static fixture |
+| `consolidation_balance_to_consume` | `Gwei` (`uint64`) | Declared in `BeaconState`; static fixture |
+| `earliest_consolidation_epoch` | `Epoch` (`uint64`) | Declared in `BeaconState`; static fixture |
+| `pending_deposits` | `List[PendingDeposit, 134,217,728]` | Declared in `BeaconState`; reuses `PendingDeposit` |
+| `pending_partial_withdrawals` | `List[PendingPartialWithdrawal, 64]` | Declared in `BeaconState`; reuses `PendingPartialWithdrawal` |
+| `pending_consolidations` | `List[PendingConsolidation, 64]` | Declared in `BeaconState`; reuses `PendingConsolidation` |
+| `proposer_lookahead` | `Vector[ValidatorIndex, 16]` (`(1 + 1) × 8`) | Declared in `BeaconState`; static fixture |
 
 ## Recursive container schemas
 
@@ -105,8 +105,7 @@ The `blob_kzg_commitments` SSZ bound is the fixed minimal-preset `MAX_BLOB_COMMI
 
 | Rank | Gap | Evidence and consequence |
 | --- | --- | --- |
-| 1 | BeaconState schema remains incomplete | `BeaconBlock`, `BeaconBlockBody`, `SignedBeaconBlock`, their nested types, and `ExecutionPayloadHeader` are declared and have pinned minimal fixture coverage. The complete Fulu state root still cannot be computed through a named project type. |
-| 2 | Most Fulu static fixtures are not wired into the project test build | `src/ssz/fulu_fixture_test.zig` covers one `ssz_nil` case per block schema and nested type plus two random `BeaconBlock` cases. The broader fixture selection and integration tracked by FULU-004 and FULU-009 remain outstanding. |
+| 1 | Most Fulu static fixtures remain unwired | `src/ssz/fulu_fixture_test.zig` runs the selected schema cases; the remaining pinned corpus is intentionally deferred. |
 | Out of scope | Generic compatible-union and progressive-type gaps | The 39 baseline placeholders cover those features; none occurs in the Fulu schema closure above. Generalized-index proof helpers are also outside SSZ serialization and hash-tree-root for these values. |
 
-No generic primitive or container-kind gap was found in this schema closure. The next implementation work is to complete the state schema and extend fixture execution to the set selected by FULU-004.
+No generic primitive or container-kind gap was found in this schema closure. The schema and initial fixture work is complete; the selected state-transition cases are documented in [the conformance test plan](tasks/FULU-TEST-PLAN.md) for when those handlers are implemented.
