@@ -1,3 +1,18 @@
+// A BeaconBlock is the consensus-layer proposal for one slot. Its body also
+// carries an execution payload, whose transactions need an execution engine's
+// verdict; a valid beacon signature alone cannot establish payload validity.
+// This transition advances empty slots, verifies the proposer and parent, then
+// applies the supported block fields in the order this implementation uses:
+//
+//   slots -> proposer signature -> header -> withdrawal eligibility
+//         -> execution payload -> RANDAO -> Eth1 vote -> sync aggregate
+//         -> compare the resulting BeaconState root with block.state_root
+//
+// RANDAO is proposer-supplied randomness mixed into future validator selection;
+// a sync aggregate is a small committee's signature on the previous slot's
+// recorded block root.
+// Nonempty operation lists and withdrawals fail explicitly. Processing mutates
+// the allocator-owned state as it goes, so callers must discard it on any error.
 const std = @import("std");
 const fulu = @import("fulu");
 const merkle = @import("merkle");

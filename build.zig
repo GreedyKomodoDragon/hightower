@@ -1,3 +1,8 @@
+// Build graph for Hightower's Fulu schema and state-transition code. The public
+// module and consensus test root share the same Fulu, SSZ, Merkle, and BLS
+// modules, keeping exported BeaconState types compatible with transition APIs.
+// `test-transition` runs the selected pinned consensus fixtures separately
+// from the default test step.
 const std = @import("std");
 
 // Although this function looks imperative, it does not perform the build

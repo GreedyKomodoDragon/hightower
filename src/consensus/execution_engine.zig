@@ -1,3 +1,14 @@
+// Beacon consensus checks block structure and signatures, while an execution
+// engine checks the transaction payload under execution-layer rules. This
+// boundary passes the payload, blob versioned hashes, parent beacon root, and
+// Fulu execution requests without tying state transition to a network client.
+//
+//   Beacon block -> NewPayloadRequest -> engine verdict
+//                                      valid / invalid / syncing / unavailable
+//
+// Only valid permits the transition to continue. Syncing means the engine
+// cannot verify yet; unavailable is an error. TestEngine supplies deterministic
+// responses for fixtures and is not a production accept-all engine.
 const std = @import("std");
 const fulu = @import("fulu");
 
