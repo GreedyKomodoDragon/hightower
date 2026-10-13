@@ -1,7 +1,9 @@
-// A state transition deterministically turns a pre-state plus slot or epoch
-// input into a post-state. The pinned Fulu fixtures provide those inputs and
-// expected SSZ state roots. Zig discovers tests through imports, so this root
-// imports each consensus module to run their focused checks in one build step.
+// A state transition deterministically turns a pre-state plus slots, epoch
+// work, or a signed block into a post-state. The pinned Fulu fixtures check
+// resulting SSZ state roots and expected rejection when a block claims the
+// wrong post-state root.
+// Zig discovers tests through imports, so this root brings the slot, epoch,
+// block, and execution-engine checks into one build step.
 test {
     _ = @import("helpers.zig");
     _ = @import("domains.zig");
@@ -9,8 +11,9 @@ test {
     _ = @import("snappy.zig");
     _ = @import("fixture_runner.zig");
     _ = @import("transition.zig");
-    _ = @import("epoch.zig");
     _ = @import("lookahead.zig");
+    _ = @import("execution_engine.zig");
+    _ = @import("block.zig");
     _ = @import("pending_consolidations.zig");
     _ = @import("pending_deposits.zig");
 }
