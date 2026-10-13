@@ -1,3 +1,7 @@
+// Fulu queues validator deposits for epoch processing rather than applying
+// them immediately. Finality and churn limit when deposits are consumed;
+// accepted deposits top up existing validators, while new validators require
+// a valid BLS proof.
 const std = @import("std");
 const fulu = @import("fulu");
 const merkle = @import("merkle");

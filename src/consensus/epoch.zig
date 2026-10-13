@@ -1,3 +1,6 @@
+// An epoch groups slots for validator accounting and scheduled state updates.
+// This handler applies the supported quiet-epoch penalties, Fulu pending
+// queues, effective balances, randomness rollover, and proposer lookahead.
 const std = @import("std");
 const fulu = @import("fulu");
 const helpers = @import("helpers.zig");

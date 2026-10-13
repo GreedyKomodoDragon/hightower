@@ -1,3 +1,6 @@
+// Fulu keeps future block proposers in BeaconState so the upcoming schedule
+// can be read without selecting a validator at each slot. At an epoch boundary,
+// the older schedule is shifted out and a newly selected epoch is appended.
 const std = @import("std");
 const fulu = @import("fulu");
 const helpers = @import("helpers.zig");

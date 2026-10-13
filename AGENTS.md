@@ -1,5 +1,9 @@
 # Agent instructions
 
+## Blockchain code comments
+
+- Start each source file that implements blockchain concepts with a short comment block explaining those concepts in plain English and the file's role. Keep it accurate as the code changes.
+
 ## GitHub issue tracking
 
 - Track Hightower work in GitHub Issues for [`GreedyKomodoDragon/hightower`](https://github.com/GreedyKomodoDragon/hightower).

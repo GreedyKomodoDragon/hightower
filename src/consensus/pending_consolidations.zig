@@ -1,3 +1,6 @@
+// A pending consolidation moves stake from an exiting source validator to a
+// target validator once the source is withdrawable. Entries stay queued until
+// eligible, while entries for slashed sources are discarded.
 const std = @import("std");
 const fulu = @import("fulu");
 const helpers = @import("helpers.zig");

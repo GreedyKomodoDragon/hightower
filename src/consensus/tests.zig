@@ -1,3 +1,6 @@
+// A state transition is the deterministic BeaconState change caused by slots
+// and epochs. This root runs the modules' focused tests and pinned Fulu fixtures
+// together through the same build step.
 test {
     _ = @import("helpers.zig");
     _ = @import("domains.zig");

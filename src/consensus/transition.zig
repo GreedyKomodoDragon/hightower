@@ -1,3 +1,6 @@
+// A slot is one step of beacon-chain time, even when no block is produced.
+// Each step records state and block roots; crossing an epoch boundary runs
+// epoch processing before the state advances to the next slot.
 const std = @import("std");
 const fulu = @import("fulu");
 const merkle = @import("merkle");
