@@ -1,5 +1,9 @@
 # Agent instructions
 
+## Blockchain code comments
+
+- Start each source file that implements blockchain concepts with a comment block before imports. Define the relevant consensus terms, explain how state changes and why ordering matters, and state any important supported limits. Add a small ASCII diagram when it makes an epoch sequence, queue, or transition easier to follow. Keep the explanation aligned with the code rather than repeating function names.
+
 ## GitHub issue tracking
 
 - Track Hightower work in GitHub Issues for [`GreedyKomodoDragon/hightower`](https://github.com/GreedyKomodoDragon/hightower).
