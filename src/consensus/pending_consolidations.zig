@@ -1,6 +1,13 @@
-// A pending consolidation moves stake from an exiting source validator to a
-// target validator once the source is withdrawable. Entries stay queued until
-// eligible, while entries for slashed sources are discarded.
+// A consolidation moves stake from an exiting source validator to a target
+// validator within BeaconState. The request first waits in a FIFO queue;
+// transfer is allowed only when the source's withdrawable epoch has arrived.
+//
+//   slashed source -> discard request
+//   ready source   -> move min(balance, effective balance) to target
+//   first unready  -> stop; keep it and all later requests queued
+//
+// Processing removes the consumed prefix, leaving deferred entries for a later
+// epoch. The source validator stays in the registry; this step changes balances.
 const std = @import("std");
 const fulu = @import("fulu");
 const helpers = @import("helpers.zig");

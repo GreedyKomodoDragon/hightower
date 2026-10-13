@@ -1,6 +1,14 @@
-// A slot is one step of beacon-chain time, even when no block is produced.
-// Each step records state and block roots; crossing an epoch boundary runs
-// epoch processing before the state advances to the next slot.
+// A slot is one step of beacon-chain time, even if no block arrives. BeaconState
+// is the consensus snapshot; its SSZ Merkle root commits to all its fields.
+// Before leaving slot s, record that state root and the latest block-header
+// root in history rings at index s modulo the ring length. If the header has
+// no state root yet, fill it from the state root just computed.
+//
+//   state at slot s -> record roots -> [epoch work, if last slot] -> slot s+1
+//
+// processSlots repeats this sequence up to (but not including) target_slot.
+// An epoch handler is required at a boundary so slot advancement cannot skip
+// the validator accounting and other updates performed once per epoch.
 const std = @import("std");
 const fulu = @import("fulu");
 const merkle = @import("merkle");

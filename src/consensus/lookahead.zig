@@ -1,6 +1,14 @@
-// Fulu keeps future block proposers in BeaconState so the upcoming schedule
-// can be read without selecting a validator at each slot. At an epoch boundary,
-// the older schedule is shifted out and a newly selected epoch is appended.
+// A block proposer is the validator assigned to propose a block for one slot.
+// Fulu stores two epochs of proposer indices in BeaconState so the schedule is
+// already known when a slot starts. At each epoch boundary, this file rolls
+// that fixed-size window forward:
+//
+//   [older 8 slots | newer 8 slots]
+//                  -> [newer 8 slots | newly computed 8 slots]
+//
+// The new indices are selected for current_epoch + 2 using the validator set,
+// effective balances, shuffling seed, and RANDAO history in helpers.zig. The
+// slot lookup reads the first half at the slot's offset within its epoch.
 const std = @import("std");
 const fulu = @import("fulu");
 const helpers = @import("helpers.zig");

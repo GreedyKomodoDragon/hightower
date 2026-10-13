@@ -2,7 +2,7 @@
 
 ## Blockchain code comments
 
-- Start each source file that implements blockchain concepts with a short comment block explaining those concepts in plain English and the file's role. Keep it accurate as the code changes.
+- Start each source file that implements blockchain concepts with a comment block before imports. Define the relevant consensus terms, explain how state changes and why ordering matters, and state any important supported limits. Add a small ASCII diagram when it makes an epoch sequence, queue, or transition easier to follow. Keep the explanation aligned with the code rather than repeating function names.
 
 ## GitHub issue tracking
 

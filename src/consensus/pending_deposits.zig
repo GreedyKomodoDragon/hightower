@@ -1,7 +1,15 @@
-// Fulu queues validator deposits for epoch processing rather than applying
-// them immediately. Finality and churn limit when deposits are consumed;
-// accepted deposits top up existing validators, while new validators require
-// a valid BLS proof.
+// A deposit adds stake to a validator, or introduces a new validator by public
+// key. Fulu queues deposits instead of applying them when they enter a block:
+// finality must cover their slot, and per-epoch churn limits newly consumed
+// stake. Older legacy deposits also take priority over newer requests.
+//
+//   pending queue -> finalized and within limits? -> top up / create validator
+//                 -> otherwise keep the unprocessed suffix for a later epoch
+//
+// Existing validators receive a balance top-up. A new validator needs a valid
+// BLS proof of possession and starts with a future activation epoch; adding
+// stake does not make it an active proposer immediately. Deposits for exiting
+// validators can be postponed until their withdrawal is complete.
 const std = @import("std");
 const fulu = @import("fulu");
 const merkle = @import("merkle");

@@ -1,6 +1,7 @@
-// A state transition is the deterministic BeaconState change caused by slots
-// and epochs. This root runs the modules' focused tests and pinned Fulu fixtures
-// together through the same build step.
+// A state transition deterministically turns a pre-state plus slot or epoch
+// input into a post-state. The pinned Fulu fixtures provide those inputs and
+// expected SSZ state roots. Zig discovers tests through imports, so this root
+// imports each consensus module to run their focused checks in one build step.
 test {
     _ = @import("helpers.zig");
     _ = @import("domains.zig");

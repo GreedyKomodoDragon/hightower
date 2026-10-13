@@ -1,6 +1,16 @@
-// An epoch groups slots for validator accounting and scheduled state updates.
-// This handler applies the supported quiet-epoch penalties, Fulu pending
-// queues, effective balances, randomness rollover, and proposer lookahead.
+// An epoch groups eight slots in the minimal preset. Its final slot triggers
+// validator accounting and scheduled changes to BeaconState before the next
+// slot begins. Order matters because each step reads state changed earlier:
+//
+//   no-vote penalties (epoch 1) -> pending deposits -> pending consolidations
+//                     -> effective balances -> proposer lookahead -> RANDAO copy
+//
+// Effective balance is a rounded, capped weight used for validator selection;
+// hysteresis avoids changing it for every small balance movement. RANDAO mixes
+// carry consensus randomness into later epochs and proposer selection.
+// This handler covers only quiet epochs 0 and 1: all validators active, with
+// no participation, slashings, or other inherited epoch activity. It rejects
+// states needing finality, registry, or slashing processing not yet implemented.
 const std = @import("std");
 const fulu = @import("fulu");
 const helpers = @import("helpers.zig");
