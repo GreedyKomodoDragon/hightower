@@ -38,20 +38,28 @@ pub fn processPendingConsolidations(allocator: std.mem.Allocator, state: *fulu.B
     state.pending_consolidations.data = remaining;
 }
 
-test "basic Fulu pending consolidation matches the pinned epoch result" {
+test "Fulu pending consolidation edge cases match pinned epoch results" {
     const fixtures = @import("fixture_runner.zig");
     const allocator = std.testing.allocator;
-    const case = fixtures.find("basic_pending_consolidation").?;
-    var state = try fixtures.decodeState(allocator, case.pre_epoch.?);
-    defer @import("ssz").freeDecoded(allocator, fulu.BeaconState, state);
-    const expected = try fixtures.decodeState(allocator, case.post_epoch.?);
-    defer @import("ssz").freeDecoded(allocator, fulu.BeaconState, expected);
-    try processPendingConsolidations(allocator, &state);
-    // post_epoch also includes effective-balance updates and proposer lookahead.
-    const actual_balances = try merkle.HashTreeRoot(allocator, state.balances);
-    const expected_balances = try merkle.HashTreeRoot(allocator, expected.balances);
-    try std.testing.expectEqualSlices(u8, &expected_balances, &actual_balances);
-    const actual_pending = try merkle.HashTreeRoot(allocator, state.pending_consolidations);
-    const expected_pending = try merkle.HashTreeRoot(allocator, expected.pending_consolidations);
-    try std.testing.expectEqualSlices(u8, &expected_pending, &actual_pending);
+    const names = [_][]const u8{
+        "basic_pending_consolidation",
+        "consolidation_not_yet_withdrawable_validator",
+        "skip_consolidation_when_source_slashed",
+    };
+    for (names) |name| {
+        const case = fixtures.find(name).?;
+        var state = try fixtures.decodeState(allocator, case.pre_epoch.?);
+        defer @import("ssz").freeDecoded(allocator, fulu.BeaconState, state);
+        const expected = try fixtures.decodeState(allocator, case.post_epoch.?);
+        defer @import("ssz").freeDecoded(allocator, fulu.BeaconState, expected);
+        try processPendingConsolidations(allocator, &state);
+        // post_epoch includes unrelated changes from other epoch stages; this
+        // assertion isolates the balances and queue owned by this handler.
+        const actual_balances = try merkle.HashTreeRoot(allocator, state.balances);
+        const expected_balances = try merkle.HashTreeRoot(allocator, expected.balances);
+        try std.testing.expectEqualSlices(u8, &expected_balances, &actual_balances);
+        const actual_pending = try merkle.HashTreeRoot(allocator, state.pending_consolidations);
+        const expected_pending = try merkle.HashTreeRoot(allocator, expected.pending_consolidations);
+        try std.testing.expectEqualSlices(u8, &expected_pending, &actual_pending);
+    }
 }

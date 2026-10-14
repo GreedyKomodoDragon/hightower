@@ -11,11 +11,14 @@ pub const FixtureCase = struct {
     suite: []const u8,
     kind: Kind,
     expectation: Expectation,
-    pre: ?[]const u8,
+    pre: ?[]const u8 = null,
     post: ?[]const u8 = null,
     input: ?[]const u8 = null,
     pre_epoch: ?[]const u8 = null,
     post_epoch: ?[]const u8 = null,
+    // Some epoch vectors capture the whole ordered process_epoch result;
+    // handler vectors use pre/post and compare only the handler-owned fields.
+    full_epoch: bool = false,
     metadata: ?[]const u8 = null,
 };
 
@@ -27,9 +30,23 @@ pub const selected = [_]FixtureCase{
     .{ .name = "proposer_lookahead_does_not_contain_exited_validators", .suite = "epoch_processing/proposer_lookahead", .kind = .epoch_processing, .expectation = .post_state, .pre = @embedFile("fixtures/fulu_transition/proposer_lookahead_does_not_contain_exited_validators/pre.ssz_snappy"), .post = @embedFile("fixtures/fulu_transition/proposer_lookahead_does_not_contain_exited_validators/post.ssz_snappy"), .pre_epoch = @embedFile("fixtures/fulu_transition/proposer_lookahead_does_not_contain_exited_validators/pre_epoch.ssz_snappy"), .post_epoch = @embedFile("fixtures/fulu_transition/proposer_lookahead_does_not_contain_exited_validators/post_epoch.ssz_snappy") },
     .{ .name = "empty_block_transition", .suite = "sanity/blocks", .kind = .block, .expectation = .post_state, .pre = @embedFile("fixtures/fulu_transition/empty_block_transition/pre.ssz_snappy"), .post = @embedFile("fixtures/fulu_transition/empty_block_transition/post.ssz_snappy"), .input = @embedFile("fixtures/fulu_transition/empty_block_transition/blocks_0.ssz_snappy"), .metadata = @embedFile("fixtures/fulu_transition/empty_block_transition/meta.yaml") },
     .{ .name = "invalid_incorrect_state_root", .suite = "sanity/blocks", .kind = .block, .expectation = .reject, .pre = @embedFile("fixtures/fulu_transition/invalid_incorrect_state_root/pre.ssz_snappy"), .input = @embedFile("fixtures/fulu_transition/invalid_incorrect_state_root/blocks_0.ssz_snappy"), .metadata = @embedFile("fixtures/fulu_transition/invalid_incorrect_state_root/meta.yaml") },
-    .{ .name = "basic_pending_consolidation", .suite = "epoch_processing/pending_consolidations", .kind = .epoch_processing, .expectation = .post_state, .pre = @embedFile("fixtures/fulu_transition/basic_pending_consolidation/pre.ssz_snappy"), .post = @embedFile("fixtures/fulu_transition/basic_pending_consolidation/post.ssz_snappy"), .pre_epoch = @embedFile("fixtures/fulu_transition/basic_pending_consolidation/pre_epoch.ssz_snappy"), .post_epoch = @embedFile("fixtures/fulu_transition/basic_pending_consolidation/post_epoch.ssz_snappy") },
-    .{ .name = "process_pending_deposits_multiple_pending_deposits_below_churn", .suite = "epoch_processing/pending_deposits", .kind = .epoch_processing, .expectation = .post_state, .pre = @embedFile("fixtures/fulu_transition/process_pending_deposits_multiple_pending_deposits_below_churn/pre.ssz_snappy"), .post = @embedFile("fixtures/fulu_transition/process_pending_deposits_multiple_pending_deposits_below_churn/post.ssz_snappy"), .pre_epoch = @embedFile("fixtures/fulu_transition/process_pending_deposits_multiple_pending_deposits_below_churn/pre_epoch.ssz_snappy"), .post_epoch = @embedFile("fixtures/fulu_transition/process_pending_deposits_multiple_pending_deposits_below_churn/post_epoch.ssz_snappy") },
+    .{ .name = "basic_pending_consolidation", .suite = "epoch_processing/pending_consolidations", .kind = .epoch_processing, .expectation = .post_state, .full_epoch = true, .pre = @embedFile("fixtures/fulu_transition/basic_pending_consolidation/pre.ssz_snappy"), .post = @embedFile("fixtures/fulu_transition/basic_pending_consolidation/post.ssz_snappy"), .pre_epoch = @embedFile("fixtures/fulu_transition/basic_pending_consolidation/pre_epoch.ssz_snappy"), .post_epoch = @embedFile("fixtures/fulu_transition/basic_pending_consolidation/post_epoch.ssz_snappy") },
+    .{ .name = "process_pending_deposits_multiple_pending_deposits_below_churn", .suite = "epoch_processing/pending_deposits", .kind = .epoch_processing, .expectation = .post_state, .full_epoch = true, .pre = @embedFile("fixtures/fulu_transition/process_pending_deposits_multiple_pending_deposits_below_churn/pre.ssz_snappy"), .post = @embedFile("fixtures/fulu_transition/process_pending_deposits_multiple_pending_deposits_below_churn/post.ssz_snappy"), .pre_epoch = @embedFile("fixtures/fulu_transition/process_pending_deposits_multiple_pending_deposits_below_churn/pre_epoch.ssz_snappy"), .post_epoch = @embedFile("fixtures/fulu_transition/process_pending_deposits_multiple_pending_deposits_below_churn/post_epoch.ssz_snappy") },
     .{ .name = "process_pending_deposits_not_finalized", .suite = "epoch_processing/pending_deposits", .kind = .epoch_processing, .expectation = .post_state, .pre = @embedFile("fixtures/fulu_transition/process_pending_deposits_not_finalized/pre.ssz_snappy"), .post = @embedFile("fixtures/fulu_transition/process_pending_deposits_not_finalized/post.ssz_snappy"), .pre_epoch = @embedFile("fixtures/fulu_transition/process_pending_deposits_not_finalized/pre_epoch.ssz_snappy"), .post_epoch = @embedFile("fixtures/fulu_transition/process_pending_deposits_not_finalized/post_epoch.ssz_snappy") },
+    .{ .name = "consolidation_not_yet_withdrawable_validator", .suite = "epoch_processing/pending_consolidations", .kind = .epoch_processing, .expectation = .post_state, .pre_epoch = @embedFile("fixtures/fulu_transition/consolidation_not_yet_withdrawable_validator/pre_epoch.ssz_snappy"), .post_epoch = @embedFile("fixtures/fulu_transition/consolidation_not_yet_withdrawable_validator/post_epoch.ssz_snappy") },
+    .{ .name = "skip_consolidation_when_source_slashed", .suite = "epoch_processing/pending_consolidations", .kind = .epoch_processing, .expectation = .post_state, .pre_epoch = @embedFile("fixtures/fulu_transition/skip_consolidation_when_source_slashed/pre_epoch.ssz_snappy"), .post_epoch = @embedFile("fixtures/fulu_transition/skip_consolidation_when_source_slashed/post_epoch.ssz_snappy") },
+    .{ .name = "effective_balance_hysteresis", .suite = "epoch_processing/effective_balance_updates", .kind = .epoch_processing, .expectation = .post_state, .pre = @embedFile("fixtures/fulu_transition/effective_balance_hysteresis/pre.ssz_snappy"), .post = @embedFile("fixtures/fulu_transition/effective_balance_hysteresis/post.ssz_snappy"), .pre_epoch = @embedFile("fixtures/fulu_transition/effective_balance_hysteresis/pre_epoch.ssz_snappy"), .post_epoch = @embedFile("fixtures/fulu_transition/effective_balance_hysteresis/post_epoch.ssz_snappy") },
+    .{ .name = "eth1_vote_reset", .suite = "epoch_processing/eth1_data_reset", .kind = .epoch_processing, .expectation = .post_state, .pre = @embedFile("fixtures/fulu_transition/eth1_vote_reset/pre.ssz_snappy"), .post = @embedFile("fixtures/fulu_transition/eth1_vote_reset/post.ssz_snappy"), .pre_epoch = @embedFile("fixtures/fulu_transition/eth1_vote_reset/pre_epoch.ssz_snappy"), .post_epoch = @embedFile("fixtures/fulu_transition/eth1_vote_reset/post_epoch.ssz_snappy") },
+    .{ .name = "historical_summaries_accumulator", .suite = "epoch_processing/historical_summaries_update", .kind = .epoch_processing, .expectation = .post_state, .pre = @embedFile("fixtures/fulu_transition/historical_summaries_accumulator/pre.ssz_snappy"), .post = @embedFile("fixtures/fulu_transition/historical_summaries_accumulator/post.ssz_snappy"), .pre_epoch = @embedFile("fixtures/fulu_transition/historical_summaries_accumulator/pre_epoch.ssz_snappy"), .post_epoch = @embedFile("fixtures/fulu_transition/historical_summaries_accumulator/post_epoch.ssz_snappy") },
+    .{ .name = "random_inactivity_scores_empty_participation", .suite = "epoch_processing/inactivity_updates", .kind = .epoch_processing, .expectation = .post_state, .pre = @embedFile("fixtures/fulu_transition/random_inactivity_scores_empty_participation/pre.ssz_snappy"), .post = @embedFile("fixtures/fulu_transition/random_inactivity_scores_empty_participation/post.ssz_snappy"), .pre_epoch = @embedFile("fixtures/fulu_transition/random_inactivity_scores_empty_participation/pre_epoch.ssz_snappy"), .post_epoch = @embedFile("fixtures/fulu_transition/random_inactivity_scores_empty_participation/post_epoch.ssz_snappy") },
+    .{ .name = "12_ok_support", .suite = "epoch_processing/justification_and_finalization", .kind = .epoch_processing, .expectation = .post_state, .pre = @embedFile("fixtures/fulu_transition/12_ok_support/pre.ssz_snappy"), .post = @embedFile("fixtures/fulu_transition/12_ok_support/post.ssz_snappy"), .pre_epoch = @embedFile("fixtures/fulu_transition/12_ok_support/pre_epoch.ssz_snappy"), .post_epoch = @embedFile("fixtures/fulu_transition/12_ok_support/post_epoch.ssz_snappy") },
+    .{ .name = "slightly_larger_random", .suite = "epoch_processing/participation_flag_updates", .kind = .epoch_processing, .expectation = .post_state, .pre = @embedFile("fixtures/fulu_transition/slightly_larger_random/pre.ssz_snappy"), .post = @embedFile("fixtures/fulu_transition/slightly_larger_random/post.ssz_snappy"), .pre_epoch = @embedFile("fixtures/fulu_transition/slightly_larger_random/pre_epoch.ssz_snappy"), .post_epoch = @embedFile("fixtures/fulu_transition/slightly_larger_random/post_epoch.ssz_snappy") },
+    .{ .name = "activation_churn_limit__less_than_activation_limit", .suite = "epoch_processing/registry_updates", .kind = .epoch_processing, .expectation = .post_state, .full_epoch = true, .pre = @embedFile("fixtures/fulu_transition/activation_churn_limit__less_than_activation_limit/pre.ssz_snappy"), .post = @embedFile("fixtures/fulu_transition/activation_churn_limit__less_than_activation_limit/post.ssz_snappy"), .pre_epoch = @embedFile("fixtures/fulu_transition/activation_churn_limit__less_than_activation_limit/pre_epoch.ssz_snappy"), .post_epoch = @embedFile("fixtures/fulu_transition/activation_churn_limit__less_than_activation_limit/post_epoch.ssz_snappy") },
+    .{ .name = "genesis_epoch_no_attestations_no_penalties", .suite = "epoch_processing/rewards_and_penalties", .kind = .epoch_processing, .expectation = .post_state, .pre = @embedFile("fixtures/fulu_transition/genesis_epoch_no_attestations_no_penalties/pre.ssz_snappy"), .post = @embedFile("fixtures/fulu_transition/genesis_epoch_no_attestations_no_penalties/post.ssz_snappy"), .pre_epoch = @embedFile("fixtures/fulu_transition/genesis_epoch_no_attestations_no_penalties/pre_epoch.ssz_snappy"), .post_epoch = @embedFile("fixtures/fulu_transition/genesis_epoch_no_attestations_no_penalties/post_epoch.ssz_snappy") },
+    .{ .name = "low_penalty", .suite = "epoch_processing/slashings", .kind = .epoch_processing, .expectation = .post_state, .pre = @embedFile("fixtures/fulu_transition/low_penalty/pre.ssz_snappy"), .post = @embedFile("fixtures/fulu_transition/low_penalty/post.ssz_snappy"), .pre_epoch = @embedFile("fixtures/fulu_transition/low_penalty/pre_epoch.ssz_snappy"), .post_epoch = @embedFile("fixtures/fulu_transition/low_penalty/post_epoch.ssz_snappy") },
+    .{ .name = "flush_slashings", .suite = "epoch_processing/slashings_reset", .kind = .epoch_processing, .expectation = .post_state, .pre = @embedFile("fixtures/fulu_transition/flush_slashings/pre.ssz_snappy"), .post = @embedFile("fixtures/fulu_transition/flush_slashings/post.ssz_snappy"), .pre_epoch = @embedFile("fixtures/fulu_transition/flush_slashings/pre_epoch.ssz_snappy"), .post_epoch = @embedFile("fixtures/fulu_transition/flush_slashings/post_epoch.ssz_snappy") },
+    .{ .name = "updated_randao_mixes", .suite = "epoch_processing/randao_mixes_reset", .kind = .epoch_processing, .expectation = .post_state, .pre = @embedFile("fixtures/fulu_transition/updated_randao_mixes/pre.ssz_snappy"), .post = @embedFile("fixtures/fulu_transition/updated_randao_mixes/post.ssz_snappy"), .pre_epoch = @embedFile("fixtures/fulu_transition/updated_randao_mixes/pre_epoch.ssz_snappy"), .post_epoch = @embedFile("fixtures/fulu_transition/updated_randao_mixes/post_epoch.ssz_snappy") },
+    .{ .name = "sync_committees_progress_not_genesis", .suite = "epoch_processing/sync_committee_updates", .kind = .epoch_processing, .expectation = .post_state, .pre = @embedFile("fixtures/fulu_transition/sync_committees_progress_not_genesis/pre.ssz_snappy"), .post = @embedFile("fixtures/fulu_transition/sync_committees_progress_not_genesis/post.ssz_snappy"), .pre_epoch = @embedFile("fixtures/fulu_transition/sync_committees_progress_not_genesis/pre_epoch.ssz_snappy"), .post_epoch = @embedFile("fixtures/fulu_transition/sync_committees_progress_not_genesis/post_epoch.ssz_snappy") },
 };
 
 pub fn find(name: []const u8) ?FixtureCase {
@@ -39,6 +56,17 @@ pub fn find(name: []const u8) ?FixtureCase {
 
 pub fn decode(allocator: std.mem.Allocator, compressed: []const u8) ![]u8 {
     return snappy.decompress(allocator, compressed);
+}
+
+pub fn validateCase(case: FixtureCase) !void {
+    const has_pre = if (case.kind == .epoch_processing) case.pre_epoch != null else case.pre != null;
+    const has_post = if (case.kind == .epoch_processing) case.post_epoch != null else case.post != null;
+    if (!has_pre or case.expectation == .post_state and !has_post or
+        case.expectation == .reject and case.post != null or
+        case.kind == .block and (case.input == null or case.metadata == null) or
+        case.kind == .slots and case.metadata == null or
+        case.kind == .epoch_processing and (case.pre_epoch == null or case.post_epoch == null))
+        return error.InvalidFixture;
 }
 
 pub fn decodeState(allocator: std.mem.Allocator, compressed: []const u8) !fulu.BeaconState {
@@ -73,12 +101,23 @@ pub fn parseBlockCount(metadata: []const u8) !usize {
 }
 
 test "selected fixture catalog preserves expected valid and invalid outcomes" {
-    try std.testing.expectEqual(@as(usize, 10), selected.len);
+    try std.testing.expectEqual(@as(usize, 24), selected.len);
     for (selected) |case| {
-        try std.testing.expect(case.pre != null);
-        if (case.expectation == .post_state) try std.testing.expect(case.post != null) else try std.testing.expect(case.post == null);
+        try validateCase(case);
         if (case.kind == .block) try std.testing.expect(case.input != null);
     }
+}
+
+test "fixture validation rejects missing inputs and malformed compressed state" {
+    const invalid = FixtureCase{
+        .name = "missing_post",
+        .suite = "sanity/slots",
+        .kind = .slots,
+        .expectation = .post_state,
+        .pre = "present",
+    };
+    try std.testing.expectError(error.InvalidFixture, validateCase(invalid));
+    try std.testing.expectError(error.MalformedBlock, decode(std.testing.allocator, "bad"));
 }
 
 test "selected slot metadata and block metadata parse explicitly" {
@@ -91,8 +130,11 @@ test "selected slot metadata and block metadata parse explicitly" {
 test "all selected fixture SSZ payloads decompress and decode" {
     const allocator = std.testing.allocator;
     for (selected) |case| {
-        const pre = try decodeState(allocator, case.pre.?);
-        ssz.freeDecoded(allocator, fulu.BeaconState, pre);
+        try validateCase(case);
+        if (case.pre) |input| {
+            const pre = try decodeState(allocator, input);
+            ssz.freeDecoded(allocator, fulu.BeaconState, pre);
+        }
         if (case.post) |post| {
             const state = try decodeState(allocator, post);
             ssz.freeDecoded(allocator, fulu.BeaconState, state);

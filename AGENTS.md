@@ -3,6 +3,7 @@
 ## Blockchain code comments
 
 - Start each source file that implements blockchain concepts with a comment block before imports. Define the relevant consensus terms, explain how state changes and why ordering matters, and state any important supported limits. Add a small ASCII diagram when it makes an epoch sequence, queue, or transition easier to follow. Keep the explanation aligned with the code rather than repeating function names.
+- When documentation introduces a new term related to the Ethereum network, add the term and a plain-language definition to [`docs/glossary.md`](docs/glossary.md).
 
 ## GitHub issue tracking
 
