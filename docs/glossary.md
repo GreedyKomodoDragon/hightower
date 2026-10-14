@@ -39,6 +39,7 @@ Chain:      [Block 0] ───────────────────�
 | Term | Plain-language definition |
 | --- | --- |
 | Beacon chain | Ethereum's proof-of-stake consensus system, which tracks validators and agrees on the chain's history. |
+| Bellatrix | An earlier Ethereum consensus upgrade whose inactivity penalty setting Fulu still uses. |
 | Slot | A short time interval in which Ethereum may add a block. |
 | Epoch | A group of slots. At an epoch boundary, the consensus system updates rewards, validator status, and other shared state. |
 | Minimal preset | A small configuration used for tests. It uses fewer slots and validators than the regular network configuration. |

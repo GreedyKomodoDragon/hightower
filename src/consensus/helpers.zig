@@ -39,10 +39,11 @@ pub const CHURN_LIMIT_QUOTIENT: u64 = 32;
 pub const MIN_VALIDATOR_WITHDRAWABILITY_DELAY: u64 = 256;
 
 // Inactivity scores and participation weights are shared by Altair reward
-// accounting and the inherited Fulu epoch transition.
+// accounting and the inherited Fulu epoch transition. Fulu uses Bellatrix's
+// stronger inactivity penalty.
 pub const INACTIVITY_SCORE_BIAS: u64 = 4;
 pub const INACTIVITY_SCORE_RECOVERY_RATE: u64 = 16;
-pub const INACTIVITY_PENALTY_QUOTIENT_ALTAIR: u64 = 50_331_648;
+pub const INACTIVITY_PENALTY_QUOTIENT_BELLATRIX: u64 = 16_777_216;
 pub const BASE_REWARD_FACTOR: u64 = 64;
 pub const BASE_REWARDS_PER_EPOCH: u64 = 4;
 pub const WEIGHT_DENOMINATOR: u64 = 64;

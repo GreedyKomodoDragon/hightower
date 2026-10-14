@@ -126,7 +126,7 @@ pub fn processInactivityUpdates(state: *fulu.BeaconState, current_epoch: fulu.Ep
     for (state.validators.data, 0..) |validator, index| {
         if (!isEligibleForRewards(validator, current_epoch - 1)) continue;
         const flags = state.previous_epoch_participation.data[index];
-        const target = flags & (@as(u8, 1) << helpers.TIMELY_TARGET_FLAG_INDEX) != 0;
+        const target = !validator.slashed and flags & (@as(u8, 1) << helpers.TIMELY_TARGET_FLAG_INDEX) != 0;
         const score = &@constCast(state.inactivity_scores.data)[index];
         if (target) score.* -|= 1 else score.* +|= helpers.INACTIVITY_SCORE_BIAS;
         if (!leaking) score.* -|= helpers.INACTIVITY_SCORE_RECOVERY_RATE;
@@ -165,25 +165,12 @@ pub fn processRewardsAndPenalties(allocator: std.mem.Allocator, state: *fulu.Bea
             }
         }
     }
-    if (leaking) {
-        // During a finality leak, participation rewards stop and the inactivity
-        // penalty replaces ordinary source/target penalties.
-        const finality_delay = current_epoch -| 1 -| state.finalized_checkpoint.epoch;
-        for (state.validators.data, 0..) |validator, index| {
-            if (!isEligibleForRewards(validator, previous_epoch)) continue;
-            const flags = state.previous_epoch_participation.data[index];
-            const target = !validator.slashed and flags & (@as(u8, 1) << helpers.TIMELY_TARGET_FLAG_INDEX) != 0;
-            const base = baseReward(validator.effective_balance, total_active);
-            penalties[index] += helpers.BASE_REWARDS_PER_EPOCH * base - base * helpers.PROPOSER_WEIGHT / helpers.WEIGHT_DENOMINATOR;
-            if (!target) penalties[index] += validator.effective_balance * finality_delay / helpers.INACTIVITY_PENALTY_QUOTIENT_ALTAIR;
-        }
-    }
     for (state.validators.data, 0..) |validator, index| {
         if (!isEligibleForRewards(validator, previous_epoch)) continue;
         const flags = state.previous_epoch_participation.data[index];
         const target = !validator.slashed and flags & (@as(u8, 1) << helpers.TIMELY_TARGET_FLAG_INDEX) != 0;
         if (!target) penalties[index] += validator.effective_balance * state.inactivity_scores.data[index] /
-            (helpers.INACTIVITY_SCORE_BIAS * helpers.INACTIVITY_PENALTY_QUOTIENT_ALTAIR);
+            (helpers.INACTIVITY_SCORE_BIAS * helpers.INACTIVITY_PENALTY_QUOTIENT_BELLATRIX);
     }
     for (0..count) |index| {
         @constCast(state.balances.data)[index] = std.math.add(u64, state.balances.data[index], rewards[index]) catch return error.BalanceOverflow;
@@ -397,4 +384,70 @@ test "epoch handler processes epochs after genesis" {
     defer @import("ssz").freeDecoded(allocator, fulu.BeaconState, state);
     state.slot = helpers.SLOTS_PER_EPOCH * 3 - 1;
     try processEpoch(allocator, &state);
+}
+
+test "slashed target voter gains inactivity score during a leak" {
+    const fixtures = @import("fixture_runner.zig");
+    const allocator = std.testing.allocator;
+    const case = fixtures.find("slots_1").?;
+    var state = try fixtures.decodeState(allocator, case.pre.?);
+    defer @import("ssz").freeDecoded(allocator, fulu.BeaconState, state);
+    state.slot = 10 * helpers.SLOTS_PER_EPOCH;
+    state.finalized_checkpoint.epoch = 0;
+    @constCast(state.validators.data)[0].slashed = true;
+    @constCast(state.validators.data)[0].withdrawable_epoch = helpers.FAR_FUTURE_EPOCH;
+    @constCast(state.previous_epoch_participation.data)[0] = @as(u8, 1) << helpers.TIMELY_TARGET_FLAG_INDEX;
+    @constCast(state.inactivity_scores.data)[0] = 10;
+
+    processInactivityUpdates(&state, 10);
+    try std.testing.expectEqual(@as(u64, 14), state.inactivity_scores.data[0]);
+}
+
+test "leak rewards use only flag misses and Bellatrix inactivity penalty" {
+    const fixtures = @import("fixture_runner.zig");
+    const allocator = std.testing.allocator;
+    const case = fixtures.find("slots_1").?;
+    var state = try fixtures.decodeState(allocator, case.pre.?);
+    defer @import("ssz").freeDecoded(allocator, fulu.BeaconState, state);
+    state.slot = 10 * helpers.SLOTS_PER_EPOCH;
+    state.finalized_checkpoint.epoch = 0;
+    @constCast(state.validators.data)[0].slashed = false;
+    @constCast(state.validators.data)[0].activation_epoch = 0;
+    @constCast(state.validators.data)[0].exit_epoch = helpers.FAR_FUTURE_EPOCH;
+    const initial_balance = state.balances.data[0];
+    @constCast(state.previous_epoch_participation.data)[0] = 0b111;
+    @constCast(state.inactivity_scores.data)[0] = 4;
+
+    try processRewardsAndPenalties(allocator, &state, 10);
+    try std.testing.expectEqual(initial_balance, state.balances.data[0]);
+
+    @constCast(state.previous_epoch_participation.data)[0] = 0;
+    const effective = state.validators.data[0].effective_balance;
+    const base = baseReward(effective, totalBalance(&state, null, 10));
+    const flag_penalty = base * helpers.PARTICIPATION_FLAG_WEIGHTS[0] / helpers.WEIGHT_DENOMINATOR +
+        base * helpers.PARTICIPATION_FLAG_WEIGHTS[1] / helpers.WEIGHT_DENOMINATOR;
+    const inactivity_penalty = effective * 4 / (helpers.INACTIVITY_SCORE_BIAS * helpers.INACTIVITY_PENALTY_QUOTIENT_BELLATRIX);
+    try processRewardsAndPenalties(allocator, &state, 10);
+    try std.testing.expectEqual(initial_balance - flag_penalty - inactivity_penalty, state.balances.data[0]);
+}
+
+test "Electra slashing rounds before scaling by validator increments" {
+    const fixtures = @import("fixture_runner.zig");
+    const allocator = std.testing.allocator;
+    const case = fixtures.find("slots_1").?;
+    var state = try fixtures.decodeState(allocator, case.pre.?);
+    defer @import("ssz").freeDecoded(allocator, fulu.BeaconState, state);
+    state.slot = 10 * helpers.SLOTS_PER_EPOCH;
+    @constCast(state.validators.data)[0].slashed = true;
+    @constCast(state.validators.data)[0].withdrawable_epoch = 10 + helpers.EPOCHS_PER_SLASHINGS_VECTOR / 2;
+    @memset(&state.slashings, 0);
+    state.slashings[0] = 1_000_000_001;
+    const initial_balance = state.balances.data[0];
+    const active_increments = totalBalance(&state, null, 10) / helpers.EFFECTIVE_BALANCE_INCREMENT;
+    const validator_increments = state.validators.data[0].effective_balance / helpers.EFFECTIVE_BALANCE_INCREMENT;
+    const expected_penalty = (3_000_000_003 / active_increments) * validator_increments;
+
+    processSlashings(&state, 10);
+    try std.testing.expectEqual(initial_balance -| expected_penalty, state.balances.data[0]);
+    try std.testing.expect(expected_penalty != 3_000_000_003 * validator_increments / active_increments);
 }
