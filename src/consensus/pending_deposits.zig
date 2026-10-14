@@ -24,15 +24,11 @@ const DepositMessage = struct {
 };
 
 pub fn processPendingDeposits(allocator: std.mem.Allocator, state: *fulu.BeaconState) !void {
-    const current_epoch = helpers.computeEpochAtSlot(state.slot);
+    const current_epoch = helpers.getCurrentEpoch(state);
     const finalized_slot = try helpers.computeStartSlotAtEpoch(state.finalized_checkpoint.epoch);
     const next_epoch = std.math.add(u64, current_epoch, 1) catch return error.InvalidState;
-    var total_active_balance: u64 = 0;
-    for (state.validators.data) |validator| {
-        if (helpers.isActiveValidator(validator, current_epoch))
-            total_active_balance = std.math.add(u64, total_active_balance, validator.effective_balance) catch return error.InvalidState;
-    }
-    const churn = @min(@as(u64, 128_000_000_000), @max(@as(u64, 64_000_000_000), total_active_balance / 32) / 1_000_000_000 * 1_000_000_000);
+    const total_active_balance = helpers.getTotalActiveBalance(state.validators.data, current_epoch) catch return error.InvalidState;
+    const churn = @min(helpers.MAX_PER_EPOCH_ACTIVATION_EXIT_CHURN_LIMIT, @max(helpers.MIN_PER_EPOCH_CHURN_LIMIT_ELECTRA, total_active_balance / helpers.CHURN_LIMIT_QUOTIENT) / helpers.EFFECTIVE_BALANCE_INCREMENT * helpers.EFFECTIVE_BALANCE_INCREMENT);
     const available = std.math.add(u64, state.deposit_balance_to_consume, churn) catch return error.InvalidState;
     var processed_amount: u64 = 0;
     var processed: usize = 0;

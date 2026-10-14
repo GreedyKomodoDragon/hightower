@@ -24,7 +24,7 @@ const blst = @import("blst");
 
 pub fn processEpoch(allocator: std.mem.Allocator, state: *fulu.BeaconState) !void {
     if ((state.slot + 1) % helpers.SLOTS_PER_EPOCH != 0) return error.NotEpochBoundary;
-    const current_epoch = helpers.computeEpochAtSlot(state.slot);
+    const current_epoch = helpers.getCurrentEpoch(state);
     if (state.validators.data.len != state.balances.data.len or
         state.validators.data.len != state.current_epoch_participation.data.len or
         state.validators.data.len != state.previous_epoch_participation.data.len or
@@ -51,7 +51,7 @@ pub fn processEpoch(allocator: std.mem.Allocator, state: *fulu.BeaconState) !voi
 pub fn processJustificationAndFinalization(state: *fulu.BeaconState, current_epoch: fulu.Epoch) !void {
     // Genesis and epoch 1 have no complete pair of prior epochs to justify.
     if (current_epoch <= helpers.EPOCH_OFFSET) return;
-    const previous_epoch = current_epoch - helpers.EPOCH_OFFSET;
+    const previous_epoch = helpers.computePreviousEpoch(current_epoch);
     const total_active_balance = totalBalance(state, null, current_epoch);
     const previous_target_balance = totalBalance(state, helpers.TIMELY_TARGET_FLAG_INDEX, previous_epoch);
     const current_target_balance = totalBalance(state, helpers.TIMELY_TARGET_FLAG_INDEX, current_epoch);
@@ -147,7 +147,7 @@ pub fn processRewardsAndPenalties(allocator: std.mem.Allocator, state: *fulu.Bea
     const total_active = totalBalance(state, null, current_epoch);
     const active_increments = @max(total_active / helpers.EFFECTIVE_BALANCE_INCREMENT, 1);
     const leaking = isInInactivityLeak(state, current_epoch);
-    const previous_epoch = current_epoch - 1;
+    const previous_epoch = helpers.computePreviousEpoch(current_epoch);
     // Each flag has its own weight and participating balance; head misses do
     // not incur a penalty because timely-head rewards are intentionally small.
     for (0..helpers.PARTICIPATION_FLAG_WEIGHTS.len) |flag_index| {
@@ -189,13 +189,13 @@ pub fn processRegistryUpdates(state: *fulu.BeaconState, current_epoch: fulu.Epoc
     for (state.validators.data, 0..) |validator, index| {
         // These conditions are mutually exclusive and ordered: first join the
         // activation queue, then eject active validators, then activate finalized entries.
-        if (validator.activation_eligibility_epoch == helpers.FAR_FUTURE_EPOCH and validator.effective_balance >= helpers.MIN_ACTIVATION_BALANCE) {
+        if (helpers.isEligibleForActivationQueue(validator)) {
             @constCast(state.validators.data)[index].activation_eligibility_epoch = current_epoch + 1;
         } else if (helpers.isActiveValidator(validator, current_epoch) and validator.effective_balance <= helpers.EJECTION_BALANCE) {
             try initiateValidatorExit(state, index, current_epoch);
-        } else if (validator.activation_eligibility_epoch <= state.finalized_checkpoint.epoch and validator.activation_epoch == helpers.FAR_FUTURE_EPOCH) {
+        } else if (helpers.isEligibleForActivation(validator, state.finalized_checkpoint.epoch)) {
             // Eligibility is inclusive: an entry at the finalized epoch may activate.
-            @constCast(state.validators.data)[index].activation_epoch = current_epoch + 1 + helpers.MAX_SEED_LOOKAHEAD;
+            @constCast(state.validators.data)[index].activation_epoch = helpers.computeActivationExitEpoch(current_epoch) catch return error.InvalidState;
         }
     }
 }
@@ -209,7 +209,7 @@ fn initiateValidatorExit(state: *fulu.BeaconState, index: usize, current_epoch: 
     if (churn == 0) return error.InvalidState;
     // Electra schedules exits by balance churn, so one large exit can advance
     // the queue by several epochs while sharing the remaining epoch allowance.
-    var earliest = @max(state.earliest_exit_epoch, current_epoch + 1 + helpers.MAX_SEED_LOOKAHEAD);
+    var earliest = @max(state.earliest_exit_epoch, helpers.computeActivationExitEpoch(current_epoch) catch return error.InvalidState);
     var consume = if (state.earliest_exit_epoch < earliest) churn else state.exit_balance_to_consume;
     if (validator.effective_balance > consume) {
         const additional = (validator.effective_balance - consume - 1) / churn + 1;
