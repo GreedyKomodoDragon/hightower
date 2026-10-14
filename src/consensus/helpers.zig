@@ -64,12 +64,48 @@ pub fn computeEpochAtSlot(slot: fulu.Slot) fulu.Epoch {
     return slot / SLOTS_PER_EPOCH;
 }
 
+pub fn getCurrentEpoch(state: *const fulu.BeaconState) fulu.Epoch {
+    return computeEpochAtSlot(state.slot);
+}
+
+pub fn computePreviousEpoch(epoch: fulu.Epoch) fulu.Epoch {
+    return epoch -| EPOCH_OFFSET;
+}
+
 pub fn computeStartSlotAtEpoch(epoch: fulu.Epoch) error{Overflow}!fulu.Slot {
     return std.math.mul(fulu.Slot, epoch, SLOTS_PER_EPOCH) catch error.Overflow;
 }
 
+pub fn computeActivationExitEpoch(epoch: fulu.Epoch) error{Overflow}!fulu.Epoch {
+    return std.math.add(fulu.Epoch, epoch, EPOCH_OFFSET + MAX_SEED_LOOKAHEAD) catch error.Overflow;
+}
+
 pub fn isActiveValidator(validator: fulu.Validator, epoch: fulu.Epoch) bool {
     return validator.activation_epoch <= epoch and epoch < validator.exit_epoch;
+}
+
+pub fn isEligibleForActivationQueue(validator: fulu.Validator) bool {
+    return validator.activation_eligibility_epoch == FAR_FUTURE_EPOCH and
+        validator.effective_balance >= MIN_ACTIVATION_BALANCE;
+}
+
+pub fn isEligibleForActivation(validator: fulu.Validator, finalized_epoch: fulu.Epoch) bool {
+    return validator.activation_eligibility_epoch <= finalized_epoch and
+        validator.activation_epoch == FAR_FUTURE_EPOCH;
+}
+
+pub fn isSlashableValidator(validator: fulu.Validator, epoch: fulu.Epoch) bool {
+    return !validator.slashed and validator.activation_epoch <= epoch and epoch < validator.withdrawable_epoch;
+}
+
+pub fn getTotalActiveBalance(validators: []const fulu.Validator, epoch: fulu.Epoch) error{BalanceOverflow}!fulu.Gwei {
+    var balance: u128 = 0;
+    for (validators) |validator| {
+        if (isActiveValidator(validator, epoch)) balance += validator.effective_balance;
+    }
+    const total = @max(balance, EFFECTIVE_BALANCE_INCREMENT);
+    if (total > std.math.maxInt(fulu.Gwei)) return error.BalanceOverflow;
+    return @intCast(total);
 }
 
 pub fn getActiveValidatorIndices(
@@ -193,8 +229,13 @@ pub fn computeProposerIndices(
 test "slot and epoch helpers handle boundaries" {
     try std.testing.expectEqual(@as(u64, 0), computeEpochAtSlot(7));
     try std.testing.expectEqual(@as(u64, 1), computeEpochAtSlot(8));
+    try std.testing.expectEqual(@as(u64, 0), computePreviousEpoch(0));
+    try std.testing.expectEqual(@as(u64, 0), computePreviousEpoch(1));
+    try std.testing.expectEqual(@as(u64, 1), computePreviousEpoch(2));
     try std.testing.expectEqual(@as(u64, 16), try computeStartSlotAtEpoch(2));
     try std.testing.expectError(error.Overflow, computeStartSlotAtEpoch(std.math.maxInt(u64)));
+    try std.testing.expectEqual(@as(u64, 6), try computeActivationExitEpoch(1));
+    try std.testing.expectError(error.Overflow, computeActivationExitEpoch(std.math.maxInt(u64)));
 }
 
 test "active validator range is inclusive at activation and exclusive at exit" {
@@ -212,6 +253,57 @@ test "active validator range is inclusive at activation and exclusive at exit" {
     try std.testing.expect(isActiveValidator(validator, 3));
     try std.testing.expect(isActiveValidator(validator, 4));
     try std.testing.expect(!isActiveValidator(validator, 5));
+    try std.testing.expect(!isEligibleForActivationQueue(validator));
+    try std.testing.expect(!isEligibleForActivation(validator, 2));
+    try std.testing.expect(isSlashableValidator(validator, 3));
+    try std.testing.expect(!isSlashableValidator(validator, 6));
+    var activation_candidate = validator;
+    activation_candidate.activation_eligibility_epoch = 3;
+    activation_candidate.activation_epoch = FAR_FUTURE_EPOCH;
+    try std.testing.expect(!isEligibleForActivation(activation_candidate, 2));
+    try std.testing.expect(isEligibleForActivation(activation_candidate, 3));
+    var far_future = validator;
+    far_future.activation_eligibility_epoch = FAR_FUTURE_EPOCH;
+    far_future.activation_epoch = FAR_FUTURE_EPOCH;
+    far_future.exit_epoch = FAR_FUTURE_EPOCH;
+    far_future.withdrawable_epoch = FAR_FUTURE_EPOCH;
+    try std.testing.expect(isEligibleForActivationQueue(far_future));
+    try std.testing.expect(!isEligibleForActivation(far_future, FAR_FUTURE_EPOCH - 1));
+    far_future.activation_eligibility_epoch = 4;
+    try std.testing.expect(isEligibleForActivation(far_future, 4));
+    far_future.slashed = true;
+    try std.testing.expect(!isSlashableValidator(far_future, 5));
+}
+
+test "total active balance floors empty sets at one increment" {
+    try std.testing.expectEqual(EFFECTIVE_BALANCE_INCREMENT, try getTotalActiveBalance(&.{}, 0));
+    const validators = [_]fulu.Validator{
+        .{
+            .pubkey = [_]u8{0} ** 48,
+            .withdrawal_credentials = [_]u8{0} ** 32,
+            .effective_balance = 32_000_000_000,
+            .slashed = false,
+            .activation_eligibility_epoch = 0,
+            .activation_epoch = 1,
+            .exit_epoch = 3,
+            .withdrawable_epoch = 4,
+        },
+        .{
+            .pubkey = [_]u8{0} ** 48,
+            .withdrawal_credentials = [_]u8{0} ** 32,
+            .effective_balance = 16_000_000_000,
+            .slashed = false,
+            .activation_eligibility_epoch = 0,
+            .activation_epoch = 0,
+            .exit_epoch = 2,
+            .withdrawable_epoch = 3,
+        },
+    };
+    try std.testing.expectEqual(@as(u64, 48_000_000_000), try getTotalActiveBalance(&validators, 1));
+    var oversized = [_]fulu.Validator{ validators[1], validators[1] };
+    oversized[0].effective_balance = std.math.maxInt(u64);
+    oversized[1].effective_balance = 1;
+    try std.testing.expectError(error.BalanceOverflow, getTotalActiveBalance(&oversized, 1));
 }
 
 test "shuffle is deterministic and rejects out-of-range inputs" {

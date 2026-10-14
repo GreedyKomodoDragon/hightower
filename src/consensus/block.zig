@@ -183,14 +183,10 @@ fn processSyncAggregate(state: *fulu.BeaconState, aggregate: fulu.SyncAggregate)
         }
     }
     try bls.verifyAggregate(participants[0..participant_count], signing_root, aggregate.sync_committee_signature);
-    var total_active_balance: u128 = 0;
     const current_epoch = helpers.computeEpochAtSlot(state.slot);
-    for (state.validators.data) |validator| {
-        if (helpers.isActiveValidator(validator, current_epoch)) total_active_balance += validator.effective_balance;
-    }
-    if (total_active_balance == 0) return error.InvalidState;
-    const active_increments = total_active_balance / 1_000_000_000;
-    const base_reward_per_increment = 1_000_000_000 * 64 / std.math.sqrt(total_active_balance);
+    const total_active_balance = helpers.getTotalActiveBalance(state.validators.data, current_epoch) catch return error.InvalidState;
+    const active_increments = total_active_balance / helpers.EFFECTIVE_BALANCE_INCREMENT;
+    const base_reward_per_increment = helpers.EFFECTIVE_BALANCE_INCREMENT * helpers.BASE_REWARD_FACTOR / std.math.sqrt(total_active_balance);
     const total_base_rewards = base_reward_per_increment * active_increments;
     const max_participant_rewards = total_base_rewards * 2 / 64 / helpers.SLOTS_PER_EPOCH;
     const participant_reward: u64 = @intCast(max_participant_rewards / 32);
