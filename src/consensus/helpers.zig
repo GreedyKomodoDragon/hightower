@@ -1,12 +1,59 @@
+// An epoch groups SLOTS_PER_EPOCH slots; slot-to-epoch arithmetic determines
+// validator eligibility and the ring-buffer position used by consensus state.
+// Seed, shuffle, and balance rules must use the same epoch and preset values
+// because proposer selection depends on both ordering and exact integer math.
+// This file currently uses Fulu's minimal-preset constants.
+//
+//   slot -> epoch -> active validators -> seeded shuffle -> proposer indices
 const std = @import("std");
 const fulu = @import("fulu");
 
 pub const SLOTS_PER_EPOCH: u64 = 8;
+pub const SLOTS_PER_HISTORICAL_ROOT: u64 = 64;
 pub const EPOCHS_PER_HISTORICAL_VECTOR: u64 = 64;
+pub const EPOCHS_PER_SLASHINGS_VECTOR: u64 = 64;
+pub const EPOCHS_PER_ETH1_VOTING_PERIOD: u64 = 4;
+pub const EPOCHS_PER_SYNC_COMMITTEE_PERIOD: u64 = 8;
+pub const EPOCHS_PER_HISTORICAL_SUMMARY: u64 = SLOTS_PER_HISTORICAL_ROOT / SLOTS_PER_EPOCH;
+pub const EPOCH_OFFSET: u64 = 1;
 pub const MIN_SEED_LOOKAHEAD: u64 = 1;
+pub const MAX_SEED_LOOKAHEAD: u64 = 4;
 pub const SHUFFLE_ROUND_COUNT: u8 = 10;
+pub const JUSTIFICATION_BITS_LENGTH: usize = 4;
+pub const JUSTIFICATION_SUPERMAJORITY_NUMERATOR: u64 = 2;
+pub const JUSTIFICATION_SUPERMAJORITY_DENOMINATOR: u64 = 3;
+pub const INACTIVITY_LEAK_EPOCH_THRESHOLD: u64 = 4;
+
+// Effective balances are rounded in increments; Electra raises the cap only
+// for compounding validators while keeping activation at 32 ETH.
+pub const EFFECTIVE_BALANCE_INCREMENT: u64 = 1_000_000_000;
+pub const EFFECTIVE_BALANCE_HYSTERESIS_DOWNWARD: u64 = 250_000_000;
+pub const EFFECTIVE_BALANCE_HYSTERESIS_UPWARD: u64 = 1_250_000_000;
 pub const MAX_EFFECTIVE_BALANCE: u64 = 32_000_000_000;
 pub const MAX_EFFECTIVE_BALANCE_ELECTRA: u64 = 2_048_000_000_000;
+pub const MIN_ACTIVATION_BALANCE: u64 = 32_000_000_000;
+pub const EJECTION_BALANCE: u64 = 16_000_000_000;
+pub const MIN_PER_EPOCH_CHURN_LIMIT_ELECTRA: u64 = 64_000_000_000;
+pub const MAX_PER_EPOCH_ACTIVATION_EXIT_CHURN_LIMIT: u64 = 128_000_000_000;
+pub const CHURN_LIMIT_QUOTIENT: u64 = 32;
+pub const MIN_VALIDATOR_WITHDRAWABILITY_DELAY: u64 = 256;
+
+// Inactivity scores and participation weights are shared by Altair reward
+// accounting and the inherited Fulu epoch transition.
+pub const INACTIVITY_SCORE_BIAS: u64 = 4;
+pub const INACTIVITY_SCORE_RECOVERY_RATE: u64 = 16;
+pub const INACTIVITY_PENALTY_QUOTIENT_ALTAIR: u64 = 50_331_648;
+pub const BASE_REWARD_FACTOR: u64 = 64;
+pub const BASE_REWARDS_PER_EPOCH: u64 = 4;
+pub const WEIGHT_DENOMINATOR: u64 = 64;
+pub const PROPOSER_WEIGHT: u64 = 8;
+pub const PARTICIPATION_FLAG_WEIGHTS = [_]u64{ 14, 26, 14 };
+pub const TIMELY_SOURCE_FLAG_INDEX: usize = 0;
+pub const TIMELY_TARGET_FLAG_INDEX: usize = 1;
+pub const TIMELY_HEAD_FLAG_INDEX: usize = 2;
+pub const PROPORTIONAL_SLASHING_MULTIPLIER_BELLATRIX: u64 = 3;
+pub const WHISTLEBLOWER_REWARD_QUOTIENT_ELECTRA: u64 = 4096;
+pub const FAR_FUTURE_EPOCH: u64 = std.math.maxInt(u64);
 
 pub const DOMAIN_BEACON_PROPOSER = [_]u8{ 0, 0, 0, 0 };
 pub const DOMAIN_RANDAO = [_]u8{ 2, 0, 0, 0 };
