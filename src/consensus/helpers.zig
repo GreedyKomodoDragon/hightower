@@ -19,6 +19,8 @@ pub const EPOCH_OFFSET: u64 = 1;
 pub const MIN_SEED_LOOKAHEAD: u64 = 1;
 pub const MAX_SEED_LOOKAHEAD: u64 = 4;
 pub const SHUFFLE_ROUND_COUNT: u8 = 10;
+pub const MAX_COMMITTEES_PER_SLOT: usize = 4;
+pub const TARGET_COMMITTEE_SIZE: usize = 4;
 pub const JUSTIFICATION_BITS_LENGTH: usize = 4;
 pub const JUSTIFICATION_SUPERMAJORITY_NUMERATOR: u64 = 2;
 pub const JUSTIFICATION_SUPERMAJORITY_DENOMINATOR: u64 = 3;
@@ -57,6 +59,7 @@ pub const WHISTLEBLOWER_REWARD_QUOTIENT_ELECTRA: u64 = 4096;
 pub const FAR_FUTURE_EPOCH: u64 = std.math.maxInt(u64);
 
 pub const DOMAIN_BEACON_PROPOSER = [_]u8{ 0, 0, 0, 0 };
+pub const DOMAIN_BEACON_ATTESTER = [_]u8{ 1, 0, 0, 0 };
 pub const DOMAIN_RANDAO = [_]u8{ 2, 0, 0, 0 };
 pub const DOMAIN_SYNC_COMMITTEE = [_]u8{ 7, 0, 0, 0 };
 
@@ -167,6 +170,26 @@ pub fn computeCommittee(
     return committee;
 }
 
+pub fn getBeaconCommittee(
+    allocator: std.mem.Allocator,
+    state: *const fulu.BeaconState,
+    slot: fulu.Slot,
+    index: fulu.CommitteeIndex,
+) ![]fulu.ValidatorIndex {
+    const epoch = computeEpochAtSlot(slot);
+    const active = try getActiveValidatorIndices(allocator, state.validators.data, epoch);
+    defer allocator.free(active);
+    const per_slot = @max(1, @min(MAX_COMMITTEES_PER_SLOT, active.len / SLOTS_PER_EPOCH / TARGET_COMMITTEE_SIZE));
+    if (index >= per_slot) return error.InvalidCommittee;
+    return computeCommittee(
+        allocator,
+        active,
+        computeSeed(state.*, epoch, DOMAIN_BEACON_ATTESTER),
+        @as(usize, @intCast(slot % SLOTS_PER_EPOCH)) * per_slot + @as(usize, @intCast(index)),
+        per_slot * SLOTS_PER_EPOCH,
+    );
+}
+
 pub fn computeProposerIndex(
     validators: []const fulu.Validator,
     indices: []const fulu.ValidatorIndex,
@@ -193,7 +216,7 @@ pub fn computeProposerIndex(
 }
 
 pub fn computeSeed(state: fulu.BeaconState, epoch: fulu.Epoch, domain_type: [4]u8) fulu.Root {
-    const mix_index = (epoch + EPOCHS_PER_HISTORICAL_VECTOR - MIN_SEED_LOOKAHEAD - 1) % EPOCHS_PER_HISTORICAL_VECTOR;
+    const mix_index = (epoch % EPOCHS_PER_HISTORICAL_VECTOR + EPOCHS_PER_HISTORICAL_VECTOR - MIN_SEED_LOOKAHEAD - 1) % EPOCHS_PER_HISTORICAL_VECTOR;
     var input: [44]u8 = undefined;
     @memcpy(input[0..4], &domain_type);
     std.mem.writeInt(u64, input[4..12], epoch, .little);
@@ -306,25 +329,95 @@ test "total active balance floors empty sets at one increment" {
     try std.testing.expectError(error.BalanceOverflow, getTotalActiveBalance(&oversized, 1));
 }
 
-test "shuffle is deterministic and rejects out-of-range inputs" {
-    const seed = [_]u8{0x42} ** 32;
-    const first = try computeShuffledIndex(2, 16, seed);
-    try std.testing.expectEqual(first, try computeShuffledIndex(2, 16, seed));
-    try std.testing.expectError(error.InvalidIndex, computeShuffledIndex(16, 16, seed));
+test "shuffle matches pinned minimal phase0 mappings" {
+    // consensus-specs v1.6.1: phase0/shuffling/core/shuffle, counts 10 and 33.
+    var seed: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&seed, "994fed15c5b2fdaeeff317f157e1e0978c3f5fd5df3d34f8c08262b03750894f");
+    const mapping_10 = [_]usize{ 4, 1, 3, 0, 5, 9, 8, 6, 7, 2 };
+    for (mapping_10, 0..) |expected, index| try std.testing.expectEqual(expected, try computeShuffledIndex(index, 10, seed));
+    _ = try std.fmt.hexToBytes(&seed, "2e31cccbbba9308b6447b2ba8ef714ee15d90d6438985c87db5195fc232764af");
+    const mapping_33 = [_]usize{ 7, 21, 14, 31, 25, 22, 6, 26, 11, 0, 18, 5, 1, 8, 16, 4, 24, 27, 30, 10, 20, 15, 2, 17, 32, 9, 28, 12, 23, 13, 29, 19, 3 };
+    for (mapping_33, 0..) |expected, index| try std.testing.expectEqual(expected, try computeShuffledIndex(index, 33, seed));
+    try std.testing.expectError(error.InvalidIndex, computeShuffledIndex(0, 0, seed));
+    try std.testing.expectError(error.InvalidIndex, computeShuffledIndex(33, 33, seed));
 }
 
-test "committee assigns every index once across partitions" {
+test "committee partitions pinned shuffle mapping" {
     const allocator = std.testing.allocator;
-    const indices = [_]u64{ 0, 1, 2, 3, 4, 5, 6, 7 };
-    const seed = [_]u8{0} ** 32;
+    const indices = [_]u64{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+    var seed: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&seed, "994fed15c5b2fdaeeff317f157e1e0978c3f5fd5df3d34f8c08262b03750894f");
     const first = try computeCommittee(allocator, &indices, seed, 0, 2);
     defer allocator.free(first);
     const second = try computeCommittee(allocator, &indices, seed, 1, 2);
     defer allocator.free(second);
-    try std.testing.expectEqual(@as(usize, 4), first.len);
-    try std.testing.expectEqual(@as(usize, 4), second.len);
-    var seen = [_]bool{false} ** 8;
-    for (first) |index| seen[index] = true;
-    for (second) |index| seen[index] = true;
-    for (seen) |value| try std.testing.expect(value);
+    try std.testing.expectEqualSlices(u64, &.{ 4, 1, 3, 0, 5 }, first);
+    try std.testing.expectEqualSlices(u64, &.{ 9, 8, 6, 7, 2 }, second);
+    try std.testing.expectError(error.InvalidCommittee, computeCommittee(allocator, &indices, seed, 2, 2));
+    try std.testing.expectError(error.InvalidCommittee, computeCommittee(allocator, &indices, seed, 0, 0));
+}
+
+test "seed and beacon committees use minimal preset boundaries" {
+    const allocator = std.testing.allocator;
+    const fixtures = @import("fixture_runner.zig");
+    var state = try fixtures.decodeState(allocator, fixtures.find("proposer_lookahead_in_state_matches_computed_lookahead").?.pre_epoch.?);
+    defer @import("ssz").freeDecoded(allocator, fulu.BeaconState, state);
+
+    state.randao_mixes[62] = [_]u8{0x42} ** 32;
+    state.randao_mixes[0] = [_]u8{0x42} ** 32;
+    // Expected hashes follow the pinned get_seed rule with a fixed RANDAO mix.
+    var expected: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&expected, "dc8544120a92782420b5d51597243f5990ee1c32d843bd7b8428fa8fc3ef57d0");
+    try std.testing.expectEqual(expected, computeSeed(state, 0, DOMAIN_BEACON_ATTESTER));
+    _ = try std.fmt.hexToBytes(&expected, "b80bc97afb8a03b4ad532d8974493cb1016080485803dc29acbb2fe01822ded6");
+    try std.testing.expectEqual(expected, computeSeed(state, 2, DOMAIN_BEACON_ATTESTER));
+    _ = try std.fmt.hexToBytes(&expected, "3c227d02cad6fd8918b15170f523898262f46b36a7b3a678d718364455bb68c4");
+    try std.testing.expectEqual(expected, computeSeed(state, 64, DOMAIN_BEACON_ATTESTER));
+    _ = computeSeed(state, std.math.maxInt(u64), DOMAIN_BEACON_ATTESTER);
+
+    const validators = @constCast(state.validators.data);
+    try std.testing.expect(validators.len >= 64);
+    for (validators, 0..) |*validator, index| {
+        validator.activation_epoch = if (index < 8) 0 else FAR_FUTURE_EPOCH;
+        validator.exit_epoch = FAR_FUTURE_EPOCH;
+    }
+    const first = try getBeaconCommittee(allocator, &state, 0, 0);
+    defer allocator.free(first);
+    const second = try getBeaconCommittee(allocator, &state, 1, 0);
+    defer allocator.free(second);
+    try std.testing.expectEqualSlices(u64, &.{1}, first);
+    try std.testing.expectEqualSlices(u64, &.{0}, second);
+    try std.testing.expectError(error.InvalidCommittee, getBeaconCommittee(allocator, &state, 0, 1));
+
+    for (validators[8..64]) |*validator| validator.activation_epoch = 0;
+    const second_committee = try getBeaconCommittee(allocator, &state, 0, 1);
+    defer allocator.free(second_committee);
+    try std.testing.expectEqualSlices(u64, &.{ 58, 61, 46, 19 }, second_committee);
+    try std.testing.expectError(error.InvalidCommittee, getBeaconCommittee(allocator, &state, 0, 2));
+
+    for (validators) |*validator| validator.activation_epoch = FAR_FUTURE_EPOCH;
+    const empty = try getBeaconCommittee(allocator, &state, 0, 0);
+    defer allocator.free(empty);
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
+}
+
+test "Electra proposer weighting retries a low-balance candidate" {
+    const low = fulu.Validator{
+        .pubkey = [_]u8{0} ** 48,
+        .withdrawal_credentials = [_]u8{0} ** 32,
+        .effective_balance = MAX_EFFECTIVE_BALANCE,
+        .slashed = false,
+        .activation_eligibility_epoch = 0,
+        .activation_epoch = 0,
+        .exit_epoch = FAR_FUTURE_EPOCH,
+        .withdrawable_epoch = FAR_FUTURE_EPOCH,
+    };
+    var high = low;
+    high.effective_balance = MAX_EFFECTIVE_BALANCE_ELECTRA;
+    const validators = [_]fulu.Validator{ low, high };
+    const seed = [_]u8{1} ** 32;
+    try std.testing.expectEqual(@as(u64, 1), try computeProposerIndex(&validators, &.{ 0, 1 }, seed));
+    try std.testing.expectEqual(@as(u64, 1), try computeProposerIndex(&validators, &.{1}, seed));
+    try std.testing.expectError(error.NoEligibleProposer, computeProposerIndex(&validators, &.{}, seed));
+    try std.testing.expectError(error.NoEligibleProposer, computeProposerIndex(&validators, &.{2}, seed));
 }

@@ -46,6 +46,8 @@ The order matters because later handlers use state updated by earlier handlers. 
 
 The implementation and selected fixture coverage target Fulu's minimal preset. The selected fixtures do not cover every consensus-spec case.
 
+[`helpers.zig`](helpers.zig) derives beacon committees from the validators active in a slot's epoch. Its seed combines the epoch, an attestation purpose tag, and a historical RANDAO mix; the pinned shuffle assigns validators across the minimal preset's eight slots, with up to four committees per slot. A small active set can produce empty committees.
+
 ## Fork-choice clock and anchor
 
 [`fork_choice.zig`](fork_choice.zig) initializes fork-choice metadata from a trusted anchor block and state. The clock advances one slot at a time; entering a slot clears proposer boost, and entering an epoch promotes newer unrealized checkpoints. Its current tick path targets the minimal preset's six-second slots and eight-slot epochs. Fulu's data-availability validation is performed by block processing and is not stored in the fork-choice store.
