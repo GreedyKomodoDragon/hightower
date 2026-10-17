@@ -22,6 +22,7 @@ test {
     _ = @import("helpers.zig");
     _ = @import("domains.zig");
     _ = @import("bls.zig");
+    _ = @import("bls_vectors_test.zig");
     _ = @import("snappy.zig");
     _ = @import("fixture_runner.zig");
     _ = @import("transition.zig");

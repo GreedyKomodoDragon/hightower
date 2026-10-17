@@ -51,3 +51,44 @@ The implementation and selected fixture coverage target Fulu's minimal preset. T
 ## Fork-choice clock and anchor
 
 [`fork_choice.zig`](fork_choice.zig) initializes fork-choice metadata from a trusted anchor block and state. The clock advances one slot at a time; entering a slot clears proposer boost, and entering an epoch promotes newer unrealized checkpoints. Its current tick path targets the minimal preset's six-second slots and eight-slot epochs. Fulu's data-availability validation is performed by block processing and is not stored in the fork-choice store.
+
+## Signing domains and BLS verification
+
+`domains.computeDomain` takes the network fork version explicitly. `getDomain`
+selects the state's previous version before `state.fork.epoch`, and its current
+version at or after that epoch. Fixed-version operations instead call
+`computeDomain`: deposits use the genesis version with a zero validators root;
+BLS-to-execution changes use the genesis version with the chain's validators
+root; voluntary exits use the Capella version with that chain root. The existing
+pending-deposit path uses the pinned minimal genesis version `0x00000001`.
+Exit and address-change operation handlers remain outside the supported path.
+
+The domain tests contain known answers independently evaluated with Python
+`hashlib.sha256` from the two-field SSZ container formulas in the
+[v1.6.1 Phase 0 specification](https://github.com/ethereum/consensus-specs/blob/v1.6.1/specs/phase0/beacon-chain.md#compute_domain),
+using `0x02` repeated for the chain root and `0x03` repeated for the object root.
+Versions come from the [pinned minimal configuration](https://github.com/ethereum/consensus-specs/blob/v1.6.1/configs/minimal.yaml).
+These are specification-derived known answers, not separately published official
+domain vectors. The pinned block and pending-deposit fixtures additionally check
+signatures against official signing roots through transition processing.
+The [Deneb exit rule](https://github.com/ethereum/consensus-specs/blob/v1.6.1/specs/deneb/beacon-chain.md#modified-process_voluntary_exit)
+and [Capella address-change rule](https://github.com/ethereum/consensus-specs/blob/v1.6.1/specs/capella/beacon-chain.md#new-process_bls_to_execution_change)
+are inherited by Fulu.
+
+`bls.zig` keeps transition code independent of the existing pinned `blst` v0.3.17
+API. It accepts only 32-byte messages, 48-byte public keys, and 96-byte signatures;
+malformed points, wrong subgroups, infinity keys, and verification failures return
+errors. `verifyAggregate` implements Ethereum's `eth_fast_aggregate_verify`:
+empty participation succeeds only with the canonical infinity signature. Keys
+must already have proofs of possession, as validator registration provides.
+
+`bls_vectors_test.zig` copies small inputs verbatim, with each upstream path
+recorded beside its test. It includes all 12 Ethereum aggregate verification cases
+from [consensus-specs v1.6.1 general.tar.gz](https://github.com/ethereum/consensus-specs/releases/tag/v1.6.1)
+(verified SHA-256 `87898ba7a3fa16bc66b08c88b4ccab008833a517a7602cf421c6ce79734e07e9`).
+That bundle does not include the standalone `verify` suite. The 29 single-signature
+cases and two subgroup-rejection inputs come from the official
+[bls12-381-tests v0.1.2 bls_tests_json.tar.gz](https://github.com/ethereum/bls12-381-tests/releases/tag/v0.1.2)
+(downloaded SHA-256 `0dc1dfabfa7b3e0f8e8029f9cb2bb8733597526fa085b18f160d2c4eb0b448bc`).
+The generic BLS suite's empty-aggregate rule differs from Ethereum's; the Ethereum
+cases are used for this wrapper. Run these tests with `zig build test-transition`.
