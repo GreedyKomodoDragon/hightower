@@ -205,7 +205,7 @@ fn initiateValidatorExit(state: *fulu.BeaconState, index: usize, current_epoch: 
     if (validator.exit_epoch != helpers.FAR_FUTURE_EPOCH) return;
     const active_total = totalBalance(state, null, current_epoch);
     const balance_churn = @max(helpers.MIN_PER_EPOCH_CHURN_LIMIT_ELECTRA, active_total / helpers.CHURN_LIMIT_QUOTIENT);
-    const churn = @min(helpers.MAX_PER_EPOCH_ACTIVATION_EXIT_CHURN_LIMIT, balance_churn);
+    const churn = @min(helpers.MAX_PER_EPOCH_ACTIVATION_EXIT_CHURN_LIMIT, balance_churn - balance_churn % helpers.EFFECTIVE_BALANCE_INCREMENT);
     if (churn == 0) return error.InvalidState;
     // Electra schedules exits by balance churn, so one large exit can advance
     // the queue by several epochs while sharing the remaining epoch allowance.
@@ -450,4 +450,29 @@ test "Electra slashing rounds before scaling by validator increments" {
     processSlashings(&state, 10);
     try std.testing.expectEqual(initial_balance -| expected_penalty, state.balances.data[0]);
     try std.testing.expect(expected_penalty != 3_000_000_003 * validator_increments / active_increments);
+}
+
+test "registry ejection rounds balance churn to whole increments" {
+    const fixtures = @import("fixture_runner.zig");
+    const allocator = std.testing.allocator;
+    var state = try fixtures.decodeState(allocator, fixtures.find("slots_1").?.pre.?);
+    defer @import("ssz").freeDecoded(allocator, fulu.BeaconState, state);
+    for (@constCast(state.validators.data)) |*validator| {
+        validator.activation_eligibility_epoch = 0;
+        validator.activation_epoch = 0;
+        validator.exit_epoch = helpers.FAR_FUTURE_EPOCH;
+        validator.effective_balance = 0;
+    }
+    @constCast(state.validators.data)[0].effective_balance = 2_048_000_000_000;
+    @constCast(state.validators.data)[0].withdrawal_credentials[0] = 0x02;
+    @constCast(state.validators.data)[1].effective_balance = 16_000_000_000;
+    // Exclude the remaining validators from ejection and active balance totals.
+    for (@constCast(state.validators.data)[2..]) |*validator| validator.activation_epoch = helpers.FAR_FUTURE_EPOCH;
+    state.earliest_exit_epoch = 0;
+    state.exit_balance_to_consume = 0;
+
+    try processRegistryUpdates(&state, 0);
+    try std.testing.expectEqual(@as(u64, 48_000_000_000), state.exit_balance_to_consume);
+    try std.testing.expectEqual(@as(u64, 5), state.validators.data[1].exit_epoch);
+    try std.testing.expectEqual(@as(u64, 261), state.validators.data[1].withdrawable_epoch);
 }
