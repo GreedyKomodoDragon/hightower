@@ -61,7 +61,18 @@ pub const FAR_FUTURE_EPOCH: u64 = std.math.maxInt(u64);
 pub const DOMAIN_BEACON_PROPOSER = [_]u8{ 0, 0, 0, 0 };
 pub const DOMAIN_BEACON_ATTESTER = [_]u8{ 1, 0, 0, 0 };
 pub const DOMAIN_RANDAO = [_]u8{ 2, 0, 0, 0 };
+pub const DOMAIN_DEPOSIT = [_]u8{ 3, 0, 0, 0 };
+pub const DOMAIN_VOLUNTARY_EXIT = [_]u8{ 4, 0, 0, 0 };
+pub const DOMAIN_SELECTION_PROOF = [_]u8{ 5, 0, 0, 0 };
+pub const DOMAIN_AGGREGATE_AND_PROOF = [_]u8{ 6, 0, 0, 0 };
 pub const DOMAIN_SYNC_COMMITTEE = [_]u8{ 7, 0, 0, 0 };
+pub const DOMAIN_SYNC_COMMITTEE_SELECTION_PROOF = [_]u8{ 8, 0, 0, 0 };
+pub const DOMAIN_CONTRIBUTION_AND_PROOF = [_]u8{ 9, 0, 0, 0 };
+pub const DOMAIN_BLS_TO_EXECUTION_CHANGE = [_]u8{ 10, 0, 0, 0 };
+pub const DOMAIN_APPLICATION_MASK = [_]u8{ 0, 0, 0, 1 };
+
+// Pinned minimal network configuration, not the mainnet genesis version.
+pub const GENESIS_FORK_VERSION: fulu.Version = .{ 0, 0, 0, 1 };
 
 pub fn computeEpochAtSlot(slot: fulu.Slot) fulu.Epoch {
     return slot / SLOTS_PER_EPOCH;

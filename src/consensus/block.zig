@@ -322,3 +322,23 @@ test "block deposit requirement respects cutoff and the current Eth1 vote" {
         }
     }
 }
+
+test "invalid proposer signature fails through state transition" {
+    const fixtures = @import("fixture_runner.zig");
+    const allocator = std.testing.allocator;
+    const case = fixtures.find("empty_block_transition").?;
+    for ([_]bool{ false, true }) |malformed| {
+        var state = try fixtures.decodeState(allocator, case.pre.?);
+        defer @import("ssz").freeDecoded(allocator, fulu.BeaconState, state);
+        var signed = try fixtures.decodeBlock(allocator, case.input.?);
+        defer @import("ssz").freeDecoded(allocator, fulu.SignedBeaconBlock, signed);
+        if (malformed) {
+            signed.signature = [_]u8{0} ** 96;
+        } else {
+            signed.message.body.graffiti[0] ^= 1;
+        }
+        var fake_engine: engine_api.TestEngine = .{ .status = .valid, .unavailable = true };
+        const expected = if (malformed) error.InvalidSignature else error.VerificationFailed;
+        try std.testing.expectError(expected, stateTransition(allocator, &state, signed, fake_engine.interface()));
+    }
+}

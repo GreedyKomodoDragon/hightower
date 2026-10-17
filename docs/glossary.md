@@ -68,3 +68,18 @@ Chain:      [Block 0] ───────────────────�
 | Sync committee | A group of validators selected to help light clients verify the recent chain. |
 | Proposer lookahead | The planned sequence of validators expected to propose blocks in upcoming slots. |
 | SSZ | Ethereum consensus's encoding and hashing format for structured data. |
+| Signing domain | A 32-byte value that binds a signature to an operation type, network, and selected fork version. |
+| Signing root | The SSZ hash of an object's root together with its signing domain; this is the message verified by consensus BLS signatures. |
+| Fork version | Four bytes identifying a network's consensus rules at a particular upgrade. |
+| Genesis validators root | The SSZ root of the initial validator registry, used to distinguish chains in signing domains. |
+| ForkData | The SSZ container pairing a fork version with the genesis validators root. |
+| SigningData | The SSZ container pairing an object root with a signing domain. |
+| BLS12-381 | The elliptic-curve signature system Ethereum validators use, allowing signatures from multiple validators to be combined. |
+| G1 and G2 | The two elliptic-curve groups used for Ethereum BLS public keys and signatures, respectively. |
+| Subgroup check | A check that a decoded curve point belongs to the prime-order group required by the signature scheme. |
+| Point at infinity | The identity element of an elliptic-curve group; Ethereum uses its signature encoding for an empty sync aggregate. |
+| Proof of possession | A signature showing that a registrant controls the secret key corresponding to a public key, required before that key participates in fast aggregate verification. |
+| Capella | The consensus upgrade that enabled withdrawals and whose fork version is retained for voluntary-exit signatures. |
+| Deneb | The consensus upgrade that fixed voluntary-exit signing domains to the Capella version. |
+| Voluntary exit | A signed request by a validator to stop participating in consensus. |
+| BLS-to-execution change | A signed operation that replaces BLS withdrawal credentials with an execution-layer withdrawal address. |

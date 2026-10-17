@@ -1,3 +1,10 @@
+// BLS12-381 signatures authenticate 32-byte consensus signing roots with
+// compressed G1 public keys (48 bytes) and G2 signatures (96 bytes). Subgroup
+// checks restrict points to the prime-order groups used by Ethereum's scheme.
+// Verification does not mutate state; callers must verify before applying the
+// signed operation and propagate errors. Aggregate keys must already have
+// proofs of possession, as validator deposits provide. Ethereum permits an
+// empty signer list only with the canonical infinity signature (the identity).
 const blst = @import("blst");
 
 pub const Error = error{
@@ -20,6 +27,7 @@ pub fn verify(public_key: [48]u8, message: [32]u8, signature: [96]u8) Error!void
         return error.VerificationFailed;
 }
 
+/// Ethereum eth_fast_aggregate_verify, including its empty-participation rule.
 pub fn verifyAggregate(public_keys: []const [48]u8, message: [32]u8, signature: [96]u8) Error!void {
     if (public_keys.len == 0) {
         var infinity = [_]u8{0} ** 96;
@@ -81,6 +89,12 @@ test "Ethereum BLS verifier accepts a valid signature and rejects a changed mess
     const message = [_]u8{0x24} ** 32;
     const signature = blst.P2.hash_to(&message, ETHEREUM_BLS_DST, null).sign_with(&secret_key).compress();
     try verify(public_key, message, signature);
+    var infinity = [_]u8{0} ** 96;
+    infinity[0] = 0xc0;
+    for ([_][96]u8{ [_]u8{0} ** 96, infinity }) |invalid| {
+        try @import("std").testing.expectError(error.InvalidSignature, verify(public_key, message, invalid));
+        try @import("std").testing.expectError(error.InvalidSignature, verifyAggregate(&.{public_key}, message, invalid));
+    }
 
     var wrong_message = message;
     wrong_message[0] ^= 1;

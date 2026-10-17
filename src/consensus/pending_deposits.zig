@@ -98,7 +98,7 @@ fn applyDeposit(allocator: std.mem.Allocator, state: *fulu.BeaconState, deposit:
         .amount = deposit.amount,
     };
     const message_root = try merkle.HashTreeRoot(allocator, message);
-    const domain = domains.computeDomain(.{ 3, 0, 0, 0 }, .{ 0, 0, 0, 1 }, [_]u8{0} ** 32);
+    const domain = domains.computeDomain(helpers.DOMAIN_DEPOSIT, helpers.GENESIS_FORK_VERSION, [_]u8{0} ** 32);
     const signing_root = domains.computeSigningRoot(message_root, domain);
     bls.verify(deposit.pubkey, signing_root, deposit.signature) catch return;
 
