@@ -30,6 +30,7 @@ test {
     _ = @import("block.zig");
     _ = @import("pending_consolidations.zig");
     _ = @import("pending_deposits.zig");
+    _ = @import("fork_choice.zig");
 }
 
 test "selected Fulu transition fixtures run through one conformance path" {

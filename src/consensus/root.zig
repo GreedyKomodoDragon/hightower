@@ -10,3 +10,6 @@ pub const processEpoch = @import("epoch.zig").processEpoch;
 pub const ExecutionEngine = @import("execution_engine.zig").ExecutionEngine;
 pub const NewPayloadRequest = @import("execution_engine.zig").NewPayloadRequest;
 pub const PayloadStatus = @import("execution_engine.zig").PayloadStatus;
+pub const ForkChoiceStore = @import("fork_choice.zig").Store;
+pub const initForkChoiceStore = @import("fork_choice.zig").initStore;
+pub const onForkChoiceTick = @import("fork_choice.zig").onTick;
