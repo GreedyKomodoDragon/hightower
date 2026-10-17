@@ -44,7 +44,6 @@ fn processBlock(allocator: std.mem.Allocator, state: *fulu.BeaconState, block: f
     const parent_root = try merkle.HashTreeRoot(allocator, state.latest_block_header);
     if (!std.mem.eql(u8, &parent_root, &block.parent_root)) return error.InvalidParentRoot;
     if (hasUnsupportedOperations(block.body)) return error.UnsupportedOperations;
-    if (state.eth1_data.deposit_count != state.eth1_deposit_index) return error.DepositsRequired;
 
     const body_root = try merkle.HashTreeRoot(allocator, block.body);
     state.latest_block_header = .{
@@ -58,6 +57,8 @@ fn processBlock(allocator: std.mem.Allocator, state: *fulu.BeaconState, block: f
     try processExecutionPayload(allocator, state, block.body, engine);
     try processRandao(state, block.body.randao_reveal);
     try processEth1Data(allocator, state, block.body.eth1_data);
+    const deposit_limit = @min(state.eth1_data.deposit_count, state.deposit_requests_start_index);
+    if (state.eth1_deposit_index < deposit_limit) return error.DepositsRequired;
     try processSyncAggregate(state, block.body.sync_aggregate);
 }
 
@@ -81,8 +82,12 @@ fn processEmptyWithdrawals(state: *fulu.BeaconState, payload: fulu.ExecutionPayl
         const validator = state.validators.data[index];
         const balance = state.balances.data[index];
         const execution_credential = validator.withdrawal_credentials[0] == 0x01 or validator.withdrawal_credentials[0] == 0x02;
+        const max_balance = if (validator.withdrawal_credentials[0] == 0x02)
+            helpers.MAX_EFFECTIVE_BALANCE_ELECTRA
+        else
+            helpers.MAX_EFFECTIVE_BALANCE;
         if (execution_credential and ((validator.withdrawable_epoch <= current_epoch and balance > 0) or
-            (balance > validator.effective_balance and validator.exit_epoch == std.math.maxInt(u64))))
+            (validator.effective_balance == max_balance and balance > max_balance)))
             return error.UnsupportedWithdrawals;
     }
     state.next_withdrawal_validator_index = @intCast((state.next_withdrawal_validator_index + 16) % count);
@@ -245,5 +250,75 @@ test "execution engine invalid and syncing results reject the block" {
         var fake_engine: engine_api.TestEngine = .{ .status = status };
         const expected_error = if (status == .invalid) error.InvalidExecutionPayload else error.ExecutionPayloadUnverified;
         try std.testing.expectError(expected_error, stateTransition(allocator, &state, signed, fake_engine.interface()));
+    }
+}
+
+test "empty withdrawals use credential caps and include exiting validators" {
+    const fixtures = @import("fixture_runner.zig");
+    const allocator = std.testing.allocator;
+    const case = fixtures.find("empty_block_transition").?;
+    var state = try fixtures.decodeState(allocator, case.pre.?);
+    defer @import("ssz").freeDecoded(allocator, fulu.BeaconState, state);
+    const signed = try fixtures.decodeBlock(allocator, case.input.?);
+    defer @import("ssz").freeDecoded(allocator, fulu.SignedBeaconBlock, signed);
+    for (@constCast(state.validators.data)) |*validator| validator.withdrawal_credentials[0] = 0;
+    const validator = &@constCast(state.validators.data)[0];
+    const balance = &@constCast(state.balances.data)[0];
+    validator.withdrawable_epoch = helpers.FAR_FUTURE_EPOCH;
+    const cases = .{
+        .{ @as(u8, 0x02), @as(u64, 32_000_000_000), @as(u64, 33_000_000_000), helpers.FAR_FUTURE_EPOCH, false },
+        .{ @as(u8, 0x01), @as(u64, 31_000_000_000), @as(u64, 33_000_000_000), helpers.FAR_FUTURE_EPOCH, false },
+        .{ @as(u8, 0x01), @as(u64, 32_000_000_000), @as(u64, 32_000_000_000), helpers.FAR_FUTURE_EPOCH, false },
+        .{ @as(u8, 0x01), @as(u64, 32_000_000_000), @as(u64, 33_000_000_000), @as(u64, 1), true },
+        .{ @as(u8, 0x02), @as(u64, 2_048_000_000_000), @as(u64, 2_049_000_000_000), helpers.FAR_FUTURE_EPOCH, true },
+    };
+    inline for (cases) |entry| {
+        state.next_withdrawal_validator_index = 0;
+        validator.withdrawal_credentials[0] = entry[0];
+        validator.effective_balance = entry[1];
+        balance.* = entry[2];
+        validator.exit_epoch = entry[3];
+        if (entry[4]) {
+            try std.testing.expectError(error.UnsupportedWithdrawals, processEmptyWithdrawals(&state, signed.message.body.execution_payload));
+        } else {
+            try processEmptyWithdrawals(&state, signed.message.body.execution_payload);
+        }
+    }
+    state.next_withdrawal_validator_index = 0;
+    validator.withdrawable_epoch = helpers.getCurrentEpoch(&state);
+    validator.effective_balance = 0;
+    balance.* = 1;
+    try std.testing.expectError(error.UnsupportedWithdrawals, processEmptyWithdrawals(&state, signed.message.body.execution_payload));
+}
+
+test "block deposit requirement respects cutoff and the current Eth1 vote" {
+    const fixtures = @import("fixture_runner.zig");
+    const allocator = std.testing.allocator;
+    const case = fixtures.find("empty_block_transition").?;
+    const signed = try fixtures.decodeBlock(allocator, case.input.?);
+    defer @import("ssz").freeDecoded(allocator, fulu.SignedBeaconBlock, signed);
+    for (0..3) |scenario| {
+        var state = try fixtures.decodeState(allocator, case.pre.?);
+        defer @import("ssz").freeDecoded(allocator, fulu.BeaconState, state);
+        try transition.processSlots(allocator, &state, signed.message.slot, epoch.processEpoch);
+        var block = signed.message;
+        state.eth1_deposit_index = 100;
+        state.eth1_data.deposit_count = if (scenario == 2) 100 else 101;
+        state.deposit_requests_start_index = if (scenario == 0) 100 else helpers.FAR_FUTURE_EPOCH;
+        block.body.eth1_data = state.eth1_data;
+        block.body.eth1_data.deposit_count = 101;
+        if (scenario == 2) {
+            const votes = try allocator.alloc(fulu.Eth1Data, 16);
+            @memset(votes, block.body.eth1_data);
+            allocator.free(@constCast(state.eth1_data_votes.data));
+            state.eth1_data_votes.data = votes;
+        }
+        var engine: engine_api.TestEngine = .{ .status = .valid };
+        if (scenario == 0) {
+            try processBlock(allocator, &state, block, engine.interface());
+        } else {
+            try std.testing.expectError(error.DepositsRequired, processBlock(allocator, &state, block, engine.interface()));
+            if (scenario == 2) try std.testing.expectEqual(@as(u64, 101), state.eth1_data.deposit_count);
+        }
     }
 }

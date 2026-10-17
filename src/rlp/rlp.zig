@@ -58,10 +58,7 @@ pub fn rlp(writer: *std.Io.Writer, value: anytype) !void {
             // string check conditions
             if (ptr.size == .slice) {
                 if (ptr.child == u8) {
-                    encoding.encodeString(writer, value) catch |err| {
-                        std.debug.print("encode failed: {}\n", .{err});
-                        return;
-                    };
+                    try encoding.encodeString(writer, value);
                     return;
                 }
             }
@@ -71,10 +68,7 @@ pub fn rlp(writer: *std.Io.Writer, value: anytype) !void {
                 switch (@typeInfo(ptr.child)) {
                     .array => |arr| {
                         if (arr.child == u8) {
-                            encoding.encodeString(writer, value) catch |err| {
-                                std.debug.print("encode failed: {}\n", .{err});
-                                return;
-                            };
+                            try encoding.encodeString(writer, value);
                             return;
                         }
 

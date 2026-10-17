@@ -246,3 +246,19 @@ test "RLP encodes 56 byte string" {
         encoded[2..],
     );
 }
+
+test "RLP propagates string and list buffer exhaustion" {
+    var buf: [1]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try testing.expectError(error.WriteFailed, rlp.rlp(&writer, "dog"));
+    writer = .fixed(&buf);
+    const slice: []const u8 = "dog";
+    try testing.expectError(error.WriteFailed, rlp.rlp(&writer, slice));
+
+    const oversized = [_]u8{'x'} ** 4096;
+    const list = [_][]const u8{&oversized};
+    var output: [8192]u8 = undefined;
+    writer = .fixed(&output);
+    try testing.expectError(error.WriteFailed, rlp.rlp(&writer, list));
+    try testing.expectEqual(@as(usize, 0), writer.buffered().len);
+}
