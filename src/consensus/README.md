@@ -45,3 +45,7 @@ The order matters because later handlers use state updated by earlier handlers. 
 [`tests.zig`](tests.zig) is the test root. [`fixture_runner.zig`](fixture_runner.zig) describes the selected pinned consensus-spec fixtures, decodes their compressed SSZ state and block data, and sends them through the matching slot, epoch, or block path. Handler-specific tests compare the fields owned by that handler; selected end-to-end fixtures compare the full resulting state.
 
 The implementation and selected fixture coverage target Fulu's minimal preset. The selected fixtures do not cover every consensus-spec case.
+
+## Fork-choice clock and anchor
+
+[`fork_choice.zig`](fork_choice.zig) initializes fork-choice metadata from a trusted anchor block and state. The clock advances one slot at a time; entering a slot clears proposer boost, and entering an epoch promotes newer unrealized checkpoints. Its current tick path targets the minimal preset's six-second slots and eight-slot epochs. Fulu's data-availability validation is performed by block processing and is not stored in the fork-choice store.

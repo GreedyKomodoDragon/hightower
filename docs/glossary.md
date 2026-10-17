@@ -45,6 +45,9 @@ Chain:      [Block 0] ───────────────────�
 | Minimal preset | A small configuration used for tests. It uses fewer slots and validators than the regular network configuration. |
 | Validator | A participant that helps Ethereum agree on blocks and receives rewards or penalties for its actions. |
 | Checkpoint | A block reference at an epoch boundary, used when deciding which chain history is justified or finalized. |
+| Fork choice | The rule a node uses to select one chain head when multiple valid branches exist. |
+| Proposer boost | Temporary extra weight given to the first timely block seen in a slot, helping nodes converge on the same head. |
+| Unrealized checkpoint | A justified or finalized checkpoint inferred from a block's state before that checkpoint has been processed at an epoch boundary. |
 | Justification | A checkpoint gaining enough validator support to be treated as a strong candidate for finalization. |
 | Finality | The point at which a checkpoint is considered settled and very difficult to reverse. |
 | Participation flags | Per-validator markers recording whether the validator made required contributions during an epoch. |
