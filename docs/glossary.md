@@ -57,6 +57,7 @@ Chain:      [Block 0] ───────────────────�
 | Inactivity score | A counter that increases when a validator misses important participation and affects its penalties. |
 | Finality leak | A period when the chain has failed to finalize for long enough; validators that do not help restore finality receive stronger penalties. |
 | Effective balance | The rounded and capped balance used to calculate a validator's influence and rewards. |
+| Compounding withdrawal credentials | Validator withdrawal credentials that allow a higher effective-balance cap, so more deposited stake can count toward that validator's consensus weight. |
 | Validator registry | The list of validators and their activation, exit, and withdrawal information. |
 | Churn limit | The maximum amount of validator balance that may enter or leave active service in an epoch. |
 | Deposit queue | Deposits waiting to be applied to validator balances and status. |
