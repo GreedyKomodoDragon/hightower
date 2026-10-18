@@ -54,12 +54,16 @@ pub fn rlp(writer: *std.Io.Writer, value: anytype) !void {
         },
 
         .pointer => |ptr| {
-            // string check conditions
+            // Byte slices encode as strings; any other slice is a list whose
+            // items are encoded recursively. This also allows nested lists such
+            // as []const []const u8.
             if (ptr.size == .slice) {
                 if (ptr.child == u8) {
                     try encoding.encodeString(writer, value);
-                    return;
+                } else {
+                    try encodeList(writer, value);
                 }
+                return;
             }
 
             // .one means the pointer points to exactly one value of its child type.
@@ -68,13 +72,10 @@ pub fn rlp(writer: *std.Io.Writer, value: anytype) !void {
                     .array => |arr| {
                         if (arr.child == u8) {
                             try encoding.encodeString(writer, value);
-                            return;
+                        } else {
+                            try encodeList(writer, value);
                         }
-
-                        // encode list
-                        encodeList(writer, value);
-
-                        @compileError("unsupported RLP type in ptr.size == .one & array");
+                        return;
                     },
                     else => {},
                 }
@@ -90,13 +91,19 @@ pub fn rlp(writer: *std.Io.Writer, value: anytype) !void {
 }
 
 pub fn encodeList(writer: *std.Io.Writer, values: anytype) !void {
-    var tmp_buf: [4096]u8 = undefined;
-    var tmp_writer: std.Io.Writer = .fixed(&tmp_buf);
-
+    // The list prefix must carry the total payload length, so measure the
+    // encoded items first, write the prefix, then stream the items directly to
+    // the caller. This avoids a fixed staging buffer and supports lists of any
+    // size. Work grows with nesting depth, which stays shallow for Ethereum RLP.
+    var scratch: [64]u8 = undefined;
+    var counter: std.Io.Writer.Discarding = .init(&scratch);
     for (values) |item| {
-        try rlp(&tmp_writer, item);
+        try rlp(&counter.writer, item);
     }
 
-    const payload = tmp_writer.buffered();
-    try encoding.encodeBytes(writer, payload);
+    try encoding.encodeListHeader(writer, @intCast(counter.fullCount()));
+
+    for (values) |item| {
+        try rlp(writer, item);
+    }
 }

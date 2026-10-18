@@ -257,10 +257,136 @@ test "RLP propagates string and list buffer exhaustion" {
 
     const oversized = [_]u8{'x'} ** 4096;
     const list = [_][]const u8{&oversized};
-    var output: [8192]u8 = undefined;
-    writer = .fixed(&output);
+    var small: [8]u8 = undefined;
+    writer = .fixed(&small);
     try testing.expectError(error.WriteFailed, rlp.rlp(&writer, list));
-    try testing.expectEqual(@as(usize, 0), writer.buffered().len);
+}
+
+test "RLP encodes a list containing a single byte string" {
+    var buf: [100]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    const list = [_][]const u8{"a"};
+
+    try rlp.rlp(&writer, list);
+
+    try testing.expectEqualSlices(u8, &.{ 0xc1, 0x61 }, writer.buffered());
+}
+
+test "RLP encodes a list with a payload larger than 4 KiB" {
+    var buf: [9000]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    const big = [_]u8{'x'} ** 5000;
+    const list = [_][]const u8{&big};
+
+    try rlp.rlp(&writer, list);
+
+    const encoded = writer.buffered();
+    try testing.expectEqual(@as(usize, 5006), encoded.len);
+    try testing.expectEqualSlices(u8, &.{ 0xf9, 0x13, 0x8b }, encoded[0..3]);
+    try testing.expectEqualSlices(u8, &.{ 0xb9, 0x13, 0x88 }, encoded[3..6]);
+    try testing.expectEqualSlices(u8, &big, encoded[6..]);
+}
+
+test "RLP encodes nested lists" {
+    var buf: [100]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    const inner = [_][]const u8{"cat"};
+    const outer = [_][1][]const u8{inner};
+
+    try rlp.rlp(&writer, outer);
+
+    try testing.expectEqualSlices(
+        u8,
+        &.{ 0xc5, 0xc4, 0x83, 'c', 'a', 't' },
+        writer.buffered(),
+    );
+}
+
+test "RLP encodes a nested list whose payload exceeds 4 KiB" {
+    var buf: [9000]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    const big = [_]u8{'z'} ** 5000;
+    const inner = [_][]const u8{&big};
+    const outer = [_][1][]const u8{inner};
+
+    try rlp.rlp(&writer, outer);
+
+    const encoded = writer.buffered();
+    try testing.expectEqual(@as(usize, 5009), encoded.len);
+    try testing.expectEqualSlices(u8, &.{ 0xf9, 0x13, 0x8e }, encoded[0..3]);
+    try testing.expectEqualSlices(u8, &.{ 0xf9, 0x13, 0x8b }, encoded[3..6]);
+    try testing.expectEqualSlices(u8, &.{ 0xb9, 0x13, 0x88 }, encoded[6..9]);
+    try testing.expectEqualSlices(u8, &big, encoded[9..]);
+}
+
+test "RLP encodes a slice of slices as a list" {
+    var buf: [100]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    const items = [_][]const u8{ "cat", "dog" };
+    const list: []const []const u8 = &items;
+
+    try rlp.rlp(&writer, list);
+
+    try testing.expectEqualSlices(
+        u8,
+        &.{ 0xc8, 0x83, 'c', 'a', 't', 0x83, 'd', 'o', 'g' },
+        writer.buffered(),
+    );
+}
+
+test "RLP encodes a slice of nested slices" {
+    var buf: [100]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    const inner_items = [_][]const u8{"cat"};
+    const inner: []const []const u8 = &inner_items;
+    const outer_items = [_][]const []const u8{inner};
+    const outer: []const []const []const u8 = &outer_items;
+
+    try rlp.rlp(&writer, outer);
+
+    try testing.expectEqualSlices(
+        u8,
+        &.{ 0xc5, 0xc4, 0x83, 'c', 'a', 't' },
+        writer.buffered(),
+    );
+}
+
+test "RLP encodes a pointer to an array of strings" {
+    var buf: [100]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    const items = [_][]const u8{ "cat", "dog" };
+    const list = &items;
+
+    try rlp.rlp(&writer, list);
+
+    try testing.expectEqualSlices(
+        u8,
+        &.{ 0xc8, 0x83, 'c', 'a', 't', 0x83, 'd', 'o', 'g' },
+        writer.buffered(),
+    );
+}
+
+test "RLP encodes a slice of slices with a payload above 4 KiB" {
+    var buf: [9000]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    const big = [_]u8{'q'} ** 5000;
+    const items = [_][]const u8{&big};
+    const list: []const []const u8 = &items;
+
+    try rlp.rlp(&writer, list);
+
+    const encoded = writer.buffered();
+    try testing.expectEqual(@as(usize, 5006), encoded.len);
+    try testing.expectEqualSlices(u8, &.{ 0xf9, 0x13, 0x8b }, encoded[0..3]);
+    try testing.expectEqualSlices(u8, &big, encoded[6..]);
 }
 
 test "RLP encodes unsigned integers with minimal big-endian encoding" {
