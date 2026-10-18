@@ -412,6 +412,20 @@ test "seed and beacon committees use minimal preset boundaries" {
     try std.testing.expectEqual(@as(usize, 0), empty.len);
 }
 
+test "proposer indices use the sole eligible validator" {
+    const allocator = std.testing.allocator;
+    const fixtures = @import("fixture_runner.zig");
+    const state = try fixtures.decodeState(allocator, fixtures.find("proposer_lookahead_in_state_matches_computed_lookahead").?.pre_epoch.?);
+    defer @import("ssz").freeDecoded(allocator, fulu.BeaconState, state);
+
+    for (@constCast(state.validators.data), 0..) |*validator, index| {
+        validator.activation_epoch = if (index == 0) 0 else FAR_FUTURE_EPOCH;
+        validator.exit_epoch = FAR_FUTURE_EPOCH;
+    }
+    const indices = try computeProposerIndices(allocator, state, 2);
+    try std.testing.expectEqualSlices(u64, &([_]u64{0} ** SLOTS_PER_EPOCH), &indices);
+}
+
 test "Electra proposer weighting retries a low-balance candidate" {
     const low = fulu.Validator{
         .pubkey = [_]u8{0} ** 48,
