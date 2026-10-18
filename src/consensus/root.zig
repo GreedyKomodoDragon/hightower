@@ -13,3 +13,5 @@ pub const PayloadStatus = @import("execution_engine.zig").PayloadStatus;
 pub const ForkChoiceStore = @import("fork_choice.zig").Store;
 pub const initForkChoiceStore = @import("fork_choice.zig").initStore;
 pub const onForkChoiceTick = @import("fork_choice.zig").onTick;
+pub const onForkChoiceBlock = @import("fork_choice.zig").onBlock;
+pub const DataAvailabilityCheck = @import("fork_choice.zig").DataAvailabilityCheck;

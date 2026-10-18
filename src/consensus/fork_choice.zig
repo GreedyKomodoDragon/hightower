@@ -13,6 +13,8 @@ const fulu = @import("fulu");
 const merkle = @import("merkle");
 const ssz = @import("ssz");
 const helpers = @import("helpers.zig");
+const block_transition = @import("block.zig");
+const engine_api = @import("execution_engine.zig");
 
 // shortcut: the minimal preset fixes six seconds per slot, extract this when adding another preset.
 const SECONDS_PER_SLOT: u64 = 6;
@@ -20,6 +22,15 @@ const SECONDS_PER_SLOT: u64 = 6;
 pub const LatestMessage = struct {
     epoch: fulu.Epoch,
     root: fulu.Root,
+};
+
+pub const DataAvailabilityCheck = struct {
+    context: *anyopaque,
+    is_available: *const fn (*anyopaque, fulu.Root) anyerror!bool,
+
+    pub fn check(self: DataAvailabilityCheck, root: fulu.Root) anyerror!bool {
+        return self.is_available(self.context, root);
+    }
 };
 
 pub const Store = struct {
@@ -124,6 +135,48 @@ fn updateCheckpoints(store: *Store) void {
     }
 }
 
+fn checkpointBlock(store: *const Store, root: fulu.Root, epoch: fulu.Epoch) !fulu.Root {
+    const start_slot = try helpers.computeStartSlotAtEpoch(epoch);
+    var current_root = root;
+    while (true) {
+        const block = store.blocks.get(current_root) orelse return error.UnknownParent;
+        if (block.slot <= start_slot) return current_root;
+        current_root = block.parent_root;
+    }
+}
+
+pub fn onBlock(store: *Store, signed_block: fulu.SignedBeaconBlock, engine: engine_api.ExecutionEngine, availability: DataAvailabilityCheck) !void {
+    const block = signed_block.message;
+    const parent_state = store.block_states.getPtr(block.parent_root) orelse return error.UnknownParent;
+    if (block.slot > store.currentSlot()) return error.FutureBlock;
+    const finalized_slot = try helpers.computeStartSlotAtEpoch(store.finalized_checkpoint.epoch);
+    if (block.slot <= finalized_slot) return error.BeforeFinalized;
+    if (!std.mem.eql(u8, &store.finalized_checkpoint.root, &(try checkpointBlock(store, block.parent_root, store.finalized_checkpoint.epoch)))) return error.NotDescendantOfFinalized;
+
+    const block_root = try merkle.HashTreeRoot(store.allocator, block);
+    if (store.blocks.contains(block_root)) return error.DuplicateBlock;
+    if (!try availability.check(block_root)) return error.DataUnavailable;
+
+    var state = try cloneSSZ(store.allocator, fulu.BeaconState, parent_state.*);
+    defer ssz.freeDecoded(store.allocator, fulu.BeaconState, state);
+    try block_transition.stateTransition(store.allocator, &state, signed_block, engine);
+
+    try putBlock(store, block_root, block);
+    try putState(store, block_root, state);
+    const seconds_into_slot = (store.time - store.genesis_time) % SECONDS_PER_SLOT;
+    const timely = store.currentSlot() == block.slot and seconds_into_slot < 2;
+    try store.block_timeliness.put(block_root, timely);
+    if (timely and std.mem.eql(u8, &store.proposer_boost_root, &([_]u8{0} ** 32))) {
+        store.proposer_boost_root = block_root;
+    }
+    if (state.current_justified_checkpoint.epoch > store.unrealized_justified_checkpoint.epoch) {
+        store.unrealized_justified_checkpoint = state.current_justified_checkpoint;
+    }
+    if (state.finalized_checkpoint.epoch > store.unrealized_finalized_checkpoint.epoch) {
+        store.unrealized_finalized_checkpoint = state.finalized_checkpoint;
+    }
+}
+
 fn cloneSSZ(allocator: std.mem.Allocator, comptime T: type, value: T) !T {
     const bytes = try ssz.serializeAlloc(allocator, value);
     defer allocator.free(bytes);
@@ -225,4 +278,83 @@ test "fork-choice ticks clear proposer boost, promote checkpoints, and reject re
     try std.testing.expectError(error.TimeRegression, onTick(&store, 47));
     try std.testing.expectEqual(@as(u64, 48), store.time);
     try std.testing.expectEqual([_]u8{0xcc} ** 32, store.proposer_boost_root);
+}
+
+const AvailabilityTestContext = struct {
+    available: bool,
+    calls: usize = 0,
+
+    fn check(context: *anyopaque, _: fulu.Root) anyerror!bool {
+        const self: *AvailabilityTestContext = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        return self.available;
+    }
+};
+
+fn loadAvailabilityFixture(allocator: std.mem.Allocator) !struct { fulu.BeaconState, fulu.BeaconBlock, fulu.SignedBeaconBlock } {
+    const fixtures = @import("fixture_runner.zig");
+    const state = try fixtures.decodeState(allocator, @embedFile("fixtures/fulu_fork_choice/availability/anchor_state.ssz_snappy"));
+    errdefer ssz.freeDecoded(allocator, fulu.BeaconState, state);
+    const compressed_block = try fixtures.decode(allocator, @embedFile("fixtures/fulu_fork_choice/availability/anchor_block.ssz_snappy"));
+    defer allocator.free(compressed_block);
+    var block_reader: std.Io.Reader = .fixed(compressed_block);
+    const block = try ssz.deserialize(allocator, fulu.BeaconBlock, &block_reader);
+    errdefer ssz.freeDecoded(allocator, fulu.BeaconBlock, block);
+    const signed = try fixtures.decodeBlock(allocator, @embedFile("fixtures/fulu_fork_choice/availability/block.ssz_snappy"));
+    return .{ state, block, signed };
+}
+
+test "fork-choice rejects unavailable block without changing the store" {
+    const allocator = std.testing.allocator;
+    var fixture = try loadAvailabilityFixture(allocator);
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, fixture[0]);
+    defer ssz.freeDecoded(allocator, fulu.BeaconBlock, fixture[1]);
+    defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, fixture[2]);
+    var store = try initStore(allocator, &fixture[0], &fixture[1]);
+    defer store.deinit();
+    try onTick(&store, fixture[2].message.slot * SECONDS_PER_SLOT);
+    var availability = AvailabilityTestContext{ .available = false };
+    var engine: engine_api.TestEngine = .{ .status = .valid };
+
+    try std.testing.expectError(error.DataUnavailable, onBlock(&store, fixture[2], engine.interface(), .{
+        .context = &availability,
+        .is_available = AvailabilityTestContext.check,
+    }));
+    try std.testing.expectEqual(@as(usize, 1), availability.calls);
+    try std.testing.expectEqual(@as(usize, 1), store.blocks.count());
+    try std.testing.expectEqual(@as(usize, 1), store.block_states.count());
+    try std.testing.expectEqual(@as(usize, 0), store.block_timeliness.count());
+    try std.testing.expectEqual([_]u8{0} ** 32, store.proposer_boost_root);
+}
+
+test "fork-choice stores an available block and assigns timely proposer boost" {
+    const allocator = std.testing.allocator;
+    var fixture = try loadAvailabilityFixture(allocator);
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, fixture[0]);
+    defer ssz.freeDecoded(allocator, fulu.BeaconBlock, fixture[1]);
+    defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, fixture[2]);
+    var store = try initStore(allocator, &fixture[0], &fixture[1]);
+    defer store.deinit();
+    const imported_checkpoint = fulu.Checkpoint{ .epoch = 1, .root = [_]u8{0x11} ** 32 };
+    const parent_root = try merkle.HashTreeRoot(allocator, fixture[1]);
+    store.block_states.getPtr(parent_root).?.current_justified_checkpoint = imported_checkpoint;
+    store.block_states.getPtr(parent_root).?.finalized_checkpoint = imported_checkpoint;
+    try onTick(&store, fixture[2].message.slot * SECONDS_PER_SLOT);
+    var availability = AvailabilityTestContext{ .available = true };
+    var engine: engine_api.TestEngine = .{ .status = .valid };
+
+    try onBlock(&store, fixture[2], engine.interface(), .{
+        .context = &availability,
+        .is_available = AvailabilityTestContext.check,
+    });
+    try std.testing.expectEqual(@as(usize, 1), availability.calls);
+    try std.testing.expectEqual(@as(usize, 2), store.blocks.count());
+    try std.testing.expectEqual(@as(usize, 2), store.block_states.count());
+    try std.testing.expectEqual(@as(usize, 1), store.block_timeliness.count());
+    const block_root = try merkle.HashTreeRoot(allocator, fixture[2].message);
+    try std.testing.expectEqual(block_root, store.proposer_boost_root);
+    try std.testing.expectEqual(@as(u64, 0), store.justified_checkpoint.epoch);
+    try std.testing.expectEqual(@as(u64, 0), store.finalized_checkpoint.epoch);
+    try std.testing.expectEqual(imported_checkpoint, store.unrealized_justified_checkpoint);
+    try std.testing.expectEqual(imported_checkpoint, store.unrealized_finalized_checkpoint);
 }

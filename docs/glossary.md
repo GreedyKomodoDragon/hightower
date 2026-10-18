@@ -49,6 +49,7 @@ Chain:      [Block 0] ───────────────────�
 | Shuffle | The deterministic rearrangement of active validators used when assigning duties. |
 | Checkpoint | A block reference at an epoch boundary, used when deciding which chain history is justified or finalized. |
 | Fork choice | The rule a node uses to select one chain head when multiple valid branches exist. |
+| Data availability | Whether the data carried by a block can be retrieved and verified, so nodes can safely accept the block. |
 | Proposer boost | Temporary extra weight given to the first timely block seen in a slot, helping nodes converge on the same head. |
 | Unrealized checkpoint | A justified or finalized checkpoint inferred from a block's state before that checkpoint has been processed at an epoch boundary. |
 | Justification | A checkpoint gaining enough validator support to be treated as a strong candidate for finalization. |
