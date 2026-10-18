@@ -12,15 +12,20 @@ current state
     ├─ advance through any intervening slots
     │      └─ record state and block roots; run epoch updates at boundaries
     ├─ check proposer signature
-    ├─ check slot, selected proposer, parent root, and supported operations
-    ├─ update block header and process execution payload, RANDAO, Eth1 vote,
-    │  and sync aggregate
+    ├─ check slot, selected proposer, parent root, and update block header
+    ├─ validate payload withdrawals, then execution payload through the engine
+    ├─ process RANDAO, Eth1 vote, ordered operations, then sync aggregate
     └─ compare resulting state root with the block's declared state root
 ```
 
 If any check fails, the transition returns an error. Processing mutates the supplied state along the way, so callers should discard that state when an error is returned.
 
-Block operation lists and withdrawals are currently required to be empty. The execution payload is checked through the supplied execution-engine interface.
+Fulu operations run in consensus order: proposer slashings, attester slashings,
+attestations, voluntary exits, BLS-to-execution changes, deposit requests,
+withdrawal requests, and consolidation requests. The legacy deposit list remains
+in the body encoding but must be empty. Execution payload withdrawals are
+compared with consensus-generated withdrawals before the payload is sent to the
+execution-engine interface.
 
 ## Advancing slots and epochs
 

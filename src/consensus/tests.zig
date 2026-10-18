@@ -29,6 +29,7 @@ test {
     _ = @import("lookahead.zig");
     _ = @import("execution_engine.zig");
     _ = @import("block.zig");
+    _ = @import("block_operations_test.zig");
     _ = @import("pending_consolidations.zig");
     _ = @import("pending_deposits.zig");
     _ = @import("fork_choice.zig");
