@@ -61,6 +61,7 @@ Chain:      [Block 0] ───────────────────�
 | Validator registry | The list of validators and their activation, exit, and withdrawal information. |
 | Churn limit | The maximum amount of validator balance that may enter or leave active service in an epoch. |
 | Deposit queue | Deposits waiting to be applied to validator balances and status. |
+| Execution request | A deposit, withdrawal, or consolidation instruction in a beacon block body, applied to consensus state under Fulu rules and forwarded to the execution layer. |
 | Consolidation | Moving eligible balance from one validator to another under Ethereum's consolidation rules. |
 | Consolidation queue | Consolidation requests waiting until their source validators can be processed. Requests are handled in order. |
 | Slashing | A penalty for a validator's provably conflicting behavior, which can also affect its withdrawal and rewards. |

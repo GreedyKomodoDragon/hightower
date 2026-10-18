@@ -2,17 +2,17 @@
 // carries an execution payload, whose transactions need an execution engine's
 // verdict; a valid beacon signature alone cannot establish payload validity.
 // This transition advances empty slots, verifies the proposer and parent, then
-// applies the supported block fields in the order this implementation uses:
+// applies the body in Fulu consensus order:
 //
-//   slots -> proposer signature -> header -> withdrawal eligibility
-//         -> execution payload -> RANDAO -> Eth1 vote -> sync aggregate
+//   slots -> proposer signature -> header -> withdrawals -> execution payload
+//         -> RANDAO -> Eth1 vote -> operations -> sync aggregate
 //         -> compare the resulting BeaconState root with block.state_root
 //
 // RANDAO is proposer-supplied randomness mixed into future validator selection;
 // a sync aggregate is a small committee's signature on the previous slot's
 // recorded block root.
-// Nonempty operation lists and withdrawals fail explicitly. Processing mutates
-// the allocator-owned state as it goes, so callers must discard it on any error.
+// Processing mutates the allocator-owned state as it goes, so callers must
+// discard it on any error.
 const std = @import("std");
 const fulu = @import("fulu");
 const merkle = @import("merkle");
@@ -22,6 +22,7 @@ const helpers = @import("helpers.zig");
 const transition = @import("transition.zig");
 const epoch = @import("epoch.zig");
 const engine_api = @import("execution_engine.zig");
+const operations = @import("block_operations.zig");
 
 /// Applies a signed block to an allocator-owned state. Discard the state on error.
 pub fn stateTransition(allocator: std.mem.Allocator, state: *fulu.BeaconState, signed: fulu.SignedBeaconBlock, engine: engine_api.ExecutionEngine) !void {
@@ -37,14 +38,24 @@ pub fn stateTransition(allocator: std.mem.Allocator, state: *fulu.BeaconState, s
 }
 
 fn processBlock(allocator: std.mem.Allocator, state: *fulu.BeaconState, block: fulu.BeaconBlock, engine: engine_api.ExecutionEngine) !void {
+    try processBlockHeader(allocator, state, block);
+    try operations.processWithdrawals(allocator, state, block.body.execution_payload);
+    try processExecutionPayload(allocator, state, block.body, engine);
+    try processRandao(state, block.body.randao_reveal);
+    try processEth1Data(allocator, state, block.body.eth1_data);
+    const deposit_limit = @min(state.eth1_data.deposit_count, state.deposit_requests_start_index);
+    if (state.eth1_deposit_index < deposit_limit) return error.DepositsRequired;
+    try operations.processOperations(allocator, state, block.body);
+    try processSyncAggregate(state, block.body.sync_aggregate);
+}
+
+pub fn processBlockHeader(allocator: std.mem.Allocator, state: *fulu.BeaconState, block: fulu.BeaconBlock) !void {
     if (block.slot != state.slot or block.slot <= state.latest_block_header.slot) return error.InvalidSlot;
     if (block.proposer_index != state.proposer_lookahead[state.slot % helpers.SLOTS_PER_EPOCH] or
         block.proposer_index >= state.validators.data.len or state.validators.data[block.proposer_index].slashed)
         return error.InvalidProposer;
     const parent_root = try merkle.HashTreeRoot(allocator, state.latest_block_header);
     if (!std.mem.eql(u8, &parent_root, &block.parent_root)) return error.InvalidParentRoot;
-    if (hasUnsupportedOperations(block.body)) return error.UnsupportedOperations;
-
     const body_root = try merkle.HashTreeRoot(allocator, block.body);
     state.latest_block_header = .{
         .slot = block.slot,
@@ -53,44 +64,6 @@ fn processBlock(allocator: std.mem.Allocator, state: *fulu.BeaconState, block: f
         .state_root = [_]u8{0} ** 32,
         .body_root = body_root,
     };
-    try processEmptyWithdrawals(state, block.body.execution_payload);
-    try processExecutionPayload(allocator, state, block.body, engine);
-    try processRandao(state, block.body.randao_reveal);
-    try processEth1Data(allocator, state, block.body.eth1_data);
-    const deposit_limit = @min(state.eth1_data.deposit_count, state.deposit_requests_start_index);
-    if (state.eth1_deposit_index < deposit_limit) return error.DepositsRequired;
-    try processSyncAggregate(state, block.body.sync_aggregate);
-}
-
-fn hasUnsupportedOperations(body: fulu.BeaconBlockBody) bool {
-    return body.proposer_slashings.data.len != 0 or body.attester_slashings.data.len != 0 or
-        body.attestations.data.len != 0 or body.deposits.data.len != 0 or
-        body.voluntary_exits.data.len != 0 or body.bls_to_execution_changes.data.len != 0 or
-        body.execution_requests.deposits.data.len != 0 or body.execution_requests.withdrawals.data.len != 0 or
-        body.execution_requests.consolidations.data.len != 0;
-}
-
-fn processEmptyWithdrawals(state: *fulu.BeaconState, payload: fulu.ExecutionPayload) !void {
-    if (state.pending_partial_withdrawals.data.len != 0 or payload.withdrawals.data.len != 0)
-        return error.UnsupportedWithdrawals;
-    const count = state.validators.data.len;
-    if (count == 0 or state.next_withdrawal_validator_index >= count) return error.InvalidState;
-    const current_epoch = helpers.computeEpochAtSlot(state.slot);
-    const sweep = @min(count, 16);
-    for (0..sweep) |offset| {
-        const index = (state.next_withdrawal_validator_index + offset) % count;
-        const validator = state.validators.data[index];
-        const balance = state.balances.data[index];
-        const execution_credential = validator.withdrawal_credentials[0] == 0x01 or validator.withdrawal_credentials[0] == 0x02;
-        const max_balance = if (validator.withdrawal_credentials[0] == 0x02)
-            helpers.MAX_EFFECTIVE_BALANCE_ELECTRA
-        else
-            helpers.MAX_EFFECTIVE_BALANCE;
-        if (execution_credential and ((validator.withdrawable_epoch <= current_epoch and balance > 0) or
-            (validator.effective_balance == max_balance and balance > max_balance)))
-            return error.UnsupportedWithdrawals;
-    }
-    state.next_withdrawal_validator_index = @intCast((state.next_withdrawal_validator_index + 16) % count);
 }
 
 fn processExecutionPayload(allocator: std.mem.Allocator, state: *fulu.BeaconState, body: fulu.BeaconBlockBody, engine: engine_api.ExecutionEngine) !void {
@@ -173,7 +146,7 @@ fn processEth1Data(allocator: std.mem.Allocator, state: *fulu.BeaconState, vote:
     if (matching * 2 > 4 * helpers.SLOTS_PER_EPOCH) state.eth1_data = vote;
 }
 
-fn processSyncAggregate(state: *fulu.BeaconState, aggregate: fulu.SyncAggregate) !void {
+pub fn processSyncAggregate(state: *fulu.BeaconState, aggregate: fulu.SyncAggregate) !void {
     if (state.slot == 0) return error.InvalidSlot;
     const previous_slot = state.slot - 1;
     const domain = domains.getDomain(state.*, helpers.DOMAIN_SYNC_COMMITTEE, helpers.computeEpochAtSlot(previous_slot));
@@ -279,16 +252,16 @@ test "empty withdrawals use credential caps and include exiting validators" {
         balance.* = entry[2];
         validator.exit_epoch = entry[3];
         if (entry[4]) {
-            try std.testing.expectError(error.UnsupportedWithdrawals, processEmptyWithdrawals(&state, signed.message.body.execution_payload));
+            try std.testing.expectError(error.InvalidWithdrawals, operations.processWithdrawals(allocator, &state, signed.message.body.execution_payload));
         } else {
-            try processEmptyWithdrawals(&state, signed.message.body.execution_payload);
+            try operations.processWithdrawals(allocator, &state, signed.message.body.execution_payload);
         }
     }
     state.next_withdrawal_validator_index = 0;
     validator.withdrawable_epoch = helpers.getCurrentEpoch(&state);
     validator.effective_balance = 0;
     balance.* = 1;
-    try std.testing.expectError(error.UnsupportedWithdrawals, processEmptyWithdrawals(&state, signed.message.body.execution_payload));
+    try std.testing.expectError(error.InvalidWithdrawals, operations.processWithdrawals(allocator, &state, signed.message.body.execution_payload));
 }
 
 test "block deposit requirement respects cutoff and the current Eth1 vote" {
