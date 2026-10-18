@@ -200,7 +200,7 @@ pub fn processRegistryUpdates(state: *fulu.BeaconState, current_epoch: fulu.Epoc
     }
 }
 
-fn initiateValidatorExit(state: *fulu.BeaconState, index: usize, current_epoch: fulu.Epoch) !void {
+pub fn initiateValidatorExit(state: *fulu.BeaconState, index: usize, current_epoch: fulu.Epoch) !void {
     const validator = state.validators.data[index];
     if (validator.exit_epoch != helpers.FAR_FUTURE_EPOCH) return;
     const active_total = totalBalance(state, null, current_epoch);
