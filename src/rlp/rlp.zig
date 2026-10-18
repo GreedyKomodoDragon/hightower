@@ -90,13 +90,19 @@ pub fn rlp(writer: *std.Io.Writer, value: anytype) !void {
 }
 
 pub fn encodeList(writer: *std.Io.Writer, values: anytype) !void {
-    var tmp_buf: [4096]u8 = undefined;
-    var tmp_writer: std.Io.Writer = .fixed(&tmp_buf);
-
+    // The list prefix must carry the total payload length, so measure the
+    // encoded items first, write the prefix, then stream the items directly to
+    // the caller. This avoids a fixed staging buffer and supports lists of any
+    // size. Work grows with nesting depth, which stays shallow for Ethereum RLP.
+    var scratch: [64]u8 = undefined;
+    var counter: std.Io.Writer.Discarding = .init(&scratch);
     for (values) |item| {
-        try rlp(&tmp_writer, item);
+        try rlp(&counter.writer, item);
     }
 
-    const payload = tmp_writer.buffered();
-    try encoding.encodeBytes(writer, payload);
+    try encoding.encodeListHeader(writer, @intCast(counter.fullCount()));
+
+    for (values) |item| {
+        try rlp(writer, item);
+    }
 }

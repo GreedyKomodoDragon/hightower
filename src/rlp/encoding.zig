@@ -42,26 +42,23 @@ pub fn encodeString(writer: *std.Io.Writer, bytes: []const u8) !void {
     try writer.writeAll(bytes);
 }
 
-pub fn encodeBytes(writer: *std.Io.Writer, bytes: []const u8) !void {
-    if (bytes.len == 1 and bytes[0] < 0x80) {
-        try writer.writeByte(bytes[0]);
-        return;
-    }
-
-    if (bytes.len <= 55) {
-        try writer.writeByte(0xC0 + @as(u8, @intCast(bytes.len)));
-        try writer.writeAll(bytes);
+// Writes only the RLP list prefix for a payload of `payload_len` bytes. The
+// caller writes the payload separately, which lets list payloads be streamed
+// without staging them in a fixed buffer. Unlike a byte string, a list payload
+// is never collapsed to a single raw byte.
+pub fn encodeListHeader(writer: *std.Io.Writer, payload_len: usize) !void {
+    if (payload_len <= 55) {
+        try writer.writeByte(0xC0 + @as(u8, @intCast(payload_len)));
         return;
     }
 
     var len_buf: [@sizeOf(usize)]u8 = undefined;
-    const len_bytes = encodeLengthBigEndian(&len_buf, bytes.len);
+    const len_bytes = encodeLengthBigEndian(&len_buf, payload_len);
 
     try writer.writeByte(
         0xF7 + @as(u8, @intCast(len_bytes.len)),
     );
     try writer.writeAll(len_bytes);
-    try writer.writeAll(bytes);
 }
 
 fn encodeLengthBigEndian(buf: []u8, value: usize) []const u8 {
