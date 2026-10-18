@@ -175,7 +175,6 @@ pub fn onBlock(store: *Store, signed_block: fulu.SignedBeaconBlock, engine: engi
     if (state.finalized_checkpoint.epoch > store.unrealized_finalized_checkpoint.epoch) {
         store.unrealized_finalized_checkpoint = state.finalized_checkpoint;
     }
-    updateCheckpoints(store);
 }
 
 fn cloneSSZ(allocator: std.mem.Allocator, comptime T: type, value: T) !T {
@@ -336,6 +335,10 @@ test "fork-choice stores an available block and assigns timely proposer boost" {
     defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, fixture[2]);
     var store = try initStore(allocator, &fixture[0], &fixture[1]);
     defer store.deinit();
+    const imported_checkpoint = fulu.Checkpoint{ .epoch = 1, .root = [_]u8{0x11} ** 32 };
+    const parent_root = try merkle.HashTreeRoot(allocator, fixture[1]);
+    store.block_states.getPtr(parent_root).?.current_justified_checkpoint = imported_checkpoint;
+    store.block_states.getPtr(parent_root).?.finalized_checkpoint = imported_checkpoint;
     try onTick(&store, fixture[2].message.slot * SECONDS_PER_SLOT);
     var availability = AvailabilityTestContext{ .available = true };
     var engine: engine_api.TestEngine = .{ .status = .valid };
@@ -350,4 +353,8 @@ test "fork-choice stores an available block and assigns timely proposer boost" {
     try std.testing.expectEqual(@as(usize, 1), store.block_timeliness.count());
     const block_root = try merkle.HashTreeRoot(allocator, fixture[2].message);
     try std.testing.expectEqual(block_root, store.proposer_boost_root);
+    try std.testing.expectEqual(@as(u64, 0), store.justified_checkpoint.epoch);
+    try std.testing.expectEqual(@as(u64, 0), store.finalized_checkpoint.epoch);
+    try std.testing.expectEqual(imported_checkpoint, store.unrealized_justified_checkpoint);
+    try std.testing.expectEqual(imported_checkpoint, store.unrealized_finalized_checkpoint);
 }
