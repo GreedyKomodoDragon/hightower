@@ -43,3 +43,33 @@ test "Fulu proposer lookahead matches both pinned epoch fixtures" {
         try std.testing.expectEqualSlices(u64, &expected.proposer_lookahead, &state.proposer_lookahead);
     }
 }
+
+test "proposer lookahead rolls over at the minimal epoch boundary" {
+    const allocator = std.testing.allocator;
+    const fixtures = @import("fixture_runner.zig");
+    var state = try fixtures.decodeState(allocator, fixtures.find("proposer_lookahead_in_state_matches_computed_lookahead").?.pre_epoch.?);
+    defer @import("ssz").freeDecoded(allocator, fulu.BeaconState, state);
+
+    state.slot = helpers.SLOTS_PER_EPOCH;
+    const previous = state.proposer_lookahead;
+    const next = try helpers.computeProposerIndices(allocator, state, 3);
+    try processProposerLookahead(allocator, &state);
+    try std.testing.expectEqualSlices(u64, previous[helpers.SLOTS_PER_EPOCH..], state.proposer_lookahead[0..helpers.SLOTS_PER_EPOCH]);
+    try std.testing.expectEqualSlices(u64, &next, state.proposer_lookahead[helpers.SLOTS_PER_EPOCH..]);
+}
+
+test "failed proposer lookahead computation leaves the window unchanged" {
+    const allocator = std.testing.allocator;
+    const fixtures = @import("fixture_runner.zig");
+    var state = try fixtures.decodeState(allocator, fixtures.find("proposer_lookahead_in_state_matches_computed_lookahead").?.pre_epoch.?);
+    defer @import("ssz").freeDecoded(allocator, fulu.BeaconState, state);
+
+    for (@constCast(state.validators.data)) |*validator| {
+        validator.activation_epoch = helpers.FAR_FUTURE_EPOCH;
+        validator.exit_epoch = helpers.FAR_FUTURE_EPOCH;
+    }
+    state.proposer_lookahead = [_]u64{7} ** 16;
+    const previous = state.proposer_lookahead;
+    try std.testing.expectError(error.NoEligibleProposer, processProposerLookahead(allocator, &state));
+    try std.testing.expectEqualSlices(u64, &previous, &state.proposer_lookahead);
+}
