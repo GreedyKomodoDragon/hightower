@@ -323,6 +323,72 @@ test "RLP encodes a nested list whose payload exceeds 4 KiB" {
     try testing.expectEqualSlices(u8, &big, encoded[9..]);
 }
 
+test "RLP encodes a slice of slices as a list" {
+    var buf: [100]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    const items = [_][]const u8{ "cat", "dog" };
+    const list: []const []const u8 = &items;
+
+    try rlp.rlp(&writer, list);
+
+    try testing.expectEqualSlices(
+        u8,
+        &.{ 0xc8, 0x83, 'c', 'a', 't', 0x83, 'd', 'o', 'g' },
+        writer.buffered(),
+    );
+}
+
+test "RLP encodes a slice of nested slices" {
+    var buf: [100]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    const inner_items = [_][]const u8{"cat"};
+    const inner: []const []const u8 = &inner_items;
+    const outer_items = [_][]const []const u8{inner};
+    const outer: []const []const []const u8 = &outer_items;
+
+    try rlp.rlp(&writer, outer);
+
+    try testing.expectEqualSlices(
+        u8,
+        &.{ 0xc5, 0xc4, 0x83, 'c', 'a', 't' },
+        writer.buffered(),
+    );
+}
+
+test "RLP encodes a pointer to an array of strings" {
+    var buf: [100]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    const items = [_][]const u8{ "cat", "dog" };
+    const list = &items;
+
+    try rlp.rlp(&writer, list);
+
+    try testing.expectEqualSlices(
+        u8,
+        &.{ 0xc8, 0x83, 'c', 'a', 't', 0x83, 'd', 'o', 'g' },
+        writer.buffered(),
+    );
+}
+
+test "RLP encodes a slice of slices with a payload above 4 KiB" {
+    var buf: [9000]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    const big = [_]u8{'q'} ** 5000;
+    const items = [_][]const u8{&big};
+    const list: []const []const u8 = &items;
+
+    try rlp.rlp(&writer, list);
+
+    const encoded = writer.buffered();
+    try testing.expectEqual(@as(usize, 5006), encoded.len);
+    try testing.expectEqualSlices(u8, &.{ 0xf9, 0x13, 0x8b }, encoded[0..3]);
+    try testing.expectEqualSlices(u8, &big, encoded[6..]);
+}
+
 test "RLP encodes unsigned integers with minimal big-endian encoding" {
     const cases = [_]struct {
         value: u16,

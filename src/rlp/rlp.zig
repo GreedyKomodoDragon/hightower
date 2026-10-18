@@ -54,12 +54,16 @@ pub fn rlp(writer: *std.Io.Writer, value: anytype) !void {
         },
 
         .pointer => |ptr| {
-            // string check conditions
+            // Byte slices encode as strings; any other slice is a list whose
+            // items are encoded recursively. This also allows nested lists such
+            // as []const []const u8.
             if (ptr.size == .slice) {
                 if (ptr.child == u8) {
                     try encoding.encodeString(writer, value);
-                    return;
+                } else {
+                    try encodeList(writer, value);
                 }
+                return;
             }
 
             // .one means the pointer points to exactly one value of its child type.
@@ -68,13 +72,10 @@ pub fn rlp(writer: *std.Io.Writer, value: anytype) !void {
                     .array => |arr| {
                         if (arr.child == u8) {
                             try encoding.encodeString(writer, value);
-                            return;
+                        } else {
+                            try encodeList(writer, value);
                         }
-
-                        // encode list
-                        encodeList(writer, value);
-
-                        @compileError("unsupported RLP type in ptr.size == .one & array");
+                        return;
                     },
                     else => {},
                 }
