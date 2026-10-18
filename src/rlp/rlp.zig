@@ -34,16 +34,15 @@ pub fn rlp(writer: *std.Io.Writer, value: anytype) !void {
 
     switch (@typeInfo(T)) {
         .int => |info| {
-            // TODO: Wire up the bytes encoder
-
-            // if it is unsigned then it is always positive
-            if (info.signedness == std.builtin.Signedness.unsigned) {
-                // TODO: big-endian is required, not sure if this is
-                return std.mem.toBytes(value);
+            // RLP integers are positive, minimal-length big-endian byte
+            // strings; zero is the empty string (0x80). Signed integers are
+            // not part of the encoding and are rejected.
+            if (info.signedness == std.builtin.Signedness.signed) {
+                return error.SignedIntegerUnsupported;
             }
 
-            std.debug.print("integer: {}\n", .{value});
-            // encode integer
+            var buf: [@sizeOf(T)]u8 = undefined;
+            try encoding.encodeString(writer, encoding.encodeBigEndian(&buf, value));
         },
 
         .array => |arr| {

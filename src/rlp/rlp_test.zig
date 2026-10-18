@@ -262,3 +262,73 @@ test "RLP propagates string and list buffer exhaustion" {
     try testing.expectError(error.WriteFailed, rlp.rlp(&writer, list));
     try testing.expectEqual(@as(usize, 0), writer.buffered().len);
 }
+
+test "RLP encodes unsigned integers with minimal big-endian encoding" {
+    const cases = [_]struct {
+        value: u16,
+        expected: []const u8,
+    }{
+        .{ .value = 0, .expected = &.{0x80} },
+        .{ .value = 127, .expected = &.{0x7f} },
+        .{ .value = 128, .expected = &.{ 0x81, 0x80 } },
+        .{ .value = 1024, .expected = &.{ 0x82, 0x04, 0x00 } },
+    };
+
+    for (cases) |case| {
+        var buf: [100]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+
+        try rlp.rlp(&writer, case.value);
+
+        try testing.expectEqualSlices(u8, case.expected, writer.buffered());
+    }
+}
+
+test "RLP integer encoding is big-endian regardless of host endianness" {
+    var buf: [100]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    try rlp.rlp(&writer, @as(u32, 0x01020304));
+
+    try testing.expectEqualSlices(
+        u8,
+        &.{ 0x84, 0x01, 0x02, 0x03, 0x04 },
+        writer.buffered(),
+    );
+}
+
+test "RLP encodes 55 byte integer with short string prefix" {
+    var buf: [100]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    try rlp.rlp(&writer, @as(u440, std.math.maxInt(u440)));
+
+    const expected = [_]u8{0xff} ** 55;
+    const encoded = writer.buffered();
+    try testing.expectEqual(@as(usize, 56), encoded.len);
+    try testing.expectEqual(@as(u8, 0xb7), encoded[0]);
+    try testing.expectEqualSlices(u8, &expected, encoded[1..]);
+}
+
+test "RLP encodes 56 byte integer with long string prefix" {
+    var buf: [100]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    try rlp.rlp(&writer, @as(u448, std.math.maxInt(u448)));
+
+    const expected = [_]u8{0xff} ** 56;
+    const encoded = writer.buffered();
+    try testing.expectEqual(@as(usize, 58), encoded.len);
+    try testing.expectEqualSlices(u8, &.{ 0xb8, 0x38 }, encoded[0..2]);
+    try testing.expectEqualSlices(u8, &expected, encoded[2..]);
+}
+
+test "RLP rejects signed integers" {
+    var buf: [100]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+
+    try testing.expectError(
+        error.SignedIntegerUnsupported,
+        rlp.rlp(&writer, @as(i32, 5)),
+    );
+}
