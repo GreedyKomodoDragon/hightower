@@ -65,6 +65,13 @@ pub fn encodeBytes(writer: *std.Io.Writer, bytes: []const u8) !void {
 }
 
 fn encodeLengthBigEndian(buf: []u8, value: usize) []const u8 {
+    return encodeBigEndian(buf, value);
+}
+
+// Writes the minimal big-endian byte representation of an unsigned integer
+// into the tail of `buf` and returns the used slice. A value of 0 yields an
+// empty slice, matching Ethereum's RLP rule where zero encodes as 0x80.
+pub fn encodeBigEndian(buf: []u8, value: anytype) []const u8 {
     var v = value;
     var i = buf.len;
 
