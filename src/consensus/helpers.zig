@@ -2,7 +2,8 @@
 // validator eligibility and the ring-buffer position used by consensus state.
 // Seed, shuffle, and balance rules must use the same epoch and preset values
 // because proposer selection depends on both ordering and exact integer math.
-// This file currently uses Fulu's minimal-preset constants.
+// These transition helpers use Fulu's minimal preset. Blob limits select the
+// latest configured epoch entry; this preset has none and falls back to nine.
 //
 //   slot -> epoch -> active validators -> seeded shuffle -> proposer indices
 const std = @import("std");
@@ -57,6 +58,54 @@ pub const TIMELY_HEAD_FLAG_INDEX: usize = 2;
 pub const PROPORTIONAL_SLASHING_MULTIPLIER_BELLATRIX: u64 = 3;
 pub const WHISTLEBLOWER_REWARD_QUOTIENT_ELECTRA: u64 = 4096;
 pub const FAR_FUTURE_EPOCH: u64 = std.math.maxInt(u64);
+
+pub const MAX_BLOBS_PER_BLOCK_ELECTRA: u64 = 9;
+pub const ELECTRA_FORK_EPOCH: u64 = FAR_FUTURE_EPOCH;
+
+pub const BlobParameters = struct {
+    epoch: fulu.Epoch,
+    max_blobs_per_block: u64,
+};
+
+// The pinned minimal network config has no scheduled blob parameter changes.
+pub const BLOB_SCHEDULE: [0]BlobParameters = .{};
+
+pub fn getBlobParameters(epoch: fulu.Epoch, schedule: []const BlobParameters) BlobParameters {
+    var selected: ?BlobParameters = null;
+    for (schedule) |entry| {
+        if (entry.epoch <= epoch and (selected == null or entry.epoch > selected.?.epoch)) {
+            selected = entry;
+        }
+    }
+    return selected orelse .{
+        .epoch = ELECTRA_FORK_EPOCH,
+        .max_blobs_per_block = MAX_BLOBS_PER_BLOCK_ELECTRA,
+    };
+}
+
+pub fn computeForkDigest(
+    fork_version: fulu.Version,
+    genesis_validators_root: fulu.Root,
+    epoch: fulu.Epoch,
+    schedule: []const BlobParameters,
+) [4]u8 {
+    var fork_data = [_]u8{0} ** 64;
+    @memcpy(fork_data[0..4], &fork_version);
+    @memcpy(fork_data[32..64], &genesis_validators_root);
+    var fork_data_root: fulu.Root = undefined;
+    std.crypto.hash.sha2.Sha256.hash(&fork_data, &fork_data_root, .{});
+
+    const parameters = getBlobParameters(epoch, schedule);
+    var blob_data: [16]u8 = undefined;
+    std.mem.writeInt(u64, blob_data[0..8], parameters.epoch, .little);
+    std.mem.writeInt(u64, blob_data[8..16], parameters.max_blobs_per_block, .little);
+    var blob_hash: fulu.Root = undefined;
+    std.crypto.hash.sha2.Sha256.hash(&blob_data, &blob_hash, .{});
+
+    var digest: [4]u8 = undefined;
+    for (&digest, fork_data_root[0..4], blob_hash[0..4]) |*out, base, blob| out.* = base ^ blob;
+    return digest;
+}
 
 pub const DOMAIN_BEACON_PROPOSER = [_]u8{ 0, 0, 0, 0 };
 pub const DOMAIN_BEACON_ATTESTER = [_]u8{ 1, 0, 0, 0 };
@@ -270,6 +319,36 @@ test "slot and epoch helpers handle boundaries" {
     try std.testing.expectError(error.Overflow, computeStartSlotAtEpoch(std.math.maxInt(u64)));
     try std.testing.expectEqual(@as(u64, 6), try computeActivationExitEpoch(1));
     try std.testing.expectError(error.Overflow, computeActivationExitEpoch(std.math.maxInt(u64)));
+}
+
+test "blob parameters use the latest scheduled epoch and Electra fallback" {
+    const schedule = [_]BlobParameters{
+        .{ .epoch = 10, .max_blobs_per_block = 15 },
+        .{ .epoch = 20, .max_blobs_per_block = 21 },
+    };
+    try std.testing.expectEqual(BlobParameters{
+        .epoch = ELECTRA_FORK_EPOCH,
+        .max_blobs_per_block = MAX_BLOBS_PER_BLOCK_ELECTRA,
+    }, getBlobParameters(9, &schedule));
+    try std.testing.expectEqual(@as(u64, 15), getBlobParameters(10, &schedule).max_blobs_per_block);
+    try std.testing.expectEqual(@as(u64, 15), getBlobParameters(19, &schedule).max_blobs_per_block);
+    try std.testing.expectEqual(@as(u64, 21), getBlobParameters(20, &schedule).max_blobs_per_block);
+    try std.testing.expectEqual(@as(u64, 21), getBlobParameters(21, &schedule).max_blobs_per_block);
+}
+
+test "Fulu fork digest mixes the active blob parameters" {
+    const root = [_]u8{2} ** 32;
+    const schedule = [_]BlobParameters{
+        .{ .epoch = 10, .max_blobs_per_block = 15 },
+    };
+    try std.testing.expectEqual(
+        [_]u8{ 0x87, 0xdf, 0xb9, 0x7f },
+        computeForkDigest(.{ 1, 2, 3, 4 }, root, 9, &schedule),
+    );
+    try std.testing.expectEqual(
+        [_]u8{ 0x34, 0xce, 0xf7, 0xc7 },
+        computeForkDigest(.{ 1, 2, 3, 4 }, root, 10, &schedule),
+    );
 }
 
 test "active validator range is inclusive at activation and exclusive at exit" {

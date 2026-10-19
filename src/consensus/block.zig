@@ -10,7 +10,9 @@
 //
 // RANDAO is proposer-supplied randomness mixed into future validator selection;
 // a sync aggregate is a small committee's signature on the previous slot's
-// recorded block root.
+// recorded block root. Blob commitments are capped by the epoch's scheduled
+// limit before payload validation; the SSZ list bound is 4096 and the minimal
+// schedule falls back to nine.
 // Processing mutates the allocator-owned state as it goes, so callers must
 // discard it on any error.
 const std = @import("std");
@@ -74,7 +76,7 @@ fn processExecutionPayload(allocator: std.mem.Allocator, state: *fulu.BeaconStat
     const slot_time = std.math.mul(u64, state.slot, 6) catch return error.InvalidTimestamp;
     const expected_time = std.math.add(u64, state.genesis_time, slot_time) catch return error.InvalidTimestamp;
     if (payload.timestamp != expected_time) return error.InvalidTimestamp;
-    if (body.blob_kzg_commitments.data.len > 9) return error.TooManyBlobs;
+    try validateBlobCommitmentLimit(current_epoch, body.blob_kzg_commitments.data.len, &helpers.BLOB_SCHEDULE);
     const versioned_hashes = try allocator.alloc(fulu.Root, body.blob_kzg_commitments.data.len);
     defer allocator.free(versioned_hashes);
     for (body.blob_kzg_commitments.data, versioned_hashes) |commitment, *hash| {
@@ -115,6 +117,15 @@ fn processExecutionPayload(allocator: std.mem.Allocator, state: *fulu.BeaconStat
         .blob_gas_used = payload.blob_gas_used,
         .excess_blob_gas = payload.excess_blob_gas,
     };
+}
+
+fn validateBlobCommitmentLimit(
+    current_epoch: fulu.Epoch,
+    commitment_count: usize,
+    schedule: []const helpers.BlobParameters,
+) error{TooManyBlobs}!void {
+    const parameters = helpers.getBlobParameters(current_epoch, schedule);
+    if (commitment_count > @as(usize, @intCast(parameters.max_blobs_per_block))) return error.TooManyBlobs;
 }
 
 fn processRandao(state: *fulu.BeaconState, reveal: fulu.BLSSignature) !void {
@@ -209,6 +220,20 @@ test "pinned empty block transitions and incorrect state root rejects" {
             try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
         }
     }
+}
+
+test "blob commitment validation follows scheduled epoch limits" {
+    const schedule = [_]helpers.BlobParameters{
+        .{ .epoch = 10, .max_blobs_per_block = 15 },
+        .{ .epoch = 20, .max_blobs_per_block = 21 },
+    };
+
+    try validateBlobCommitmentLimit(9, 9, &schedule);
+    try std.testing.expectError(error.TooManyBlobs, validateBlobCommitmentLimit(9, 10, &schedule));
+    try validateBlobCommitmentLimit(10, 15, &schedule);
+    try std.testing.expectError(error.TooManyBlobs, validateBlobCommitmentLimit(10, 16, &schedule));
+    try validateBlobCommitmentLimit(19, 15, &schedule);
+    try validateBlobCommitmentLimit(20, 21, &schedule);
 }
 
 test "execution engine invalid and syncing results reject the block" {
