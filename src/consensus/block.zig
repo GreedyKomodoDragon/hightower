@@ -76,6 +76,8 @@ fn processExecutionPayload(allocator: std.mem.Allocator, state: *fulu.BeaconStat
     const slot_time = std.math.mul(u64, state.slot, 6) catch return error.InvalidTimestamp;
     const expected_time = std.math.add(u64, state.genesis_time, slot_time) catch return error.InvalidTimestamp;
     if (payload.timestamp != expected_time) return error.InvalidTimestamp;
+    // The SSZ list can hold 4096 commitments; block validity uses the lower
+    // epoch-specific limit selected from the network's Fulu blob schedule.
     try validateBlobCommitmentLimit(current_epoch, body.blob_kzg_commitments.data.len, &helpers.BLOB_SCHEDULE);
     const versioned_hashes = try allocator.alloc(fulu.Root, body.blob_kzg_commitments.data.len);
     defer allocator.free(versioned_hashes);
