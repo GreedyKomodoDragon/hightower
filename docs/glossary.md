@@ -38,6 +38,7 @@ Chain:      [Block 0] ───────────────────�
 
 | Term | Plain-language definition |
 | --- | --- |
+| Generalized index | An integer that identifies a node in a binary Merkle tree; each node's children are numbered `2 × index` and `2 × index + 1`. |
 | Beacon chain | Ethereum's proof-of-stake consensus system, which tracks validators and agrees on the chain's history. |
 | Bellatrix | An earlier Ethereum consensus upgrade whose inactivity penalty setting Fulu still uses. |
 | Slot | A short time interval in which Ethereum may add a block. |
