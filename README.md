@@ -74,15 +74,17 @@ src/
     merkle_test.zig    Merkleize coverage
 ```
 
-## Process — what has been done so far
+## Process — implementation status
 
-Bottom-up, test-first, one primitive at a time:
+The project has grown beyond its original serialization primitives. Current coverage is focused on Fulu's minimal preset and selected fixtures:
 
-1. **Scaffold** — `zig init` layout on Zig 0.16.0, no deps. CI runs `zig fmt --check`, `zig build`, `zig build test`.
-2. **RLP prefixes (`encoding.zig`)** — all four ranges: single byte, short/long string, short/long list, minimal big-endian lengths.
-3. **RLP encoder (`rlp.zig`)** — `@typeInfo` dispatch for byte strings + lists via buffered payload. Tested: empty/single-byte/`"dog"`/`["cat","dog"]`/55-vs-56-byte boundary. Gaps: int encode stubbed, no decode, 4 KiB list cap.
-4. **SSZ (`ssz.zig`)** — fixed and variable-size serialization/deserialization, with generated official vectors. Unsupported cases remain.
-5. **Merkle (`chunking.zig`)** — chunking, Merkleization, hash-tree roots, list length mixing, and some progressive types. Tests run through `zig build test`; unsupported cases remain.
+1. **RLP** — canonical encoding and decoding, including integer encoding and streaming decode.
+2. **SSZ and Merkleization** — fixed and variable-size serialization, deserialization, hash-tree-roots, and selected official vectors; unsupported cases remain.
+3. **Fulu types** — Beacon block and state schemas with shared nested types.
+4. **Consensus processing** — selected helper, block, epoch, and fork-choice behavior with pinned minimal-preset fixtures.
+5. **Cryptography and execution boundary** — signing domains and BLS verification are implemented; execution payload validation uses an interface with a deterministic test engine, not a production execution client.
+
+Run `zig build test` for RLP, SSZ, Merkle, Fulu type, and library tests; `zig build test-transition` for selected consensus fixtures and BLS tests; and `zig build test-vectors` for the separate official SSZ vector corpus, which includes unsupported cases. `zig build` compiles the executable.
 
 ## Roadmap
 

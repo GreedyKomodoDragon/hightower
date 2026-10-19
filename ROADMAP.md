@@ -1,6 +1,6 @@
 # Hightower roadmap and research guide
 
-Hightower is an experimental Ethereum consensus client in Zig. SSZ and Merkle code are a useful base, but a Beacon node also needs fork-specific data structures, state transition, fork choice, cryptography, networking, persistence, and interfaces to an execution client.
+Hightower is an experimental Ethereum consensus client in Zig. It now includes Fulu minimal-preset types, selected consensus state-transition and fork-choice behavior, and BLS verification. Networking, persistence, a Beacon API, and a production execution client remain future work.
 
 This document is a practical reading order and a set of implementation targets. Protocol status below was checked on **11 October 2026**; fork status and network recommendations can change, so pin the upstream spec and config revision before coding against them.
 
@@ -12,13 +12,11 @@ Hoodi is a possible later integration network; it is a network choice, not a for
 
 ## What is in this repository
 
-- `src/ssz/` supports fixed and variable-size containers, lists, bitlists, and related types. Generated official SSZ cases exist, but unsupported vectors remain.
-- `src/merkle/` handles chunking, hash-tree roots, list length mixing, and some progressive types. Its tests run from `zig build test`.
-- `src/types/type.zig` contains generic SSZ wrappers; it does not define Beacon protocol types.
-- `src/rlp/` implements part of the execution-layer encoding, but has no role in consensus-layer SSZ or the Engine API JSON-RPC boundary.
-- There are no Beacon Chain data types, state transition, fork choice, BLS signatures, networking, persistence, Beacon API, or Engine API integration yet.
-
-The README's historical implementation log still mentions old gaps. Use this section and the current source as the project status.
+- `src/types/fulu.zig` defines Fulu Beacon block, state, and nested consensus types for the minimal preset.
+- `src/ssz/` and `src/merkle/` provide SSZ serialization, deserialization, and hash-tree-root primitives used by those types. Selected official vectors are covered; unsupported cases remain.
+- `src/consensus/` implements selected Fulu helpers, block and epoch transitions, fork-choice store handling, signing domains, BLS verification, and an execution-engine interface. Fixture coverage targets the minimal preset and does not cover every consensus-spec case.
+- `src/rlp/` provides canonical RLP encoding and decoding for execution-layer data. It is separate from consensus SSZ and the Engine API JSON-RPC boundary.
+- Networking, persistence, a Beacon API, and a production execution client are not implemented.
 
 ## Pick a target
 
@@ -170,15 +168,15 @@ Use a deterministic execution-engine mock in isolated transition fixtures, then 
 
 ## Suggested checkpoints
 
-1. **Can root a Fulu block:** decode an upstream minimal-preset block and match its SSZ bytes and root.
-2. **Can root a Fulu state:** decode a complete upstream state fixture and match its hash-tree-root.
-3. **Can advance empty slots:** pass `process_slots` and epoch-processing fixtures, including epoch boundaries.
-4. **Can process a block locally:** pass block transition fixtures with signatures or execution checks stubbed only where the fixture explicitly permits it.
-5. **Can choose a head:** pass fork-choice fixtures with competing branches and attestations.
-6. **Can connect clients:** exchange fork-appropriate Engine API calls with an execution client.
-7. **Can join Hoodi:** add P2P, sync, storage, Beacon API, correct network config, and cross-client validation.
+Current runnable targets are `zig build` (build the executable), `zig build test` (RLP, SSZ, Merkle, Fulu type, and library tests), `zig build test-transition` (selected Fulu transition and BLS tests), and `zig build test-vectors` (the separate official SSZ vector corpus, which includes unsupported cases).
 
-Each checkpoint should have a runnable command and should identify its fork and preset. Avoid a single green test target that silently treats unsupported spec cases as success.
+1. **Root a Fulu block and state:** expand upstream minimal-preset fixture coverage and match serialized bytes and hash-tree-roots.
+2. **Advance empty slots and process blocks:** expand transition fixtures, including epoch boundaries and invalid inputs.
+3. **Choose a head:** cover fork-choice fixtures with competing branches and attestations.
+4. **Connect clients:** implement persistence and the Engine API client boundary, then exchange fork-appropriate calls with an execution client.
+5. **Join Hoodi:** add P2P, sync, storage, Beacon API, correct network config, and cross-client validation.
+
+Each consensus checkpoint targets Fulu's minimal preset. Keep unsupported spec cases visible instead of treating them as passing coverage.
 
 ### Then use the normative specifications
 
