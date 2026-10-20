@@ -145,6 +145,9 @@ fn checkpointBlock(store: *const Store, root: fulu.Root, epoch: fulu.Epoch) !ful
     }
 }
 
+// A weak subjectivity checkpoint must match its supplied state and, when it is
+// already finalized locally, the canonical chain. The period is the maximum
+// safe checkpoint age in epochs, derived from active validator balances.
 pub fn isWithinWeakSubjectivityPeriod(store: *const Store, state: *const fulu.BeaconState, checkpoint: fulu.Checkpoint) !bool {
     if (helpers.computeEpochAtSlot(state.slot) != checkpoint.epoch) return error.InvalidWeakSubjectivityCheckpoint;
     const start_slot = try helpers.computeStartSlotAtEpoch(checkpoint.epoch);
