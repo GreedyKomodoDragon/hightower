@@ -38,6 +38,15 @@ Chain:      [Block 0] ───────────────────�
 
 | Term | Plain-language definition |
 | --- | --- |
+| Recursive Length Prefix (RLP) | The byte format used to encode ordered execution-layer values and lists. |
+| Typed transaction envelope | A transaction whose first byte selects its format, followed by that format's RLP payload. |
+| Access list | Addresses and storage slots a transaction declares it may access. |
+| Blob transaction | A transaction that refers to data blobs by their versioned hashes. |
+| Authorization list | Signed permissions carried by a set-code transaction to delegate account behavior. |
+| Execution receipt | The status, gas tally, bloom, and logs produced by a transaction. |
+| Ommers | Older side-branch block headers; post-Merge execution blocks carry an empty list. |
+| Execution withdrawal | A consensus-authorized transfer of validator funds to an execution address. |
+| Requests hash | The header commitment to execution-layer requests produced while processing a block. |
 | Generalized index | An integer that identifies a node in a binary Merkle tree; each node's children are numbered `2 × index` and `2 × index + 1`. |
 | Beacon chain | Ethereum's proof-of-stake consensus system, which tracks validators and agrees on the chain's history. |
 | Bellatrix | An earlier Ethereum consensus upgrade whose inactivity penalty setting Fulu still uses. |

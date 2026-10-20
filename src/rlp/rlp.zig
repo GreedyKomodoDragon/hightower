@@ -22,7 +22,8 @@
 // resources: https://thogiti.github.io/2024/04/30/RLP.html & https://ethereum.org/developers/docs/data-structures-and-encoding/rlp
 
 const std = @import("std");
-const encoding = @import("encoding.zig");
+pub const encoding = @import("encoding.zig");
+pub const decode = @import("decode.zig");
 
 pub fn rlp(writer: *std.Io.Writer, value: anytype) !void {
     const T = @TypeOf(value);

@@ -69,7 +69,8 @@ fn encodeLengthBigEndian(buf: []u8, value: usize) []const u8 {
 // into the tail of `buf` and returns the used slice. A value of 0 yields an
 // empty slice, matching Ethereum's RLP rule where zero encodes as 0x80.
 pub fn encodeBigEndian(buf: []u8, value: anytype) []const u8 {
-    var v = value;
+    const Wide = std.meta.Int(.unsigned, @max(@bitSizeOf(@TypeOf(value)), 16));
+    var v: Wide = value;
     var i = buf.len;
 
     while (v != 0) {
