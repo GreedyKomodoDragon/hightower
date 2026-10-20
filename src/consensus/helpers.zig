@@ -40,6 +40,9 @@ pub const MIN_PER_EPOCH_CHURN_LIMIT_ELECTRA: u64 = 64_000_000_000;
 pub const MAX_PER_EPOCH_ACTIVATION_EXIT_CHURN_LIMIT: u64 = 128_000_000_000;
 pub const CHURN_LIMIT_QUOTIENT: u64 = 32;
 pub const MIN_VALIDATOR_WITHDRAWABILITY_DELAY: u64 = 256;
+const MAX_DEPOSITS: u64 = 16;
+const SAFETY_DECAY: u64 = 10;
+const ETH_TO_GWEI: u64 = 1_000_000_000;
 
 // Inactivity scores and participation weights are shared by Altair reward
 // accounting and the inherited Fulu epoch transition. Fulu uses Bellatrix's
@@ -179,6 +182,41 @@ pub fn getTotalActiveBalance(validators: []const fulu.Validator, epoch: fulu.Epo
     const total = @max(balance, EFFECTIVE_BALANCE_INCREMENT);
     if (total > std.math.maxInt(fulu.Gwei)) return error.BalanceOverflow;
     return @intCast(total);
+}
+
+pub fn computeWeakSubjectivityPeriod(state: *const fulu.BeaconState) error{ InvalidState, Overflow }!fulu.Epoch {
+    const epoch = getCurrentEpoch(state);
+    var active_count: u128 = 0;
+    for (state.validators.data) |validator| {
+        if (isActiveValidator(validator, epoch)) active_count += 1;
+    }
+    if (active_count == 0) return error.InvalidState;
+
+    const total_balance = getTotalActiveBalance(state.validators.data, epoch) catch return error.InvalidState;
+    const average_balance = @as(u128, total_balance) / active_count / ETH_TO_GWEI;
+    const max_balance = MAX_EFFECTIVE_BALANCE_ELECTRA / ETH_TO_GWEI;
+    if (average_balance > max_balance) return error.InvalidState;
+
+    const raw_churn = @max(MIN_PER_EPOCH_CHURN_LIMIT_ELECTRA, total_balance / CHURN_LIMIT_QUOTIENT);
+    const churn_gwei = raw_churn - raw_churn % EFFECTIVE_BALANCE_INCREMENT;
+    const churn_eth = @max(@as(u128, 1), churn_gwei / ETH_TO_GWEI);
+    const topups_per_epoch: u128 = MAX_DEPOSITS * SLOTS_PER_EPOCH;
+    const n = active_count;
+    const t = average_balance;
+    const max = max_balance;
+    const d: u128 = SAFETY_DECAY;
+    var period: u128 = MIN_VALIDATOR_WITHDRAWABILITY_DELAY;
+
+    if (max * (200 + 3 * d) < t * (200 + 12 * d)) {
+        const epochs_for_churn = n * (t * (200 + 12 * d) - max * (200 + 3 * d)) /
+            (600 * churn_eth * (2 * t + max));
+        const epochs_for_topups = n * (200 + 3 * d) / (600 * topups_per_epoch);
+        period += @max(epochs_for_churn, epochs_for_topups);
+    } else {
+        period += 3 * n * d * t / (200 * topups_per_epoch * (max - t));
+    }
+    if (period > std.math.maxInt(fulu.Epoch)) return error.Overflow;
+    return @intCast(period);
 }
 
 pub fn getActiveValidatorIndices(
@@ -427,6 +465,47 @@ test "total active balance floors empty sets at one increment" {
     oversized[0].effective_balance = std.math.maxInt(u64);
     oversized[1].effective_balance = 1;
     try std.testing.expectError(error.BalanceOverflow, getTotalActiveBalance(&oversized, 1));
+}
+
+test "weak subjectivity period uses Fulu balance cap and validator churn" {
+    var state: fulu.BeaconState = undefined;
+    const validators = [_]fulu.Validator{
+        .{
+            .pubkey = [_]u8{0} ** 48,
+            .withdrawal_credentials = [_]u8{0} ** 32,
+            .effective_balance = MAX_EFFECTIVE_BALANCE,
+            .slashed = false,
+            .activation_eligibility_epoch = 0,
+            .activation_epoch = 0,
+            .exit_epoch = FAR_FUTURE_EPOCH,
+            .withdrawable_epoch = FAR_FUTURE_EPOCH,
+        },
+    };
+    state.slot = 0;
+    state.validators = .{ .data = &validators };
+    try std.testing.expectEqual(@as(u64, MIN_VALIDATOR_WITHDRAWABILITY_DELAY), try computeWeakSubjectivityPeriod(&state));
+    state.validators.data = &.{};
+    try std.testing.expectError(error.InvalidState, computeWeakSubjectivityPeriod(&state));
+}
+
+test "weak subjectivity period accounts for compounding validator top-ups" {
+    const allocator = std.testing.allocator;
+    const validators = try allocator.alloc(fulu.Validator, 32_768);
+    defer allocator.free(validators);
+    @memset(validators, .{
+        .pubkey = [_]u8{0} ** 48,
+        .withdrawal_credentials = [_]u8{0} ** 32,
+        .effective_balance = MAX_EFFECTIVE_BALANCE_ELECTRA,
+        .slashed = false,
+        .activation_eligibility_epoch = 0,
+        .activation_epoch = 0,
+        .exit_epoch = FAR_FUTURE_EPOCH,
+        .withdrawable_epoch = FAR_FUTURE_EPOCH,
+    });
+    var state: fulu.BeaconState = undefined;
+    state.slot = 0;
+    state.validators = .{ .data = validators };
+    try std.testing.expectEqual(@as(u64, 354), try computeWeakSubjectivityPeriod(&state));
 }
 
 test "shuffle matches pinned minimal phase0 mappings" {

@@ -145,6 +145,22 @@ fn checkpointBlock(store: *const Store, root: fulu.Root, epoch: fulu.Epoch) !ful
     }
 }
 
+pub fn isWithinWeakSubjectivityPeriod(store: *const Store, state: *const fulu.BeaconState, checkpoint: fulu.Checkpoint) !bool {
+    if (helpers.computeEpochAtSlot(state.slot) != checkpoint.epoch) return error.InvalidWeakSubjectivityCheckpoint;
+    const start_slot = try helpers.computeStartSlotAtEpoch(checkpoint.epoch);
+    const state_root = state.block_roots[@intCast(start_slot % state.block_roots.len)];
+    if (!std.mem.eql(u8, &state_root, &checkpoint.root)) return error.InvalidWeakSubjectivityCheckpoint;
+
+    if (checkpoint.epoch <= store.finalized_checkpoint.epoch) {
+        const canonical_root = try checkpointBlock(store, store.finalized_checkpoint.root, checkpoint.epoch);
+        if (!std.mem.eql(u8, &canonical_root, &checkpoint.root)) return error.InvalidWeakSubjectivityCheckpoint;
+    }
+
+    const period = try helpers.computeWeakSubjectivityPeriod(state);
+    const current_epoch = helpers.computeEpochAtSlot(store.currentSlot());
+    return current_epoch <= checkpoint.epoch or current_epoch - checkpoint.epoch <= period;
+}
+
 pub fn onBlock(store: *Store, signed_block: fulu.SignedBeaconBlock, engine: engine_api.ExecutionEngine, availability: DataAvailabilityCheck) !void {
     const block = signed_block.message;
     const parent_state = store.block_states.getPtr(block.parent_root) orelse return error.UnknownParent;
@@ -240,6 +256,46 @@ test "fork-choice store initializes from the pinned Fulu anchor fixture" {
 
     anchor_state.genesis_time += 1;
     try std.testing.expectError(error.InvalidAnchor, initStore(allocator, &anchor_state, &anchor_block));
+}
+
+test "weak subjectivity validates checkpoint state and accepts the inclusive period boundary" {
+    const allocator = std.testing.allocator;
+    const fixtures = @import("fixture_runner.zig");
+    var state = try fixtures.decodeState(allocator, @embedFile("fixtures/fulu_fork_choice/basic/anchor_state.ssz_snappy"));
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
+    const compressed_block = try fixtures.decode(allocator, @embedFile("fixtures/fulu_fork_choice/basic/anchor_block.ssz_snappy"));
+    defer allocator.free(compressed_block);
+    var reader: std.Io.Reader = .fixed(compressed_block);
+    const block = try ssz.deserialize(allocator, fulu.BeaconBlock, &reader);
+    defer ssz.freeDecoded(allocator, fulu.BeaconBlock, block);
+    var store = try initStore(allocator, &state, &block);
+    defer store.deinit();
+
+    state.slot = helpers.SLOTS_PER_EPOCH;
+    const checkpoint = fulu.Checkpoint{ .epoch = 1, .root = [_]u8{0x11} ** 32 };
+    state.block_roots[helpers.SLOTS_PER_EPOCH] = checkpoint.root;
+    const period = try helpers.computeWeakSubjectivityPeriod(&state);
+    store.time = store.genesis_time + (checkpoint.epoch + period) * helpers.SLOTS_PER_EPOCH * SECONDS_PER_SLOT;
+    try std.testing.expect(try isWithinWeakSubjectivityPeriod(&store, &state, checkpoint));
+
+    try std.testing.expectError(error.InvalidWeakSubjectivityCheckpoint, isWithinWeakSubjectivityPeriod(&store, &state, .{
+        .epoch = checkpoint.epoch,
+        .root = [_]u8{0x22} ** 32,
+    }));
+
+    store.time += helpers.SLOTS_PER_EPOCH * SECONDS_PER_SLOT;
+    try std.testing.expect(!try isWithinWeakSubjectivityPeriod(&store, &state, checkpoint));
+    try std.testing.expectError(error.InvalidWeakSubjectivityCheckpoint, isWithinWeakSubjectivityPeriod(&store, &state, .{
+        .epoch = checkpoint.epoch + 1,
+        .root = checkpoint.root,
+    }));
+
+    state.slot = 0;
+    state.block_roots[0] = [_]u8{0x33} ** 32;
+    try std.testing.expectError(error.InvalidWeakSubjectivityCheckpoint, isWithinWeakSubjectivityPeriod(&store, &state, .{
+        .epoch = 0,
+        .root = state.block_roots[0],
+    }));
 }
 
 test "fork-choice ticks clear proposer boost, promote checkpoints, and reject regression" {
