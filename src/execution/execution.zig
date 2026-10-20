@@ -1,8 +1,10 @@
 // Execution RLP commits ordered transaction, receipt, and header fields to the
-// block hash. Typed envelopes prefix their RLP payload with one type byte;
-// blocks wrap typed transactions as RLP strings and keep legacy lists inline.
-// Fulu uses Prague's 21-field header, empty ommers, and withdrawals. This
-// module checks wire shape and widths, not signatures or state validity.
+// block hash. A receipt records a transaction's result; a withdrawal transfers
+// validator funds to an execution address. Typed envelopes prefix their RLP
+// payload with one type byte. Blocks wrap typed transactions as RLP strings
+// and keep legacy lists inline, so changing the wrapper changes the root.
+// Fulu uses Prague's 21-field header, empty ommers, and withdrawals. These
+// codecs preserve wire data but do not apply transactions or validate state.
 //
 // transaction bytes -> block transaction list -> header transactions root
 const std = @import("std");
@@ -10,8 +12,11 @@ const rlp = @import("rlp");
 const encoding = rlp.encoding;
 const decode = rlp.decode;
 
+/// Ethereum execution address, always 20 bytes on the wire.
 pub const Address = [20]u8;
+/// Hash or storage key, always 32 bytes on the wire.
 pub const Hash = [32]u8;
+/// Bloom filter carried by a header or receipt.
 pub const Bloom = [256]u8;
 pub const Access = struct { address: Address, storage_keys: []const Hash };
 pub const Authorization = struct { chain_id: u256, address: Address, nonce: u64, y_parity: u8, r: u256, s: u256 };
@@ -20,8 +25,10 @@ pub const AccessList = struct { chain_id: u256, nonce: u64, gas_price: u256, gas
 pub const DynamicFee = struct { chain_id: u256, nonce: u64, max_priority_fee_per_gas: u256, max_fee_per_gas: u256, gas_limit: u64, to: ?Address, value: u256, data: []const u8, access_list: []const Access, y_parity: u8, r: u256, s: u256 };
 pub const Blob = struct { chain_id: u256, nonce: u64, max_priority_fee_per_gas: u256, max_fee_per_gas: u256, gas_limit: u64, to: Address, value: u256, data: []const u8, access_list: []const Access, max_fee_per_blob_gas: u256, blob_versioned_hashes: []const Hash, y_parity: u8, r: u256, s: u256 };
 pub const SetCode = struct { chain_id: u256, nonce: u64, max_priority_fee_per_gas: u256, max_fee_per_gas: u256, gas_limit: u64, destination: Address, value: u256, data: []const u8, access_list: []const Access, authorization_list: []const Authorization, y_parity: u8, r: u256, s: u256 };
+/// Supported transaction envelopes; the tag selects the RLP payload schema.
 pub const Transaction = union(enum) { legacy: Legacy, access_list: AccessList, dynamic_fee: DynamicFee, blob: Blob, set_code: SetCode };
 
+/// Prague/Fulu header fields in the exact order committed by execution RLP.
 pub const Header = struct {
     parent_hash: Hash,
     ommers_hash: Hash,
@@ -48,13 +55,17 @@ pub const Header = struct {
 pub const Withdrawal = struct { index: u64, validator_index: u64, address: Address, amount: u64 };
 pub const Log = struct { address: Address, topics: []const Hash, data: []const u8 };
 pub const ReceiptPayload = struct { status: u8, cumulative_gas_used: u64, logs_bloom: Bloom, logs: []const Log };
+/// Receipt envelope with the same type byte as its transaction.
 pub const Receipt = union(enum) { legacy: ReceiptPayload, access_list: ReceiptPayload, dynamic_fee: ReceiptPayload, blob: ReceiptPayload, set_code: ReceiptPayload };
+/// Post-Merge block body: header, transactions, empty ommers, withdrawals.
 pub const Block = struct { header: Header, transactions: []const Transaction, withdrawals: []const Withdrawal };
 
+/// Parsed value whose variable-length fields belong to one arena.
 pub fn Decoded(comptime T: type) type {
     return struct {
         value: T,
         arena: std.heap.ArenaAllocator,
+        /// Releases every slice owned by the decoded value.
         pub fn deinit(self: *@This()) void {
             self.arena.deinit();
         }
@@ -63,6 +74,7 @@ pub fn Decoded(comptime T: type) type {
 
 pub const Error = decode.Error || error{ InvalidShape, InvalidLength, UnknownTransactionType };
 
+/// Maps a transaction or receipt variant to its EIP-2718 type byte.
 fn typeByte(tx: anytype) u8 {
     return switch (tx) {
         .legacy => 0,
@@ -73,6 +85,7 @@ fn typeByte(tx: anytype) u8 {
     };
 }
 
+/// Writes an execution field, using struct declaration order for RLP lists.
 fn writeValue(w: *std.Io.Writer, value: anytype) anyerror!void {
     const T = @TypeOf(value);
     switch (@typeInfo(T)) {
@@ -98,6 +111,7 @@ fn writeValue(w: *std.Io.Writer, value: anytype) anyerror!void {
     }
 }
 
+/// Measures list payload first so its RLP prefix has the exact byte length.
 fn writeList(w: *std.Io.Writer, values: anytype) anyerror!void {
     var scratch: [64]u8 = undefined;
     var counter: std.Io.Writer.Discarding = .init(&scratch);
@@ -106,6 +120,7 @@ fn writeList(w: *std.Io.Writer, values: anytype) anyerror!void {
     for (values) |item| try writeValue(w, item);
 }
 
+/// Writes legacy RLP directly or prefixes a typed transaction's RLP payload.
 fn writeTransaction(w: *std.Io.Writer, tx: Transaction) !void {
     if (typeByte(tx) != 0) try w.writeByte(typeByte(tx));
     switch (tx) {
@@ -113,6 +128,7 @@ fn writeTransaction(w: *std.Io.Writer, tx: Transaction) !void {
     }
 }
 
+/// Writes a receipt with its transaction type byte when applicable.
 fn writeReceipt(w: *std.Io.Writer, receipt: Receipt) !void {
     if (typeByte(receipt) != 0) try w.writeByte(typeByte(receipt));
     switch (receipt) {
@@ -120,6 +136,7 @@ fn writeReceipt(w: *std.Io.Writer, receipt: Receipt) !void {
     }
 }
 
+/// Measures and writes the four-item post-Merge block list.
 fn writeBlock(w: *std.Io.Writer, block: Block) !void {
     var scratch: [64]u8 = undefined;
     var counter: std.Io.Writer.Discarding = .init(&scratch);
@@ -128,6 +145,7 @@ fn writeBlock(w: *std.Io.Writer, block: Block) !void {
     try writeBlockItems(w, block);
 }
 
+/// Keeps the ommers slot empty and withdrawals after it in block RLP.
 fn writeBlockItems(w: *std.Io.Writer, block: Block) !void {
     try writeValue(w, block.header);
     var scratch: [64]u8 = undefined;
@@ -139,6 +157,7 @@ fn writeBlockItems(w: *std.Io.Writer, block: Block) !void {
     try writeValue(w, block.withdrawals);
 }
 
+/// Wraps typed transaction bytes as an RLP string inside a block list.
 fn writeBlockTransaction(w: *std.Io.Writer, tx: Transaction) !void {
     if (typeByte(tx) == 0) return writeTransaction(w, tx);
     var scratch: [64]u8 = undefined;
@@ -152,6 +171,7 @@ fn writeBlockTransaction(w: *std.Io.Writer, tx: Transaction) !void {
     try encoding.encodeString(w, bytes);
 }
 
+/// Allocates one canonical RLP encoding; the caller frees the returned bytes.
 pub fn encode(allocator: std.mem.Allocator, value: anytype) ![]u8 {
     const T = @TypeOf(value);
     var scratch: [64]u8 = undefined;
@@ -164,6 +184,7 @@ pub fn encode(allocator: std.mem.Allocator, value: anytype) ![]u8 {
     return out;
 }
 
+/// Requires an RLP list and, when supplied, its exact field count.
 fn asList(value: decode.Value, len: ?usize) Error![]decode.Value {
     const items = switch (value) {
         .list => |v| v,
@@ -172,6 +193,7 @@ fn asList(value: decode.Value, len: ?usize) Error![]decode.Value {
     if (len) |n| if (items.len != n) return error.InvalidShape;
     return items;
 }
+/// Requires an RLP byte string rather than a nested list.
 fn asString(value: decode.Value) Error![]u8 {
     return switch (value) {
         .string => |v| v,
@@ -179,6 +201,7 @@ fn asString(value: decode.Value) Error![]u8 {
     };
 }
 
+/// Converts a canonical RLP tree to a schema type, checking widths and shapes.
 fn fromValue(comptime T: type, allocator: std.mem.Allocator, value: decode.Value) Error!T {
     switch (@typeInfo(T)) {
         .int => {
@@ -219,6 +242,7 @@ fn fromValue(comptime T: type, allocator: std.mem.Allocator, value: decode.Value
     }
 }
 
+/// Dispatches a standalone transaction by envelope byte, rejecting unknown types.
 fn parseTransaction(allocator: std.mem.Allocator, bytes: []const u8) Error!Transaction {
     if (bytes.len == 0) return error.Truncated;
     const typed = bytes[0] < 0x80;
@@ -237,6 +261,7 @@ fn parseTransaction(allocator: std.mem.Allocator, bytes: []const u8) Error!Trans
     };
 }
 
+/// Dispatches a standalone receipt using the corresponding transaction tag.
 fn parseReceipt(allocator: std.mem.Allocator, bytes: []const u8) Error!Receipt {
     if (bytes.len == 0) return error.Truncated;
     const typed = bytes[0] < 0x80;
@@ -255,6 +280,7 @@ fn parseReceipt(allocator: std.mem.Allocator, bytes: []const u8) Error!Receipt {
     };
 }
 
+/// Parses a block's four fields and rejects any nonempty ommers list.
 fn parseBlock(allocator: std.mem.Allocator, value: decode.Value) Error!Block {
     const items = try asList(value, 4);
     _ = try asList(items[2], 0);
@@ -278,6 +304,7 @@ fn parseBlock(allocator: std.mem.Allocator, value: decode.Value) Error!Block {
     };
 }
 
+/// Parses exactly one value and returns arena-owned fields; call `deinit`.
 pub fn parse(comptime T: type, allocator: std.mem.Allocator, bytes: []const u8) Error!Decoded(T) {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
