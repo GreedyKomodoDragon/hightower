@@ -61,6 +61,14 @@ test "multiproof helper indices and verification match SSZ ordering" {
 }
 
 test "multiproof matches the consensus spec example for indices 8, 9, and 14" {
+    // x marks proved leaves; h marks proof helpers, consumed in order 15, 6, 5.
+    //                  1
+    //              /     \
+    //             2       3
+    //           /  \     /  \
+    //          4   h5   h6   7
+    //         / \  / \ / \  / \
+    //        x8 x9 10 11 12 13 x14 h15
     var leaves: [8][32]u8 = undefined;
     for (&leaves, 0..) |*leaf, i| leaf.* = [_]u8{@intCast(i + 1)} ** 32;
 
