@@ -148,6 +148,29 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    const rlp_mod = b.createModule(.{
+        .root_source_file = b.path("src/rlp/rlp.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const execution_mod = b.createModule(.{
+        .root_source_file = b.path("src/execution/execution.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "rlp", .module = rlp_mod }},
+    });
+    mod.addImport("execution", execution_mod);
+    const execution_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/execution/tests.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "execution", .module = execution_mod },
+                .{ .name = "rlp", .module = rlp_mod },
+            },
+        }),
+    });
 
     // Shared library modules. Test roots import these by name
     // (@import("ssz") etc.) instead of relative paths, so files can
@@ -263,6 +286,8 @@ pub fn build(b: *std.Build) void {
     // make the two of them run in parallel.
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_tests.step);
+    const run_execution_tests = b.addRunArtifact(execution_tests);
+    test_step.dependOn(&run_execution_tests.step);
     test_step.dependOn(&run_tests_ssz.step);
     test_step.dependOn(&run_tests_merkle.step);
     test_step.dependOn(&run_fulu_tests.step);
