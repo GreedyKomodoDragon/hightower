@@ -49,6 +49,7 @@ Chain:      [Block 0] ───────────────────�
 | Seed | A value derived from an epoch and shared randomness to select validator duties consistently. |
 | Shuffle | The deterministic rearrangement of active validators used when assigning duties. |
 | Checkpoint | A block reference at an epoch boundary, used when deciding which chain history is justified or finalized. |
+| Weak subjectivity checkpoint | A recent, trusted point in Ethereum's history that a new or long-offline node uses to identify the correct chain. |
 | Fork choice | The rule a node uses to select one chain head when multiple valid branches exist. |
 | Data availability | Whether the data carried by a block can be retrieved and verified, so nodes can safely accept the block. |
 | Proposer boost | Temporary extra weight given to the first timely block seen in a slot, helping nodes converge on the same head. |
