@@ -149,6 +149,7 @@ pub fn verifyMerkleMultiproof(
         var read: usize = 0;
         var written: usize = 0;
         var merged = false;
+        // Fold known siblings into their parent; unpaired nodes wait for a later level.
         while (read < count) {
             if (read + 1 < count and current[read].index ^ 1 == current[read + 1].index) {
                 const left = if (current[read].index & 1 == 0) current[read] else current[read + 1];

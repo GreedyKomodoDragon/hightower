@@ -18,6 +18,11 @@ test "generalized-index helpers match SSZ examples and reject invalid indices" {
     try testing.expectEqual(@as(u64, 5), try merkle.generalizedIndexSibling(4));
     try testing.expectEqual(@as(u64, 5), try merkle.generalizedIndexChild(2, true));
     try testing.expectEqual(@as(u64, 2), try merkle.generalizedIndexParent(5));
+    try testing.expect(!(try merkle.generalizedIndexBit(8, 0)));
+    try testing.expect(try merkle.generalizedIndexBit(9, 0));
+    try testing.expect(!(try merkle.generalizedIndexBit(14, 0)));
+    try testing.expect(try merkle.generalizedIndexBit(14, 1));
+    try testing.expect(try merkle.generalizedIndexBit(14, 2));
     try testing.expectError(error.InvalidGeneralizedIndex, merkle.generalizedIndexLength(0));
     try testing.expectError(error.InvalidGeneralizedIndex, merkle.generalizedIndexParent(1));
     try testing.expectError(error.GeneralizedIndexOverflow, merkle.generalizedIndexChild(std.math.maxInt(u64), true));
@@ -37,6 +42,8 @@ test "single Merkle proof verifies leaf-to-root branches and rejects malformed p
     try testing.expect(!merkle.verifyMerkleProof(c, proof[0..1], 6, root));
     try testing.expect(!merkle.verifyMerkleProof(c, &proof, 0, root));
     try testing.expect(!merkle.verifyMerkleProof(a, &proof, 6, root));
+    // Index 8 is below a tree with a two-sibling branch, so this proof is too shallow.
+    try testing.expect(!merkle.verifyMerkleProof(c, &proof, 8, root));
 }
 
 test "multiproof helper indices and verification match SSZ ordering" {
@@ -58,4 +65,65 @@ test "multiproof helper indices and verification match SSZ ordering" {
     try testing.expect(!try merkle.verifyMerkleMultiproof(testing.allocator, &leaves, proof[0..1], &indices, root));
     try testing.expect(!try merkle.verifyMerkleMultiproof(testing.allocator, &leaves, &proof, &.{ 4, 4 }, root));
     try testing.expect(!try merkle.verifyMerkleMultiproof(testing.allocator, &leaves, &proof, &.{ 2, 4 }, root));
+    try testing.expect(!try merkle.verifyMerkleMultiproof(testing.allocator, &.{c}, &proof, &.{8}, root));
+}
+
+test "multiproof matches the consensus spec example for indices 8, 9, and 14" {
+    // The SSZ proof spec illustrates these indices as positions 0, 1, and 6 in an 8-leaf tree.
+    // x marks proved leaves; h marks proof helpers, consumed in order 15, 6, 5.
+    //                  1
+    //              /     \
+    //             2       3
+    //           /  \     /  \
+    //          4   h5   h6   7
+    //         / \  / \ / \  / \
+    //        x8 x9 10 11 12 13 x14 h15
+    var leaves: [8][32]u8 = undefined;
+    for (&leaves, 0..) |*leaf, i| leaf.* = [_]u8{@intCast(i + 1)} ** 32;
+
+    const level_one = [_][32]u8{
+        hashPair(leaves[0], leaves[1]),
+        hashPair(leaves[2], leaves[3]),
+        hashPair(leaves[4], leaves[5]),
+        hashPair(leaves[6], leaves[7]),
+    };
+    const level_two = [_][32]u8{
+        hashPair(level_one[0], level_one[1]),
+        hashPair(level_one[2], level_one[3]),
+    };
+    const root = hashPair(level_two[0], level_two[1]);
+    const expected_root = [_]u8{
+        0xc2, 0x15, 0xa3, 0x27, 0xdf, 0x12, 0x43, 0xec,
+        0x52, 0x71, 0xe1, 0x06, 0xf8, 0xf0, 0x3b, 0x97,
+        0x9c, 0xad, 0xc0, 0xd1, 0xb8, 0xb1, 0x0f, 0x21,
+        0x4a, 0x5f, 0xdd, 0x11, 0xc0, 0xe6, 0xb6, 0x12,
+    };
+    try testing.expectEqualSlices(u8, &expected_root, &root);
+    const indices = [_]u64{ 8, 9, 14 };
+    const proof = [_][32]u8{
+        leaves[7],
+        level_one[2],
+        level_one[1],
+    };
+    const proved_leaves = [_][32]u8{ leaves[0], leaves[1], leaves[6] };
+
+    const helpers = try merkle.getHelperIndices(testing.allocator, &indices);
+    defer testing.allocator.free(helpers);
+    try testing.expectEqualSlices(u64, &.{ 15, 6, 5 }, helpers);
+    try testing.expect(try merkle.verifyMerkleMultiproof(
+        testing.allocator,
+        &proved_leaves,
+        &proof,
+        &indices,
+        expected_root,
+    ));
+    const single_proof = [_][32]u8{ leaves[7], level_one[2], level_two[0] };
+    try testing.expect(merkle.verifyMerkleProof(leaves[6], &single_proof, 14, expected_root));
+    try testing.expect(!try merkle.verifyMerkleMultiproof(
+        testing.allocator,
+        &proved_leaves,
+        &proof,
+        &indices,
+        [_]u8{0xff} ** 32,
+    ));
 }
