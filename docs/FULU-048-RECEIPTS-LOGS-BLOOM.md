@@ -20,7 +20,7 @@ The test checks the root `c598f69a5674cae9337261b669970e24abc0b46e6d284372a239ec
 
 | Issue #85 criterion | Implementation evidence | Test evidence |
 | --- | --- | --- |
-| Bloom construction/query matches known vectors. | `bloom_filter.BloomFilter` provides `add` and `mayContain`; execution helpers build receipt and block blooms. | Tests assert the exact Keccak-256(`abc`) bloom bytes, membership behavior, inclusion of addresses/topics, exclusion of data, and receipt aggregation. |
+| Bloom construction/query matches known vectors. | `bloom_filter.BloomFilter` provides `add` and `mayContain`; execution helpers build receipt and block blooms. | Tests assert exact Keccak vectors, empty-filter and empty-value behavior, binary and long inputs, duplicate/order-independent insertions, saturation false positives, log address/topic membership, data exclusion, and receipt aggregation. |
 | Receipt encoding round-trips. | Existing codecs encode legacy and typed envelopes and decode all supported receipt tags. | Tests round-trip legacy, access-list, dynamic-fee, blob, and set-code receipts; malformed lengths and unknown tags are rejected. |
 | Receipts root matches the trie root for a sample block. | `receiptsRoot` serializes each receipt and calls the ordered trie root helper. | A pinned London block receipt yields the fixture's expected `receiptTrie`. |
 

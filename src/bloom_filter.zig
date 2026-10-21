@@ -48,3 +48,49 @@ test "BloomFilter matches the canonical Keccak vector" {
     try std.testing.expect(filter.mayContain("abc"));
     try std.testing.expect(!filter.mayContain("not present"));
 }
+
+// Empty input is valid data, and the all-zero filter must never claim membership.
+test "BloomFilter handles an empty value and an empty filter" {
+    var filter = BloomFilter.init();
+    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 256), &filter.bits);
+    try std.testing.expect(!filter.mayContain(""));
+
+    filter.add("");
+    var expected: Bloom = .{0} ** 256;
+    expected[33] = 0x80;
+    expected[63] = 0x02;
+    expected[69] = 0x04;
+    try std.testing.expectEqualSlices(u8, &expected, &filter.bits);
+    try std.testing.expect(filter.mayContain(""));
+}
+
+// Repeated and reordered insertions must produce the same bit set.
+test "BloomFilter additions are idempotent and order independent" {
+    const first = [_]u8{ 0, 0xff, 0x80, 0 };
+    const second = [_]u8{0x42} ** 32;
+    var left = BloomFilter.init();
+    left.add(&first);
+    left.add(&second);
+    left.add(&first);
+
+    var right = BloomFilter.init();
+    right.add(&second);
+    right.add(&first);
+    try std.testing.expectEqualSlices(u8, &left.bits, &right.bits);
+    try std.testing.expect(left.mayContain(&first));
+    try std.testing.expect(left.mayContain(&second));
+}
+
+// Long inputs exercise Keccak absorption across multiple rate-sized blocks.
+test "BloomFilter handles long inputs and saturated-filter false positives" {
+    var value = [_]u8{0xa5} ** 1024;
+    value[511] = 0;
+    var filter = BloomFilter.init();
+    filter.add(&value);
+    try std.testing.expect(filter.mayContain(&value));
+    value[511] = 1;
+    try std.testing.expect(!filter.mayContain(&value));
+
+    filter.bits = .{0xff} ** 256;
+    try std.testing.expect(filter.mayContain("a value never inserted"));
+}
