@@ -1,4 +1,4 @@
-// An epoch groups eight slots in the minimal preset. Its final slot applies
+// An epoch groups the selected preset's slots. Its final slot applies
 // participation rewards, finality, validator registry changes, and Fulu queues
 // before the next slot begins. Order matters because later handlers consume
 // state changed by earlier ones:
@@ -17,6 +17,7 @@ const std = @import("std");
 const fulu = @import("fulu");
 const merkle = @import("merkle");
 const helpers = @import("helpers.zig");
+const preset = @import("consensus_preset").Config;
 const lookahead = @import("lookahead.zig");
 const deposits = @import("pending_deposits.zig");
 const consolidations = @import("pending_consolidations.zig");
@@ -301,7 +302,7 @@ fn computeNextSyncCommittee(allocator: std.mem.Allocator, state: *const fulu.Bea
     defer allocator.free(active);
     if (active.len == 0) return error.NoEligibleProposer;
     const seed = helpers.computeSeed(state.*, epoch_number, helpers.DOMAIN_SYNC_COMMITTEE);
-    var pubkeys: [32]fulu.BLSPubkey = undefined;
+    var pubkeys: [preset.SYNC_COMMITTEE_SIZE]fulu.BLSPubkey = undefined;
     var index: u64 = 0;
     var filled: usize = 0;
     // Rejection sampling preserves effective-balance weighting while allowing

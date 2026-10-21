@@ -1,16 +1,19 @@
+// Snappy is the wire compression used by consensus fixture and block data. Its
+// length prefix is untrusted, so decompression checks the selected preset's
+// byte cap before allocating; malformed blocks never produce partial output.
 const std = @import("std");
-
-const MAX_BLOCK_SIZE = 64 * 1024 * 1024;
+const preset = @import("consensus_preset").Config;
 
 pub const Error = error{
     MalformedBlock,
     OutputTooLarge,
 };
 
+/// Decompresses one Snappy block, rejecting malformed data or preset-oversized output before allocation.
 pub fn decompress(allocator: std.mem.Allocator, input: []const u8) (Error || std.mem.Allocator.Error)![]u8 {
     var cursor: usize = 0;
     const output_len = try readVarint(input, &cursor);
-    if (output_len > MAX_BLOCK_SIZE) return error.OutputTooLarge;
+    if (output_len > preset.MAX_SNAPPY_DECOMPRESSED_BLOCK_BYTES) return error.OutputTooLarge;
     const output = try allocator.alloc(u8, output_len);
     errdefer allocator.free(output);
 
@@ -67,6 +70,7 @@ pub fn decompress(allocator: std.mem.Allocator, input: []const u8) (Error || std
     return output;
 }
 
+/// Reads the Snappy length prefix and advances the cursor, rejecting truncated or overlong values.
 fn readVarint(input: []const u8, cursor: *usize) Error!usize {
     var value: usize = 0;
     for (0..5) |byte_index| {
@@ -80,6 +84,7 @@ fn readVarint(input: []const u8, cursor: *usize) Error!usize {
     return error.MalformedBlock;
 }
 
+/// Copies a back-reference into the output, allowing overlap while enforcing prior-output bounds.
 fn copyMatch(output: []u8, written: *usize, offset_value: anytype, length: usize) Error!void {
     const offset: usize = offset_value;
     if (offset == 0 or offset > written.* or length > output.len - written.*) return error.MalformedBlock;

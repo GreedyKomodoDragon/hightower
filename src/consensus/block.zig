@@ -11,8 +11,8 @@
 // RANDAO is proposer-supplied randomness mixed into future validator selection;
 // a sync aggregate is a small committee's signature on the previous slot's
 // recorded block root. Blob commitments are capped by the epoch's scheduled
-// limit before payload validation; the SSZ list bound is 4096 and the minimal
-// schedule falls back to nine.
+// limit before payload validation; the SSZ list bound is 4096 and the selected
+// preset supplies its epoch schedule.
 // Processing mutates the allocator-owned state as it goes, so callers must
 // discard it on any error.
 const std = @import("std");
@@ -21,6 +21,7 @@ const merkle = @import("merkle");
 const bls = @import("bls.zig");
 const domains = @import("domains.zig");
 const helpers = @import("helpers.zig");
+const preset = @import("consensus_preset").Config;
 const transition = @import("transition.zig");
 const epoch = @import("epoch.zig");
 const engine_api = @import("execution_engine.zig");
@@ -73,7 +74,7 @@ fn processExecutionPayload(allocator: std.mem.Allocator, state: *fulu.BeaconStat
     if (!std.mem.eql(u8, &payload.parent_hash, &state.latest_execution_payload_header.block_hash)) return error.InvalidExecutionParent;
     const current_epoch = helpers.computeEpochAtSlot(state.slot);
     if (!std.mem.eql(u8, &payload.prev_randao, &state.randao_mixes[current_epoch % helpers.EPOCHS_PER_HISTORICAL_VECTOR])) return error.InvalidPrevRandao;
-    const slot_time = std.math.mul(u64, state.slot, 6) catch return error.InvalidTimestamp;
+    const slot_time = std.math.mul(u64, state.slot, preset.SECONDS_PER_SLOT) catch return error.InvalidTimestamp;
     const expected_time = std.math.add(u64, state.genesis_time, slot_time) catch return error.InvalidTimestamp;
     if (payload.timestamp != expected_time) return error.InvalidTimestamp;
     // The SSZ list can hold 4096 commitments; block validity uses the lower
@@ -146,7 +147,8 @@ fn processRandao(state: *fulu.BeaconState, reveal: fulu.BLSSignature) !void {
 
 fn processEth1Data(allocator: std.mem.Allocator, state: *fulu.BeaconState, vote: fulu.Eth1Data) !void {
     const old_votes = state.eth1_data_votes.data;
-    if (old_votes.len >= 32) return error.Eth1VotingPeriodFull;
+    const voting_period_slots = preset.EPOCHS_PER_ETH1_VOTING_PERIOD * helpers.SLOTS_PER_EPOCH;
+    if (old_votes.len >= voting_period_slots) return error.Eth1VotingPeriodFull;
     const votes = try allocator.alloc(fulu.Eth1Data, old_votes.len + 1);
     @memcpy(votes[0..old_votes.len], old_votes);
     votes[old_votes.len] = vote;
@@ -156,7 +158,7 @@ fn processEth1Data(allocator: std.mem.Allocator, state: *fulu.BeaconState, vote:
     for (votes) |existing| if (std.meta.eql(existing, vote)) {
         matching += 1;
     };
-    if (matching * 2 > 4 * helpers.SLOTS_PER_EPOCH) state.eth1_data = vote;
+    if (@as(u64, @intCast(matching)) * preset.ETH1_DATA_VOTE_SUPERMAJORITY_NUMERATOR > voting_period_slots) state.eth1_data = vote;
 }
 
 pub fn processSyncAggregate(state: *fulu.BeaconState, aggregate: fulu.SyncAggregate) !void {
@@ -165,7 +167,7 @@ pub fn processSyncAggregate(state: *fulu.BeaconState, aggregate: fulu.SyncAggreg
     const domain = domains.getDomain(state.*, helpers.DOMAIN_SYNC_COMMITTEE, helpers.computeEpochAtSlot(previous_slot));
     const block_root = state.block_roots[previous_slot % state.block_roots.len];
     const signing_root = domains.computeSigningRoot(block_root, domain);
-    var participants: [32]fulu.BLSPubkey = undefined;
+    var participants: [preset.SYNC_COMMITTEE_SIZE]fulu.BLSPubkey = undefined;
     var participant_count: usize = 0;
     for (aggregate.sync_committee_bits.data, 0..) |bit, index| {
         if (bit) {
@@ -179,9 +181,9 @@ pub fn processSyncAggregate(state: *fulu.BeaconState, aggregate: fulu.SyncAggreg
     const active_increments = total_active_balance / helpers.EFFECTIVE_BALANCE_INCREMENT;
     const base_reward_per_increment = helpers.EFFECTIVE_BALANCE_INCREMENT * helpers.BASE_REWARD_FACTOR / std.math.sqrt(total_active_balance);
     const total_base_rewards = base_reward_per_increment * active_increments;
-    const max_participant_rewards = total_base_rewards * 2 / 64 / helpers.SLOTS_PER_EPOCH;
-    const participant_reward: u64 = @intCast(max_participant_rewards / 32);
-    const proposer_reward: u64 = participant_reward * 8 / (64 - 8);
+    const max_participant_rewards = total_base_rewards * helpers.SYNC_REWARD_WEIGHT / helpers.WEIGHT_DENOMINATOR / helpers.SLOTS_PER_EPOCH;
+    const participant_reward: u64 = @intCast(max_participant_rewards / preset.SYNC_COMMITTEE_SIZE);
+    const proposer_reward: u64 = participant_reward * helpers.PROPOSER_WEIGHT / (helpers.WEIGHT_DENOMINATOR - helpers.PROPOSER_WEIGHT);
     const proposer_index = state.proposer_lookahead[state.slot % helpers.SLOTS_PER_EPOCH];
     for (state.current_sync_committee.pubkeys, aggregate.sync_committee_bits.data) |pubkey, bit| {
         var validator_index: ?usize = null;

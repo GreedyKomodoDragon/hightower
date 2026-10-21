@@ -3,8 +3,8 @@
 // already known when a slot starts. At each epoch boundary, this file rolls
 // that fixed-size window forward:
 //
-//   [older 8 slots | newer 8 slots]
-//                  -> [newer 8 slots | newly computed 8 slots]
+//   [older epoch | newer epoch]
+//                -> [newer epoch | newly computed epoch]
 //
 // The new indices are selected for current_epoch + 2 using the validator set,
 // effective balances, shuffling seed, and RANDAO history in helpers.zig. The
