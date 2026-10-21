@@ -153,11 +153,19 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const bloom_filter_mod = b.addModule("bloom_filter", .{
+        .root_source_file = b.path("src/bloom_filter.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const execution_mod = b.createModule(.{
         .root_source_file = b.path("src/execution/execution.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "rlp", .module = rlp_mod }},
+        .imports = &.{
+            .{ .name = "rlp", .module = rlp_mod },
+            .{ .name = "bloom_filter", .module = bloom_filter_mod },
+        },
     });
     mod.addImport("execution", execution_mod);
     const execution_tests = b.addTest(.{
@@ -179,6 +187,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "execution", .module = execution_mod }},
         }),
     });
+    const bloom_filter_tests = b.addTest(.{ .root_module = bloom_filter_mod });
 
     // Shared library modules. Test roots import these by name
     // (@import("ssz") etc.) instead of relative paths, so files can
@@ -296,6 +305,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_tests.step);
     const run_execution_tests = b.addRunArtifact(execution_tests);
     test_step.dependOn(&run_execution_tests.step);
+    const run_bloom_filter_tests = b.addRunArtifact(bloom_filter_tests);
+    test_step.dependOn(&run_bloom_filter_tests.step);
 
     const run_execution_fixture_tests = b.addRunArtifact(execution_fixture_tests);
     const execution_fixture_step = b.step("test-execution", "Run pinned execution fixture tests");

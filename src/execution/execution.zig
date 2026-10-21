@@ -1,24 +1,26 @@
 // Execution RLP commits ordered transaction, receipt, and header fields to the
-// block hash. A receipt records a transaction's result; a withdrawal transfers
-// validator funds to an execution address. Typed envelopes prefix their RLP
-// payload with one type byte. Blocks wrap typed transactions as RLP strings
-// and keep legacy lists inline, so changing the wrapper changes the root.
-// Fulu uses Prague's 21-field header, empty ommers, and withdrawals. These
-// codecs preserve wire data but do not apply transactions or validate state.
+// block hash. Receipts record transaction status, cumulative gas, logs, and a
+// 2048-bit bloom of each log address and topic; ordered receipt indexes affect
+// the root, while bloom bit order follows the Keccak-derived bit positions.
+// Typed envelopes prefix their RLP payload with one type byte. Blocks wrap
+// typed transactions as RLP strings and keep legacy lists inline. Fulu uses
+// Prague's 21-field header, empty ommers, and withdrawals. These codecs and
+// bloom helpers do not apply transactions or validate state.
 //
 // transaction bytes -> block transaction list -> header transactions root
 const std = @import("std");
 const rlp = @import("rlp");
 const encoding = rlp.encoding;
 const decode = rlp.decode;
+pub const bloom_filter = @import("bloom_filter");
 pub const trie = @import("trie.zig");
 
 /// Ethereum execution address, always 20 bytes on the wire.
 pub const Address = [20]u8;
 /// Hash or storage key, always 32 bytes on the wire.
 pub const Hash = [32]u8;
-/// Bloom filter carried by a header or receipt.
-pub const Bloom = [256]u8;
+/// Encoded Bloom filter carried by a header or receipt.
+pub const Bloom = bloom_filter.Bloom;
 pub const Access = struct { address: Address, storage_keys: []const Hash };
 pub const Authorization = struct { chain_id: u256, address: Address, nonce: u64, y_parity: u8, r: u256, s: u256 };
 pub const Legacy = struct { nonce: u64, gas_price: u256, gas_limit: u64, to: ?Address, value: u256, data: []const u8, v: u256, r: u256, s: u256 };
@@ -60,6 +62,39 @@ pub const ReceiptPayload = struct { status: u8, cumulative_gas_used: u64, logs_b
 pub const Receipt = union(enum) { legacy: ReceiptPayload, access_list: ReceiptPayload, dynamic_fee: ReceiptPayload, blob: ReceiptPayload, set_code: ReceiptPayload };
 /// Post-Merge block body: header, transactions, empty ommers, withdrawals.
 pub const Block = struct { header: Header, transactions: []const Transaction, withdrawals: []const Withdrawal };
+
+/// Builds a logs bloom from each log address and topic; log data is not indexed.
+pub fn logsBloom(logs: []const Log) Bloom {
+    var filter = bloom_filter.BloomFilter.init();
+    for (logs) |log| {
+        filter.add(&log.address);
+        for (log.topics) |topic| filter.add(&topic);
+    }
+    return filter.bits;
+}
+
+/// Builds the block bloom by combining the blooms of all receipt logs.
+pub fn receiptsBloom(receipts: []const Receipt) Bloom {
+    var bloom = [_]u8{0} ** 256;
+    for (receipts) |receipt| {
+        const logs = switch (receipt) {
+            inline else => |payload| payload.logs,
+        };
+        const receipt_bloom = logsBloom(logs);
+        for (&bloom, receipt_bloom) |*dst, bits| dst.* |= bits;
+    }
+    return bloom;
+}
+
+/// Computes the ordered receipts trie root using each receipt's canonical legacy or typed encoding.
+pub fn receiptsRoot(allocator: std.mem.Allocator, receipts: []const Receipt) !Hash {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const values = try a.alloc([]const u8, receipts.len);
+    for (receipts, 0..) |receipt, i| values[i] = try encode(a, receipt);
+    return trie.orderedRoot(a, values);
+}
 
 /// Parsed value whose variable-length fields belong to one arena.
 pub fn Decoded(comptime T: type) type {
