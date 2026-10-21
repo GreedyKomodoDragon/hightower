@@ -10,6 +10,39 @@ test {
     _ = @import("trie_test.zig");
 }
 
+// Checks the canonical Keccak-256("abc") bloom bit positions and membership query.
+test "logs bloom matches the canonical Keccak vector" {
+    var bloom = [_]u8{0} ** 256;
+    execution.bloomAdd(&bloom, "abc");
+    var expected = [_]u8{0} ** 256;
+    expected[63] = 0x08;
+    expected[80] = 0x04;
+    expected[183] = 0x20;
+    try testing.expectEqualSlices(u8, &expected, &bloom);
+    try testing.expect(execution.bloomMayContain(bloom, "abc"));
+    try testing.expect(!execution.bloomMayContain(bloom, "not present"));
+}
+
+// Confirms blooms use only log addresses and topics, and combine receipt logs.
+test "receipt blooms include addresses and topics but not data" {
+    const logs = [_]execution.Log{.{ .address = .{0x11} ** 20, .topics = &.{.{0x22} ** 32}, .data = "ignored" }};
+    const expected = execution.logsBloom(&logs);
+    try testing.expect(execution.bloomMayContain(expected, &logs[0].address));
+    try testing.expect(execution.bloomMayContain(expected, &logs[0].topics[0]));
+    try testing.expect(!execution.bloomMayContain(expected, "ignored"));
+    const receipt = execution.Receipt{ .legacy = .{ .status = 1, .cumulative_gas_used = 1, .logs_bloom = .{0} ** 256, .logs = &logs } };
+    try testing.expectEqualSlices(u8, &expected, &execution.receiptsBloom(&.{receipt}));
+}
+
+// Matches the London fixture block's receipts trie root from its pinned header.
+test "receipts root matches the pinned London sample block" {
+    const receipt = execution.Receipt{ .legacy = .{ .status = 1, .cumulative_gas_used = 0xa861, .logs_bloom = .{0} ** 256, .logs = &.{} } };
+    const root = try execution.receiptsRoot(testing.allocator, &.{receipt});
+    var expected: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&expected, "c598f69a5674cae9337261b669970e24abc0b46e6d284372a239ec8ccbf20b0a");
+    try testing.expectEqualSlices(u8, &expected, &root);
+}
+
 test "transaction envelopes round trip and fixed vectors" {
     const legacy = execution.Transaction{ .legacy = .{ .nonce = 0, .gas_price = 1, .gas_limit = 2, .to = null, .value = 3, .data = "", .v = 27, .r = 1, .s = 2 } };
     const access = execution.Transaction{ .access_list = .{ .chain_id = 1, .nonce = 0, .gas_price = 2, .gas_limit = 3, .to = null, .value = 4, .data = "", .access_list = &.{.{ .address = .{1} ** 20, .storage_keys = &.{.{2} ** 32} }}, .y_parity = 1, .r = 2, .s = 3 } };
@@ -59,6 +92,22 @@ test "header, block, receipt, and withdrawal round trip" {
         const bytes = try execution.encode(testing.allocator, item);
         defer testing.allocator.free(bytes);
         var decoded = try execution.parse(@TypeOf(item), testing.allocator, bytes);
+        defer decoded.deinit();
+        const again = try execution.encode(testing.allocator, decoded.value);
+        defer testing.allocator.free(again);
+        try testing.expectEqualSlices(u8, bytes, again);
+    }
+    const receipt_variants = [_]execution.Receipt{
+        .{ .legacy = receipt.set_code },
+        .{ .access_list = receipt.set_code },
+        .{ .dynamic_fee = receipt.set_code },
+        .{ .blob = receipt.set_code },
+        .{ .set_code = receipt.set_code },
+    };
+    for (receipt_variants) |variant| {
+        const bytes = try execution.encode(testing.allocator, variant);
+        defer testing.allocator.free(bytes);
+        var decoded = try execution.parse(execution.Receipt, testing.allocator, bytes);
         defer decoded.deinit();
         const again = try execution.encode(testing.allocator, decoded.value);
         defer testing.allocator.free(again);

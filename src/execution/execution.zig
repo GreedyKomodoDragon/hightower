@@ -1,10 +1,11 @@
 // Execution RLP commits ordered transaction, receipt, and header fields to the
-// block hash. A receipt records a transaction's result; a withdrawal transfers
-// validator funds to an execution address. Typed envelopes prefix their RLP
-// payload with one type byte. Blocks wrap typed transactions as RLP strings
-// and keep legacy lists inline, so changing the wrapper changes the root.
-// Fulu uses Prague's 21-field header, empty ommers, and withdrawals. These
-// codecs preserve wire data but do not apply transactions or validate state.
+// block hash. Receipts record transaction status, cumulative gas, logs, and a
+// 2048-bit bloom of each log address and topic; ordered receipt indexes affect
+// the root, while bloom bit order follows the Keccak-derived bit positions.
+// Typed envelopes prefix their RLP payload with one type byte. Blocks wrap
+// typed transactions as RLP strings and keep legacy lists inline. Fulu uses
+// Prague's 21-field header, empty ommers, and withdrawals. These codecs and
+// bloom helpers do not apply transactions or validate state.
 //
 // transaction bytes -> block transaction list -> header transactions root
 const std = @import("std");
@@ -60,6 +61,57 @@ pub const ReceiptPayload = struct { status: u8, cumulative_gas_used: u64, logs_b
 pub const Receipt = union(enum) { legacy: ReceiptPayload, access_list: ReceiptPayload, dynamic_fee: ReceiptPayload, blob: ReceiptPayload, set_code: ReceiptPayload };
 /// Post-Merge block body: header, transactions, empty ommers, withdrawals.
 pub const Block = struct { header: Header, transactions: []const Transaction, withdrawals: []const Withdrawal };
+
+/// Adds one address or topic to an Ethereum 2048-bit logs bloom.
+pub fn bloomAdd(bloom: *Bloom, value: []const u8) void {
+    var digest: Hash = undefined;
+    std.crypto.hash.sha3.Keccak256.hash(value, &digest, .{});
+    for (0..3) |i| {
+        const bit = ((@as(u16, digest[i * 2]) << 8) | digest[i * 2 + 1]) & 2047;
+        bloom[255 - bit / 8] |= @as(u8, 1) << @as(u3, @intCast(bit % 8));
+    }
+}
+
+/// Tests whether all three bloom bits for an address or topic are set; false positives are possible.
+pub fn bloomMayContain(bloom: Bloom, value: []const u8) bool {
+    var expected = [_]u8{0} ** 256;
+    bloomAdd(&expected, value);
+    for (expected, bloom) |bits, actual| if (bits != 0 and actual & bits != bits) return false;
+    return true;
+}
+
+/// Builds a logs bloom from each log address and topic; log data is not indexed.
+pub fn logsBloom(logs: []const Log) Bloom {
+    var bloom = [_]u8{0} ** 256;
+    for (logs) |log| {
+        bloomAdd(&bloom, &log.address);
+        for (log.topics) |topic| bloomAdd(&bloom, &topic);
+    }
+    return bloom;
+}
+
+/// Builds the block bloom by combining the blooms of all receipt logs.
+pub fn receiptsBloom(receipts: []const Receipt) Bloom {
+    var bloom = [_]u8{0} ** 256;
+    for (receipts) |receipt| {
+        const logs = switch (receipt) {
+            inline else => |payload| payload.logs,
+        };
+        const receipt_bloom = logsBloom(logs);
+        for (&bloom, receipt_bloom) |*dst, bits| dst.* |= bits;
+    }
+    return bloom;
+}
+
+/// Computes the ordered receipts trie root using each receipt's canonical legacy or typed encoding.
+pub fn receiptsRoot(allocator: std.mem.Allocator, receipts: []const Receipt) !Hash {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const values = try a.alloc([]const u8, receipts.len);
+    for (receipts, 0..) |receipt, i| values[i] = try encode(a, receipt);
+    return trie.orderedRoot(a, values);
+}
 
 /// Parsed value whose variable-length fields belong to one arena.
 pub fn Decoded(comptime T: type) type {
