@@ -39,6 +39,10 @@ Chain:      [Block 0] ───────────────────�
 | Term | Plain-language definition |
 | --- | --- |
 | Recursive Length Prefix (RLP) | The byte format used to encode ordered execution-layer values and lists. |
+| Merkle-Patricia trie | Ethereum's key-value tree; nodes compact shared key prefixes and are linked by inline RLP or Keccak hashes. |
+| Secure trie | A Merkle-Patricia trie that Keccak-hashes each key before storing its nibbles, as used for account and storage roots. |
+| Hex-prefix encoding | The compact encoding of a trie path that records whether the path is a leaf or extension and whether it has an odd number of nibbles. |
+| Trie proof | The encoded trie nodes along a key path, sufficient to verify an included value against a root hash. |
 | Typed transaction envelope | A transaction whose first byte selects its format, followed by that format's RLP payload. |
 | Access list | Addresses and storage slots a transaction declares it may access. |
 | Blob transaction | A transaction that refers to data blobs by their versioned hashes. |
