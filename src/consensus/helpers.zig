@@ -2,77 +2,76 @@
 // validator eligibility and the ring-buffer position used by consensus state.
 // Seed, shuffle, and balance rules must use the same epoch and preset values
 // because proposer selection depends on both ordering and exact integer math.
-// These transition helpers use Fulu's minimal preset. Blob limits select the
-// latest configured epoch entry; this preset has none and falls back to nine.
+// The selected compile-time preset supplies dimensions and limits. Blob
+// parameters select the latest configured epoch entry and otherwise fall back
+// to the Electra limit.
 //
 //   slot -> epoch -> active validators -> seeded shuffle -> proposer indices
 const std = @import("std");
 const fulu = @import("fulu");
+const preset = @import("consensus_preset").Config;
 
-pub const SLOTS_PER_EPOCH: u64 = 8;
-pub const SLOTS_PER_HISTORICAL_ROOT: u64 = 64;
-pub const EPOCHS_PER_HISTORICAL_VECTOR: u64 = 64;
-pub const EPOCHS_PER_SLASHINGS_VECTOR: u64 = 64;
-pub const EPOCHS_PER_ETH1_VOTING_PERIOD: u64 = 4;
-pub const EPOCHS_PER_SYNC_COMMITTEE_PERIOD: u64 = 8;
+pub const SLOTS_PER_EPOCH = preset.SLOTS_PER_EPOCH;
+pub const SLOTS_PER_HISTORICAL_ROOT = preset.SLOTS_PER_HISTORICAL_ROOT;
+pub const EPOCHS_PER_HISTORICAL_VECTOR = preset.EPOCHS_PER_HISTORICAL_VECTOR;
+pub const EPOCHS_PER_SLASHINGS_VECTOR = preset.EPOCHS_PER_SLASHINGS_VECTOR;
+pub const EPOCHS_PER_ETH1_VOTING_PERIOD = preset.EPOCHS_PER_ETH1_VOTING_PERIOD;
+pub const EPOCHS_PER_SYNC_COMMITTEE_PERIOD = preset.EPOCHS_PER_SYNC_COMMITTEE_PERIOD;
 pub const EPOCHS_PER_HISTORICAL_SUMMARY: u64 = SLOTS_PER_HISTORICAL_ROOT / SLOTS_PER_EPOCH;
-pub const EPOCH_OFFSET: u64 = 1;
-pub const MIN_SEED_LOOKAHEAD: u64 = 1;
-pub const MAX_SEED_LOOKAHEAD: u64 = 4;
-pub const SHUFFLE_ROUND_COUNT: u8 = 10;
-pub const MAX_COMMITTEES_PER_SLOT: usize = 4;
-pub const TARGET_COMMITTEE_SIZE: usize = 4;
-pub const JUSTIFICATION_BITS_LENGTH: usize = 4;
-pub const JUSTIFICATION_SUPERMAJORITY_NUMERATOR: u64 = 2;
-pub const JUSTIFICATION_SUPERMAJORITY_DENOMINATOR: u64 = 3;
-pub const INACTIVITY_LEAK_EPOCH_THRESHOLD: u64 = 4;
+pub const EPOCH_OFFSET = preset.EPOCH_OFFSET;
+pub const MIN_SEED_LOOKAHEAD = preset.MIN_SEED_LOOKAHEAD;
+pub const MAX_SEED_LOOKAHEAD = preset.MAX_SEED_LOOKAHEAD;
+pub const SHUFFLE_ROUND_COUNT = preset.SHUFFLE_ROUND_COUNT;
+pub const MAX_COMMITTEES_PER_SLOT = preset.MAX_COMMITTEES_PER_SLOT;
+pub const TARGET_COMMITTEE_SIZE = preset.TARGET_COMMITTEE_SIZE;
+pub const JUSTIFICATION_BITS_LENGTH = preset.JUSTIFICATION_BITS_LENGTH;
+pub const JUSTIFICATION_SUPERMAJORITY_NUMERATOR = preset.JUSTIFICATION_SUPERMAJORITY_NUMERATOR;
+pub const JUSTIFICATION_SUPERMAJORITY_DENOMINATOR = preset.JUSTIFICATION_SUPERMAJORITY_DENOMINATOR;
+pub const INACTIVITY_LEAK_EPOCH_THRESHOLD = preset.INACTIVITY_LEAK_EPOCH_THRESHOLD;
 
 // Effective balances are rounded in increments; Electra raises the cap only
 // for compounding validators while keeping activation at 32 ETH.
-pub const EFFECTIVE_BALANCE_INCREMENT: u64 = 1_000_000_000;
-pub const EFFECTIVE_BALANCE_HYSTERESIS_DOWNWARD: u64 = 250_000_000;
-pub const EFFECTIVE_BALANCE_HYSTERESIS_UPWARD: u64 = 1_250_000_000;
-pub const MAX_EFFECTIVE_BALANCE: u64 = 32_000_000_000;
-pub const MAX_EFFECTIVE_BALANCE_ELECTRA: u64 = 2_048_000_000_000;
-pub const MIN_ACTIVATION_BALANCE: u64 = 32_000_000_000;
-pub const EJECTION_BALANCE: u64 = 16_000_000_000;
-pub const MIN_PER_EPOCH_CHURN_LIMIT_ELECTRA: u64 = 64_000_000_000;
-pub const MAX_PER_EPOCH_ACTIVATION_EXIT_CHURN_LIMIT: u64 = 128_000_000_000;
-pub const CHURN_LIMIT_QUOTIENT: u64 = 32;
-pub const MIN_VALIDATOR_WITHDRAWABILITY_DELAY: u64 = 256;
-const MAX_DEPOSITS: u64 = 16;
-const SAFETY_DECAY: u64 = 10;
-const ETH_TO_GWEI: u64 = 1_000_000_000;
+pub const EFFECTIVE_BALANCE_INCREMENT = preset.EFFECTIVE_BALANCE_INCREMENT;
+pub const EFFECTIVE_BALANCE_HYSTERESIS_DOWNWARD = preset.EFFECTIVE_BALANCE_HYSTERESIS_DOWNWARD;
+pub const EFFECTIVE_BALANCE_HYSTERESIS_UPWARD = preset.EFFECTIVE_BALANCE_HYSTERESIS_UPWARD;
+pub const MAX_EFFECTIVE_BALANCE = preset.MAX_EFFECTIVE_BALANCE;
+pub const MAX_EFFECTIVE_BALANCE_ELECTRA = preset.MAX_EFFECTIVE_BALANCE_ELECTRA;
+pub const MIN_ACTIVATION_BALANCE = preset.MIN_ACTIVATION_BALANCE;
+pub const EJECTION_BALANCE = preset.EJECTION_BALANCE;
+pub const MIN_PER_EPOCH_CHURN_LIMIT_ELECTRA = preset.MIN_PER_EPOCH_CHURN_LIMIT_ELECTRA;
+pub const MAX_PER_EPOCH_ACTIVATION_EXIT_CHURN_LIMIT = preset.MAX_PER_EPOCH_ACTIVATION_EXIT_CHURN_LIMIT;
+pub const CHURN_LIMIT_QUOTIENT = preset.CHURN_LIMIT_QUOTIENT;
+pub const MIN_VALIDATOR_WITHDRAWABILITY_DELAY = preset.MIN_VALIDATOR_WITHDRAWABILITY_DELAY;
+const MAX_DEPOSITS = preset.MAX_DEPOSITS;
+const SAFETY_DECAY = preset.SAFETY_DECAY;
+const ETH_TO_GWEI = preset.ETH_TO_GWEI;
 
 // Inactivity scores and participation weights are shared by Altair reward
 // accounting and the inherited Fulu epoch transition. Fulu uses Bellatrix's
 // stronger inactivity penalty.
-pub const INACTIVITY_SCORE_BIAS: u64 = 4;
-pub const INACTIVITY_SCORE_RECOVERY_RATE: u64 = 16;
-pub const INACTIVITY_PENALTY_QUOTIENT_BELLATRIX: u64 = 16_777_216;
-pub const BASE_REWARD_FACTOR: u64 = 64;
-pub const BASE_REWARDS_PER_EPOCH: u64 = 4;
-pub const WEIGHT_DENOMINATOR: u64 = 64;
-pub const PROPOSER_WEIGHT: u64 = 8;
-pub const PARTICIPATION_FLAG_WEIGHTS = [_]u64{ 14, 26, 14 };
+pub const INACTIVITY_SCORE_BIAS = preset.INACTIVITY_SCORE_BIAS;
+pub const INACTIVITY_SCORE_RECOVERY_RATE = preset.INACTIVITY_SCORE_RECOVERY_RATE;
+pub const INACTIVITY_PENALTY_QUOTIENT_BELLATRIX = preset.INACTIVITY_PENALTY_QUOTIENT_BELLATRIX;
+pub const BASE_REWARD_FACTOR = preset.BASE_REWARD_FACTOR;
+pub const BASE_REWARDS_PER_EPOCH = preset.BASE_REWARDS_PER_EPOCH;
+pub const WEIGHT_DENOMINATOR = preset.WEIGHT_DENOMINATOR;
+pub const PROPOSER_WEIGHT = preset.PROPOSER_WEIGHT;
+pub const SYNC_REWARD_WEIGHT = preset.SYNC_REWARD_WEIGHT;
+pub const PARTICIPATION_FLAG_WEIGHTS = preset.PARTICIPATION_FLAG_WEIGHTS;
 pub const TIMELY_SOURCE_FLAG_INDEX: usize = 0;
 pub const TIMELY_TARGET_FLAG_INDEX: usize = 1;
 pub const TIMELY_HEAD_FLAG_INDEX: usize = 2;
-pub const PROPORTIONAL_SLASHING_MULTIPLIER_BELLATRIX: u64 = 3;
-pub const WHISTLEBLOWER_REWARD_QUOTIENT_ELECTRA: u64 = 4096;
+pub const PROPORTIONAL_SLASHING_MULTIPLIER_BELLATRIX = preset.PROPORTIONAL_SLASHING_MULTIPLIER_BELLATRIX;
+pub const WHISTLEBLOWER_REWARD_QUOTIENT_ELECTRA = preset.WHISTLEBLOWER_REWARD_QUOTIENT_ELECTRA;
 pub const FAR_FUTURE_EPOCH: u64 = std.math.maxInt(u64);
 
 // Fulu inherits this limit when no blob-schedule entry applies.
-pub const MAX_BLOBS_PER_BLOCK_ELECTRA: u64 = 9;
-pub const ELECTRA_FORK_EPOCH: u64 = FAR_FUTURE_EPOCH;
+pub const MAX_BLOBS_PER_BLOCK_ELECTRA = preset.MAX_BLOBS_PER_BLOCK_ELECTRA;
+pub const ELECTRA_FORK_EPOCH = preset.ELECTRA_FORK_EPOCH;
 
-pub const BlobParameters = struct {
-    epoch: fulu.Epoch,
-    max_blobs_per_block: u64,
-};
+pub const BlobParameters = @import("consensus_preset").BlobParameters;
 
-// The pinned minimal network config has no scheduled blob parameter changes.
-pub const BLOB_SCHEDULE: [0]BlobParameters = .{};
+pub const BLOB_SCHEDULE = preset.BLOB_SCHEDULE;
 
 // A schedule entry takes effect at its epoch and remains active until the next
 // entry. Selection is by greatest applicable epoch, independent of list order.
@@ -134,7 +133,7 @@ pub const DOMAIN_BLS_TO_EXECUTION_CHANGE = [_]u8{ 10, 0, 0, 0 };
 pub const DOMAIN_APPLICATION_MASK = [_]u8{ 0, 0, 0, 1 };
 
 // Pinned minimal network configuration, not the mainnet genesis version.
-pub const GENESIS_FORK_VERSION: fulu.Version = .{ 0, 0, 0, 1 };
+pub const GENESIS_FORK_VERSION: fulu.Version = preset.GENESIS_FORK_VERSION;
 
 pub fn computeEpochAtSlot(slot: fulu.Slot) fulu.Epoch {
     return slot / SLOTS_PER_EPOCH;

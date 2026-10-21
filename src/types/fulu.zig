@@ -14,8 +14,9 @@
 //! arrays, while variable lists use the generic SSZ List type.
 
 const types = @import("types");
+const preset = @import("consensus_preset").Config;
 
-/// Scalar aliases and fixed-width byte values from the Fulu minimal preset.
+/// Scalar aliases and fixed-width byte values shared by the selected Fulu preset.
 pub const Slot = u64;
 pub const Epoch = u64;
 pub const CommitteeIndex = u64;
@@ -76,13 +77,13 @@ pub const Validator = struct {
 };
 
 pub const SyncCommittee = struct {
-    /// The minimal preset uses 32 public keys per sync committee.
-    pubkeys: [32]BLSPubkey,
+    /// Public key count is selected by the active consensus preset.
+    pubkeys: [preset.SYNC_COMMITTEE_SIZE]BLSPubkey,
     aggregate_pubkey: BLSPubkey,
 };
 
 pub const SyncAggregate = struct {
-    sync_committee_bits: types.BitVector(32),
+    sync_committee_bits: types.BitVector(preset.SYNC_COMMITTEE_SIZE),
     sync_committee_signature: BLSSignature,
 };
 
@@ -119,14 +120,14 @@ pub const PendingConsolidation = struct {
 };
 
 pub const Attestation = struct {
-    aggregation_bits: types.BitList(8192),
+    aggregation_bits: types.BitList(preset.MAX_VALIDATORS_PER_COMMITTEE),
     data: AttestationData,
     signature: BLSSignature,
-    committee_bits: types.BitVector(4),
+    committee_bits: types.BitVector(preset.MAX_COMMITTEES_PER_SLOT),
 };
 
 pub const IndexedAttestation = struct {
-    attesting_indices: types.List(ValidatorIndex, 8192),
+    attesting_indices: types.List(ValidatorIndex, preset.MAX_VALIDATORS_PER_COMMITTEE),
     data: AttestationData,
     signature: BLSSignature,
 };
@@ -215,8 +216,8 @@ pub const ExecutionPayload = struct {
     extra_data: types.ByteList(32),
     base_fee_per_gas: u256,
     block_hash: Hash32,
-    transactions: types.List(types.ByteList(1_073_741_824), 1_048_576),
-    withdrawals: types.List(Withdrawal, 4),
+    transactions: types.List(types.ByteList(preset.MAX_TRANSACTION_BYTES), preset.MAX_TRANSACTIONS_PER_PAYLOAD),
+    withdrawals: types.List(Withdrawal, preset.MAX_WITHDRAWALS_PER_PAYLOAD),
     blob_gas_used: u64,
     excess_blob_gas: u64,
 };
@@ -242,24 +243,24 @@ pub const ExecutionPayloadHeader = struct {
 };
 
 pub const ExecutionRequests = struct {
-    deposits: types.List(DepositRequest, 8192),
-    withdrawals: types.List(WithdrawalRequest, 16),
-    consolidations: types.List(ConsolidationRequest, 2),
+    deposits: types.List(DepositRequest, preset.MAX_DEPOSIT_REQUESTS_PER_PAYLOAD),
+    withdrawals: types.List(WithdrawalRequest, preset.MAX_WITHDRAWAL_REQUESTS_PER_PAYLOAD),
+    consolidations: types.List(ConsolidationRequest, preset.MAX_CONSOLIDATION_REQUESTS_PER_PAYLOAD),
 };
 
 pub const BeaconBlockBody = struct {
     randao_reveal: BLSSignature,
     eth1_data: Eth1Data,
     graffiti: Bytes32,
-    proposer_slashings: types.List(ProposerSlashing, 16),
-    attester_slashings: types.List(AttesterSlashing, 1),
-    attestations: types.List(Attestation, 8),
-    deposits: types.List(Deposit, 16),
-    voluntary_exits: types.List(SignedVoluntaryExit, 16),
+    proposer_slashings: types.List(ProposerSlashing, preset.MAX_PROPOSER_SLASHINGS),
+    attester_slashings: types.List(AttesterSlashing, preset.MAX_ATTESTER_SLASHINGS_ELECTRA),
+    attestations: types.List(Attestation, preset.MAX_ATTESTATIONS_ELECTRA),
+    deposits: types.List(Deposit, preset.MAX_DEPOSITS_PER_BLOCK),
+    voluntary_exits: types.List(SignedVoluntaryExit, preset.MAX_VOLUNTARY_EXITS),
     sync_aggregate: SyncAggregate,
     execution_payload: ExecutionPayload,
-    bls_to_execution_changes: types.List(SignedBLSToExecutionChange, 16),
-    blob_kzg_commitments: types.List(KZGCommitment, 4096),
+    bls_to_execution_changes: types.List(SignedBLSToExecutionChange, preset.MAX_BLS_TO_EXECUTION_CHANGES),
+    blob_kzg_commitments: types.List(KZGCommitment, preset.MAX_BLOB_COMMITMENTS_PER_BLOCK),
     execution_requests: ExecutionRequests,
 };
 
@@ -276,44 +277,44 @@ pub const SignedBeaconBlock = struct {
     signature: BLSSignature,
 };
 
-/// Beacon state schema for the Fulu minimal preset, in consensus-spec field order.
+/// Beacon state schema for the selected Fulu preset, in consensus-spec field order.
 pub const BeaconState = struct {
     genesis_time: u64,
     genesis_validators_root: Root,
     slot: Slot,
     fork: Fork,
     latest_block_header: BeaconBlockHeader,
-    block_roots: [64]Root,
-    state_roots: [64]Root,
-    historical_roots: types.List(Root, 16_777_216),
+    block_roots: [preset.SLOTS_PER_HISTORICAL_ROOT]Root,
+    state_roots: [preset.SLOTS_PER_HISTORICAL_ROOT]Root,
+    historical_roots: types.List(Root, preset.HISTORICAL_ROOTS_LIMIT),
     eth1_data: Eth1Data,
-    eth1_data_votes: types.List(Eth1Data, 32),
+    eth1_data_votes: types.List(Eth1Data, @intCast(preset.EPOCHS_PER_ETH1_VOTING_PERIOD * preset.SLOTS_PER_EPOCH)),
     eth1_deposit_index: u64,
-    validators: types.List(Validator, 1_099_511_627_776),
-    balances: types.List(Gwei, 1_099_511_627_776),
-    randao_mixes: [64]Bytes32,
-    slashings: [64]Gwei,
-    previous_epoch_participation: types.List(ParticipationFlags, 1_099_511_627_776),
-    current_epoch_participation: types.List(ParticipationFlags, 1_099_511_627_776),
-    justification_bits: types.BitVector(4),
+    validators: types.List(Validator, preset.VALIDATOR_REGISTRY_LIMIT),
+    balances: types.List(Gwei, preset.VALIDATOR_REGISTRY_LIMIT),
+    randao_mixes: [preset.EPOCHS_PER_HISTORICAL_VECTOR]Bytes32,
+    slashings: [preset.EPOCHS_PER_SLASHINGS_VECTOR]Gwei,
+    previous_epoch_participation: types.List(ParticipationFlags, preset.VALIDATOR_REGISTRY_LIMIT),
+    current_epoch_participation: types.List(ParticipationFlags, preset.VALIDATOR_REGISTRY_LIMIT),
+    justification_bits: types.BitVector(preset.JUSTIFICATION_BITS_LENGTH),
     previous_justified_checkpoint: Checkpoint,
     current_justified_checkpoint: Checkpoint,
     finalized_checkpoint: Checkpoint,
-    inactivity_scores: types.List(u64, 1_099_511_627_776),
+    inactivity_scores: types.List(u64, preset.VALIDATOR_REGISTRY_LIMIT),
     current_sync_committee: SyncCommittee,
     next_sync_committee: SyncCommittee,
     latest_execution_payload_header: ExecutionPayloadHeader,
     next_withdrawal_index: WithdrawalIndex,
     next_withdrawal_validator_index: ValidatorIndex,
-    historical_summaries: types.List(HistoricalSummary, 16_777_216),
+    historical_summaries: types.List(HistoricalSummary, preset.HISTORICAL_SUMMARIES_LIMIT),
     deposit_requests_start_index: u64,
     deposit_balance_to_consume: Gwei,
     exit_balance_to_consume: Gwei,
     earliest_exit_epoch: Epoch,
     consolidation_balance_to_consume: Gwei,
     earliest_consolidation_epoch: Epoch,
-    pending_deposits: types.List(PendingDeposit, 134_217_728),
-    pending_partial_withdrawals: types.List(PendingPartialWithdrawal, 64),
-    pending_consolidations: types.List(PendingConsolidation, 64),
-    proposer_lookahead: [16]ValidatorIndex,
+    pending_deposits: types.List(PendingDeposit, preset.PENDING_DEPOSITS_LIMIT),
+    pending_partial_withdrawals: types.List(PendingPartialWithdrawal, preset.PENDING_PARTIAL_WITHDRAWALS_LIMIT),
+    pending_consolidations: types.List(PendingConsolidation, preset.PENDING_CONSOLIDATIONS_LIMIT),
+    proposer_lookahead: [2 * preset.SLOTS_PER_EPOCH]ValidatorIndex,
 };

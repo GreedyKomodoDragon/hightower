@@ -7,6 +7,7 @@
 const std = @import("std");
 
 pub const fulu = @import("fulu");
+pub const preset = @import("consensus_preset");
 pub const execution = @import("execution");
 pub const consensus = @import("consensus/root.zig");
 

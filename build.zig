@@ -21,6 +21,18 @@ pub fn build(b: *std.Build) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
+    const preset_name = b.option([]const u8, "preset", "Consensus preset: minimal or mainnet") orelse "minimal";
+    if (!std.mem.eql(u8, preset_name, "minimal") and !std.mem.eql(u8, preset_name, "mainnet"))
+        @panic("unsupported preset; choose minimal or mainnet");
+    const preset_options = b.addOptions();
+    preset_options.addOption([]const u8, "preset", preset_name);
+    const preset_options_mod = preset_options.createModule();
+    const consensus_preset_mod = b.createModule(.{
+        .root_source_file = b.path("src/consensus/preset.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "build_options", .module = preset_options_mod }},
+    });
     const blst = b.dependency("blst", .{}).module("blst");
     // It's also possible to define more custom flags to toggle optional features
     // of this build script using `b.option()`. All defined flags (including
@@ -46,6 +58,7 @@ pub fn build(b: *std.Build) void {
         // which requires us to specify a target.
         .target = target,
     });
+    mod.addImport("consensus_preset", consensus_preset_mod);
 
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
@@ -204,7 +217,10 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/types/fulu.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "types", .module = types_mod }},
+        .imports = &.{
+            .{ .name = "types", .module = types_mod },
+            .{ .name = "consensus_preset", .module = consensus_preset_mod },
+        },
     });
     mod.addImport("fulu", fulu_mod);
     mod.addImport("blst", blst);
@@ -274,6 +290,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "fulu", .module = fulu_mod },
+                .{ .name = "consensus_preset", .module = consensus_preset_mod },
             },
         }),
     });
@@ -288,6 +305,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "blst", .module = blst },
                 .{ .name = "ssz", .module = ssz_mod },
                 .{ .name = "merkle", .module = merkle_mod },
+                .{ .name = "consensus_preset", .module = consensus_preset_mod },
             },
         }),
     });

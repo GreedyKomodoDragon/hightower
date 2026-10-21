@@ -4,8 +4,8 @@
 // part of the on-chain state. Proposer boost is temporary weight for the first
 // timely block in a slot. Ticks advance in order: clear boost at each slot,
 // then promote newer checkpoints at epoch starts. Fulu keeps these rules and
-// adds data-availability validation during block import. This code targets the
-// minimal preset: six seconds per slot and eight slots per epoch.
+// adds data-availability validation during block import. Slot timing and
+// epoch boundaries come from the selected compile-time preset.
 //
 //   tick -> slot boundary -> clear proposer boost -> epoch boundary? -> promote checkpoints
 const std = @import("std");
@@ -13,11 +13,9 @@ const fulu = @import("fulu");
 const merkle = @import("merkle");
 const ssz = @import("ssz");
 const helpers = @import("helpers.zig");
+const preset = @import("consensus_preset").Config;
 const block_transition = @import("block.zig");
 const engine_api = @import("execution_engine.zig");
-
-// shortcut: the minimal preset fixes six seconds per slot, extract this when adding another preset.
-const SECONDS_PER_SLOT: u64 = 6;
 
 pub const LatestMessage = struct {
     epoch: fulu.Epoch,
@@ -68,7 +66,7 @@ pub const Store = struct {
     }
 
     pub fn currentSlot(self: *const Store) u64 {
-        return (self.time - self.genesis_time) / SECONDS_PER_SLOT;
+        return (self.time - self.genesis_time) / preset.SECONDS_PER_SLOT;
     }
 };
 
@@ -82,7 +80,7 @@ pub fn initStore(
     const anchor_root = try merkle.HashTreeRoot(allocator, anchor_block.*);
     const anchor_epoch = helpers.computeEpochAtSlot(anchor_state.slot);
     const checkpoint = fulu.Checkpoint{ .epoch = anchor_epoch, .root = anchor_root };
-    const elapsed = try std.math.mul(u64, anchor_state.slot, SECONDS_PER_SLOT);
+    const elapsed = try std.math.mul(u64, anchor_state.slot, preset.SECONDS_PER_SLOT);
     const time = try std.math.add(u64, anchor_state.genesis_time, elapsed);
 
     var store = Store{
@@ -115,10 +113,10 @@ pub fn onTick(store: *Store, time: u64) !void {
     if (time < store.time) return error.TimeRegression;
     if (time == store.time) return;
 
-    const target_slot = (time - store.genesis_time) / SECONDS_PER_SLOT;
+    const target_slot = (time - store.genesis_time) / preset.SECONDS_PER_SLOT;
     while (store.currentSlot() < target_slot) {
         const next_slot = store.currentSlot() + 1;
-        const elapsed = try std.math.mul(u64, next_slot, SECONDS_PER_SLOT);
+        const elapsed = try std.math.mul(u64, next_slot, preset.SECONDS_PER_SLOT);
         store.time = try std.math.add(u64, store.genesis_time, elapsed);
         store.proposer_boost_root = [_]u8{0} ** 32;
         if (next_slot % helpers.SLOTS_PER_EPOCH == 0) updateCheckpoints(store);
@@ -182,8 +180,8 @@ pub fn onBlock(store: *Store, signed_block: fulu.SignedBeaconBlock, engine: engi
 
     try putBlock(store, block_root, block);
     try putState(store, block_root, state);
-    const seconds_into_slot = (store.time - store.genesis_time) % SECONDS_PER_SLOT;
-    const timely = store.currentSlot() == block.slot and seconds_into_slot < 2;
+    const seconds_into_slot = (store.time - store.genesis_time) % preset.SECONDS_PER_SLOT;
+    const timely = store.currentSlot() == block.slot and seconds_into_slot < preset.PROPOSER_BOOST_WINDOW_SECONDS;
     try store.block_timeliness.put(block_root, timely);
     if (timely and std.mem.eql(u8, &store.proposer_boost_root, &([_]u8{0} ** 32))) {
         store.proposer_boost_root = block_root;
@@ -278,7 +276,7 @@ test "weak subjectivity validates checkpoint state and accepts the inclusive per
     const checkpoint = fulu.Checkpoint{ .epoch = 1, .root = [_]u8{0x11} ** 32 };
     state.block_roots[helpers.SLOTS_PER_EPOCH] = checkpoint.root;
     const period = try helpers.computeWeakSubjectivityPeriod(&state);
-    store.time = store.genesis_time + (checkpoint.epoch + period) * helpers.SLOTS_PER_EPOCH * SECONDS_PER_SLOT;
+    store.time = store.genesis_time + (checkpoint.epoch + period) * helpers.SLOTS_PER_EPOCH * preset.SECONDS_PER_SLOT;
     try std.testing.expect(try isWithinWeakSubjectivityPeriod(&store, &state, checkpoint));
 
     try std.testing.expectError(error.InvalidWeakSubjectivityCheckpoint, isWithinWeakSubjectivityPeriod(&store, &state, .{
@@ -286,7 +284,7 @@ test "weak subjectivity validates checkpoint state and accepts the inclusive per
         .root = [_]u8{0x22} ** 32,
     }));
 
-    store.time += helpers.SLOTS_PER_EPOCH * SECONDS_PER_SLOT;
+    store.time += helpers.SLOTS_PER_EPOCH * preset.SECONDS_PER_SLOT;
     try std.testing.expect(!try isWithinWeakSubjectivityPeriod(&store, &state, checkpoint));
     try std.testing.expectError(error.InvalidWeakSubjectivityCheckpoint, isWithinWeakSubjectivityPeriod(&store, &state, .{
         .epoch = checkpoint.epoch + 1,
@@ -371,7 +369,7 @@ test "fork-choice rejects unavailable block without changing the store" {
     defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, fixture[2]);
     var store = try initStore(allocator, &fixture[0], &fixture[1]);
     defer store.deinit();
-    try onTick(&store, fixture[2].message.slot * SECONDS_PER_SLOT);
+    try onTick(&store, fixture[2].message.slot * preset.SECONDS_PER_SLOT);
     var availability = AvailabilityTestContext{ .available = false };
     var engine: engine_api.TestEngine = .{ .status = .valid };
 
@@ -398,7 +396,7 @@ test "fork-choice stores an available block and assigns timely proposer boost" {
     const parent_root = try merkle.HashTreeRoot(allocator, fixture[1]);
     store.block_states.getPtr(parent_root).?.current_justified_checkpoint = imported_checkpoint;
     store.block_states.getPtr(parent_root).?.finalized_checkpoint = imported_checkpoint;
-    try onTick(&store, fixture[2].message.slot * SECONDS_PER_SLOT);
+    try onTick(&store, fixture[2].message.slot * preset.SECONDS_PER_SLOT);
     var availability = AvailabilityTestContext{ .available = true };
     var engine: engine_api.TestEngine = .{ .status = .valid };
 

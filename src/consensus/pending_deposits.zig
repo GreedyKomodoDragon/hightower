@@ -16,6 +16,7 @@ const merkle = @import("merkle");
 const helpers = @import("helpers.zig");
 const domains = @import("domains.zig");
 const bls = @import("bls.zig");
+const preset = @import("consensus_preset").Config;
 
 const DepositMessage = struct {
     pubkey: fulu.BLSPubkey,
@@ -39,7 +40,7 @@ pub fn processPendingDeposits(allocator: std.mem.Allocator, state: *fulu.BeaconS
 
     for (pending) |deposit| {
         if (deposit.slot > 0 and state.eth1_deposit_index < state.deposit_requests_start_index) break;
-        if (deposit.slot > finalized_slot or processed >= 16) break;
+        if (deposit.slot > finalized_slot or processed >= preset.MAX_PENDING_DEPOSITS_PER_EPOCH) break;
         const existing_index = findValidator(state.validators.data, deposit.pubkey);
         if (existing_index) |index| {
             const validator = state.validators.data[index];
@@ -110,7 +111,7 @@ fn applyDeposit(allocator: std.mem.Allocator, state: *fulu.BeaconState, deposit:
     try appendOwned(fulu.Validator, allocator, &state.validators.data, .{
         .pubkey = deposit.pubkey,
         .withdrawal_credentials = deposit.withdrawal_credentials,
-        .effective_balance = @min(deposit.amount - deposit.amount % 1_000_000_000, max_balance),
+        .effective_balance = @min(deposit.amount - deposit.amount % helpers.EFFECTIVE_BALANCE_INCREMENT, max_balance),
         .slashed = false,
         .activation_eligibility_epoch = max_epoch,
         .activation_epoch = max_epoch,

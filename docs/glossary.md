@@ -59,6 +59,7 @@ Chain:      [Block 0] ───────────────────�
 | Slot | A short time interval in which Ethereum may add a block. |
 | Epoch | A group of slots. At an epoch boundary, the consensus system updates rewards, validator status, and other shared state. |
 | Minimal preset | A small configuration used for tests. It uses fewer slots and validators than the regular network configuration. |
+| Consensus preset | A compile-time set of network constants and SSZ dimensions; every consensus module and state type must use the same preset. |
 | Validator | A participant that helps Ethereum agree on blocks and receives rewards or penalties for its actions. |
 | Beacon committee | A group of active validators assigned to attest during a particular slot. |
 | Seed | A value derived from an epoch and shared randomness to select validator duties consistently. |

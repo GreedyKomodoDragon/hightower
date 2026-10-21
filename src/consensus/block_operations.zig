@@ -7,8 +7,8 @@
 //   proposer slashings -> attester slashings -> attestations -> exits
 //       -> BLS changes -> deposit requests -> withdrawal requests
 //       -> consolidation requests
-// Operation lists use their Fulu SSZ bounds; this implementation targets the
-// minimal preset, and the legacy deposit list is rejected because Fulu forbids it.
+// Operation lists use their Fulu SSZ bounds selected by the compile-time
+// preset, and the legacy deposit list is rejected because Fulu forbids it.
 const std = @import("std");
 const fulu = @import("fulu");
 const merkle = @import("merkle");
@@ -16,14 +16,7 @@ const bls = @import("bls.zig");
 const domains = @import("domains.zig");
 const helpers = @import("helpers.zig");
 const epoch = @import("epoch.zig");
-
-const MAX_WITHDRAWALS_PER_PAYLOAD: usize = 4;
-const MAX_VALIDATORS_PER_WITHDRAWALS_SWEEP: usize = 16;
-const MAX_PENDING_PARTIALS_PER_WITHDRAWALS_SWEEP: usize = 8;
-const PENDING_DEPOSITS_LIMIT: usize = 134_217_728;
-const SHARD_COMMITTEE_PERIOD: u64 = 64;
-const MIN_SLASHING_PENALTY_QUOTIENT_ELECTRA: u64 = 4096;
-const CAPELLA_FORK_VERSION: fulu.Version = .{ 3, 0, 0, 1 };
+const preset = @import("consensus_preset").Config;
 
 pub fn processOperations(allocator: std.mem.Allocator, state: *fulu.BeaconState, body: fulu.BeaconBlockBody) !void {
     for (body.proposer_slashings.data) |operation| try processProposerSlashing(allocator, state, operation);
@@ -115,7 +108,7 @@ fn slashValidator(state: *fulu.BeaconState, index: fulu.ValidatorIndex) !void {
     validator.withdrawable_epoch = @max(validator.withdrawable_epoch, current_epoch + helpers.EPOCHS_PER_SLASHINGS_VECTOR);
     const slashings_index = current_epoch % helpers.EPOCHS_PER_SLASHINGS_VECTOR;
     state.slashings[slashings_index] = std.math.add(u64, state.slashings[slashings_index], validator.effective_balance) catch return error.BalanceOverflow;
-    @constCast(state.balances.data)[index] -|= validator.effective_balance / MIN_SLASHING_PENALTY_QUOTIENT_ELECTRA;
+    @constCast(state.balances.data)[index] -|= validator.effective_balance / preset.MIN_SLASHING_PENALTY_QUOTIENT_ELECTRA;
 
     const proposer_index = state.proposer_lookahead[state.slot % helpers.SLOTS_PER_EPOCH];
     if (proposer_index >= state.balances.data.len) return error.InvalidState;
@@ -131,7 +124,7 @@ pub fn processAttestation(allocator: std.mem.Allocator, state: *fulu.BeaconState
     const target_epoch = data.target.epoch;
     if ((target_epoch != current_epoch and target_epoch != helpers.computePreviousEpoch(current_epoch)) or
         target_epoch != helpers.computeEpochAtSlot(data.slot) or data.index != 0 or
-        data.slot > state.slot or state.slot - data.slot < 1 or state.slot - data.slot > helpers.SLOTS_PER_EPOCH)
+        data.slot > state.slot or state.slot - data.slot < preset.MIN_ATTESTATION_INCLUSION_DELAY or state.slot - data.slot > helpers.SLOTS_PER_EPOCH)
         return error.InvalidAttestation;
 
     const committees = try getCommitteeIndices(allocator, &attestation.committee_bits.data);
@@ -176,7 +169,7 @@ pub fn processAttestation(allocator: std.mem.Allocator, state: *fulu.BeaconState
     flags[source_index] = data.source.epoch == helpers.computePreviousEpoch(target_epoch) and
         std.meta.eql(data.source.root, if (target_epoch == current_epoch) state.current_justified_checkpoint.root else state.previous_justified_checkpoint.root);
     flags[target_index] = std.meta.eql(data.target.root, blockRootAtEpoch(state, target_epoch) catch return error.InvalidAttestation);
-    flags[head_index] = std.meta.eql(data.beacon_block_root, block_root) and delay == 1;
+    flags[head_index] = std.meta.eql(data.beacon_block_root, block_root) and delay == preset.MIN_ATTESTATION_INCLUSION_DELAY;
     if (delay > std.math.sqrt(helpers.SLOTS_PER_EPOCH)) flags[source_index] = false;
     if (delay > helpers.SLOTS_PER_EPOCH) flags[target_index] = false;
 
@@ -229,11 +222,11 @@ pub fn processVoluntaryExit(allocator: std.mem.Allocator, state: *fulu.BeaconSta
     const validator = state.validators.data[exit.validator_index];
     const current_epoch = helpers.getCurrentEpoch(state);
     if (!helpers.isActiveValidator(validator, current_epoch) or validator.exit_epoch != helpers.FAR_FUTURE_EPOCH or
-        current_epoch < exit.epoch or current_epoch - validator.activation_epoch < SHARD_COMMITTEE_PERIOD or
+        current_epoch < exit.epoch or current_epoch - validator.activation_epoch < preset.SHARD_COMMITTEE_PERIOD or
         pendingBalanceToWithdraw(state, exit.validator_index) != 0)
         return error.InvalidVoluntaryExit;
     const root = try merkle.HashTreeRoot(allocator, exit);
-    const domain = domains.computeDomain(helpers.DOMAIN_VOLUNTARY_EXIT, CAPELLA_FORK_VERSION, state.genesis_validators_root);
+    const domain = domains.computeDomain(helpers.DOMAIN_VOLUNTARY_EXIT, preset.CAPELLA_FORK_VERSION, state.genesis_validators_root);
     try bls.verify(validator.pubkey, domains.computeSigningRoot(root, domain), signed_exit.signature);
     try epoch.initiateValidatorExit(state, exit.validator_index, current_epoch);
 }
@@ -257,7 +250,7 @@ pub fn processBLSToExecutionChange(allocator: std.mem.Allocator, state: *fulu.Be
 }
 
 pub fn processDepositRequest(allocator: std.mem.Allocator, state: *fulu.BeaconState, request: fulu.DepositRequest) !void {
-    if (state.pending_deposits.data.len >= PENDING_DEPOSITS_LIMIT) return error.PendingDepositsFull;
+    if (state.pending_deposits.data.len >= preset.PENDING_DEPOSITS_LIMIT) return error.PendingDepositsFull;
     if (state.deposit_requests_start_index == helpers.FAR_FUTURE_EPOCH)
         state.deposit_requests_start_index = request.index;
     try append(fulu.PendingDeposit, allocator, &state.pending_deposits.data, .{
@@ -271,14 +264,14 @@ pub fn processDepositRequest(allocator: std.mem.Allocator, state: *fulu.BeaconSt
 
 pub fn processWithdrawalRequest(allocator: std.mem.Allocator, state: *fulu.BeaconState, request: fulu.WithdrawalRequest) !void {
     const full_exit = request.amount == 0;
-    if (state.pending_partial_withdrawals.data.len >= 64 and !full_exit) return;
+    if (state.pending_partial_withdrawals.data.len >= preset.PENDING_PARTIAL_WITHDRAWALS_LIMIT and !full_exit) return;
     const index = findValidator(state.validators.data, request.validator_pubkey) orelse return;
     const validator = state.validators.data[index];
     const current_epoch = helpers.getCurrentEpoch(state);
     if ((validator.withdrawal_credentials[0] != 1 and validator.withdrawal_credentials[0] != 2) or
         !std.mem.eql(u8, validator.withdrawal_credentials[12..], &request.source_address) or
         !helpers.isActiveValidator(validator, current_epoch) or validator.exit_epoch != helpers.FAR_FUTURE_EPOCH or
-        current_epoch - validator.activation_epoch < SHARD_COMMITTEE_PERIOD)
+        current_epoch - validator.activation_epoch < preset.SHARD_COMMITTEE_PERIOD)
         return;
     const pending = pendingBalanceToWithdraw(state, @intCast(index));
     if (full_exit) {
@@ -310,7 +303,7 @@ pub fn processConsolidationRequest(allocator: std.mem.Allocator, state: *fulu.Be
         @constCast(state.validators.data)[index].withdrawal_credentials[0] = 2;
         const balance = state.balances.data[index];
         if (balance > helpers.MIN_ACTIVATION_BALANCE) {
-            if (state.pending_deposits.data.len >= PENDING_DEPOSITS_LIMIT) return error.PendingDepositsFull;
+            if (state.pending_deposits.data.len >= preset.PENDING_DEPOSITS_LIMIT) return error.PendingDepositsFull;
             const excess = balance - helpers.MIN_ACTIVATION_BALANCE;
             @constCast(state.balances.data)[index] = helpers.MIN_ACTIVATION_BALANCE;
             var infinity = [_]u8{0} ** 96;
@@ -325,7 +318,7 @@ pub fn processConsolidationRequest(allocator: std.mem.Allocator, state: *fulu.Be
         }
         return;
     }
-    if (state.pending_consolidations.data.len >= 64 or consolidationChurnLimit(state) <= helpers.MIN_ACTIVATION_BALANCE) return;
+    if (state.pending_consolidations.data.len >= preset.PENDING_CONSOLIDATIONS_LIMIT or consolidationChurnLimit(state) <= helpers.MIN_ACTIVATION_BALANCE) return;
     const source_index = findValidator(state.validators.data, request.source_pubkey) orelse return;
     const target_index = findValidator(state.validators.data, request.target_pubkey) orelse return;
     const source = state.validators.data[source_index];
@@ -335,7 +328,7 @@ pub fn processConsolidationRequest(allocator: std.mem.Allocator, state: *fulu.Be
         !std.mem.eql(u8, source.withdrawal_credentials[12..], &request.source_address) or target.withdrawal_credentials[0] != 2 or
         !helpers.isActiveValidator(source, current_epoch) or !helpers.isActiveValidator(target, current_epoch) or
         source.exit_epoch != helpers.FAR_FUTURE_EPOCH or target.exit_epoch != helpers.FAR_FUTURE_EPOCH or
-        current_epoch - source.activation_epoch < SHARD_COMMITTEE_PERIOD or pendingBalanceToWithdraw(state, @intCast(source_index)) != 0)
+        current_epoch - source.activation_epoch < preset.SHARD_COMMITTEE_PERIOD or pendingBalanceToWithdraw(state, @intCast(source_index)) != 0)
         return;
     const exit_epoch = try computeConsolidationEpochAndUpdateChurn(state, source.effective_balance);
     const withdrawable_epoch = std.math.add(u64, exit_epoch, helpers.MIN_VALIDATOR_WITHDRAWABILITY_DELAY) catch return error.InvalidState;
@@ -428,10 +421,10 @@ pub fn processWithdrawals(allocator: std.mem.Allocator, state: *fulu.BeaconState
     if (pending.len != 0) allocator.free(@constCast(pending));
     state.pending_partial_withdrawals.data = remaining;
     if (expected.items.len != 0) state.next_withdrawal_index = expected.items[expected.items.len - 1].index + 1;
-    if (expected.items.len == MAX_WITHDRAWALS_PER_PAYLOAD) {
+    if (expected.items.len == preset.MAX_WITHDRAWALS_PER_PAYLOAD) {
         state.next_withdrawal_validator_index = (expected.items[expected.items.len - 1].validator_index + 1) % state.validators.data.len;
     } else if (state.validators.data.len != 0) {
-        state.next_withdrawal_validator_index = (state.next_withdrawal_validator_index + MAX_VALIDATORS_PER_WITHDRAWALS_SWEEP) % state.validators.data.len;
+        state.next_withdrawal_validator_index = (state.next_withdrawal_validator_index + preset.MAX_VALIDATORS_PER_WITHDRAWALS_SWEEP) % state.validators.data.len;
     }
 }
 
@@ -447,8 +440,8 @@ fn getExpectedWithdrawals(allocator: std.mem.Allocator, state: *const fulu.Beaco
     var withdrawal_index = state.next_withdrawal_index;
     var processed_partials: usize = 0;
     for (state.pending_partial_withdrawals.data) |pending| {
-        if (pending.withdrawable_epoch > current_epoch or processed_partials == MAX_PENDING_PARTIALS_PER_WITHDRAWALS_SWEEP or
-            withdrawals.items.len == MAX_WITHDRAWALS_PER_PAYLOAD) break;
+        if (pending.withdrawable_epoch > current_epoch or processed_partials == preset.MAX_PENDING_PARTIALS_PER_WITHDRAWALS_SWEEP or
+            withdrawals.items.len == preset.MAX_WITHDRAWALS_PER_PAYLOAD) break;
         if (pending.validator_index >= state.validators.data.len or pending.validator_index >= state.balances.data.len) return error.InvalidState;
         const validator = state.validators.data[pending.validator_index];
         const prior = totalForValidator(withdrawals.items, pending.validator_index);
@@ -466,7 +459,7 @@ fn getExpectedWithdrawals(allocator: std.mem.Allocator, state: *const fulu.Beaco
         processed_partials += 1;
     }
     const validator_count = state.validators.data.len;
-    const sweep = @min(validator_count, MAX_VALIDATORS_PER_WITHDRAWALS_SWEEP);
+    const sweep = @min(validator_count, preset.MAX_VALIDATORS_PER_WITHDRAWALS_SWEEP);
     var validator_index: usize = if (validator_count == 0) 0 else @intCast(state.next_withdrawal_validator_index);
     if (validator_count != 0) for (0..sweep) |_| {
         const index = validator_index;
@@ -484,7 +477,7 @@ fn getExpectedWithdrawals(allocator: std.mem.Allocator, state: *const fulu.Beaco
             });
             withdrawal_index += 1;
         }
-        if (withdrawals.items.len == MAX_WITHDRAWALS_PER_PAYLOAD) break;
+        if (withdrawals.items.len == preset.MAX_WITHDRAWALS_PER_PAYLOAD) break;
         validator_index = (validator_index + 1) % validator_count;
     };
     return .{ .items = try withdrawals.toOwnedSlice(allocator), .processed_partials = processed_partials };
