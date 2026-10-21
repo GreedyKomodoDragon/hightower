@@ -10,26 +10,14 @@ test {
     _ = @import("trie_test.zig");
 }
 
-// Checks the canonical Keccak-256("abc") bloom bit positions and membership query.
-test "logs bloom matches the canonical Keccak vector" {
-    var bloom = [_]u8{0} ** 256;
-    execution.bloomAdd(&bloom, "abc");
-    var expected = [_]u8{0} ** 256;
-    expected[63] = 0x08;
-    expected[80] = 0x04;
-    expected[183] = 0x20;
-    try testing.expectEqualSlices(u8, &expected, &bloom);
-    try testing.expect(execution.bloomMayContain(bloom, "abc"));
-    try testing.expect(!execution.bloomMayContain(bloom, "not present"));
-}
-
 // Confirms blooms use only log addresses and topics, and combine receipt logs.
 test "receipt blooms include addresses and topics but not data" {
     const logs = [_]execution.Log{.{ .address = .{0x11} ** 20, .topics = &.{.{0x22} ** 32}, .data = "ignored" }};
     const expected = execution.logsBloom(&logs);
-    try testing.expect(execution.bloomMayContain(expected, &logs[0].address));
-    try testing.expect(execution.bloomMayContain(expected, &logs[0].topics[0]));
-    try testing.expect(!execution.bloomMayContain(expected, "ignored"));
+    var filter = execution.bloom_filter.BloomFilter{ .bits = expected };
+    try testing.expect(filter.mayContain(&logs[0].address));
+    try testing.expect(filter.mayContain(&logs[0].topics[0]));
+    try testing.expect(!filter.mayContain("ignored"));
     const receipt = execution.Receipt{ .legacy = .{ .status = 1, .cumulative_gas_used = 1, .logs_bloom = .{0} ** 256, .logs = &logs } };
     try testing.expectEqualSlices(u8, &expected, &execution.receiptsBloom(&.{receipt}));
 }

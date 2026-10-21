@@ -12,14 +12,15 @@ const std = @import("std");
 const rlp = @import("rlp");
 const encoding = rlp.encoding;
 const decode = rlp.decode;
+pub const bloom_filter = @import("bloom_filter");
 pub const trie = @import("trie.zig");
 
 /// Ethereum execution address, always 20 bytes on the wire.
 pub const Address = [20]u8;
 /// Hash or storage key, always 32 bytes on the wire.
 pub const Hash = [32]u8;
-/// Bloom filter carried by a header or receipt.
-pub const Bloom = [256]u8;
+/// Encoded Bloom filter carried by a header or receipt.
+pub const Bloom = bloom_filter.Bloom;
 pub const Access = struct { address: Address, storage_keys: []const Hash };
 pub const Authorization = struct { chain_id: u256, address: Address, nonce: u64, y_parity: u8, r: u256, s: u256 };
 pub const Legacy = struct { nonce: u64, gas_price: u256, gas_limit: u64, to: ?Address, value: u256, data: []const u8, v: u256, r: u256, s: u256 };
@@ -62,32 +63,14 @@ pub const Receipt = union(enum) { legacy: ReceiptPayload, access_list: ReceiptPa
 /// Post-Merge block body: header, transactions, empty ommers, withdrawals.
 pub const Block = struct { header: Header, transactions: []const Transaction, withdrawals: []const Withdrawal };
 
-/// Adds one address or topic to an Ethereum 2048-bit logs bloom.
-pub fn bloomAdd(bloom: *Bloom, value: []const u8) void {
-    var digest: Hash = undefined;
-    std.crypto.hash.sha3.Keccak256.hash(value, &digest, .{});
-    for (0..3) |i| {
-        const bit = ((@as(u16, digest[i * 2]) << 8) | digest[i * 2 + 1]) & 2047;
-        bloom[255 - bit / 8] |= @as(u8, 1) << @as(u3, @intCast(bit % 8));
-    }
-}
-
-/// Tests whether all three bloom bits for an address or topic are set; false positives are possible.
-pub fn bloomMayContain(bloom: Bloom, value: []const u8) bool {
-    var expected = [_]u8{0} ** 256;
-    bloomAdd(&expected, value);
-    for (expected, bloom) |bits, actual| if (bits != 0 and actual & bits != bits) return false;
-    return true;
-}
-
 /// Builds a logs bloom from each log address and topic; log data is not indexed.
 pub fn logsBloom(logs: []const Log) Bloom {
-    var bloom = [_]u8{0} ** 256;
+    var filter = bloom_filter.BloomFilter.init();
     for (logs) |log| {
-        bloomAdd(&bloom, &log.address);
-        for (log.topics) |topic| bloomAdd(&bloom, &topic);
+        filter.add(&log.address);
+        for (log.topics) |topic| filter.add(&topic);
     }
-    return bloom;
+    return filter.bits;
 }
 
 /// Builds the block bloom by combining the blooms of all receipt logs.

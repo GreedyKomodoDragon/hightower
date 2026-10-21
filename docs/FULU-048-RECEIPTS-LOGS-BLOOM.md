@@ -2,7 +2,7 @@
 
 ## Summary
 
-Execution receipt types already encode legacy receipts as RLP lists and typed receipts as a type byte followed by an RLP payload. The execution module now builds and queries Ethereum's 2048-bit logs bloom and computes a receipts trie root from ordered canonical receipt encodings.
+Execution receipt types already encode legacy receipts as RLP lists and typed receipts as a type byte followed by an RLP payload. The standalone `bloom_filter` module exposes the `BloomFilter` type for Ethereum's 2048-bit logs bloom. Execution code uses it to build and query blooms and computes a receipts trie root from ordered canonical receipt encodings.
 
 The bloom hashes each log address and topic with Keccak-256 and sets three indexed bits. Log data is not part of the bloom. Bloom queries are probabilistic: a positive result may be a false positive. `receiptsRoot` owns temporary allocations for its computation and returns the ordered trie root.
 
@@ -20,7 +20,7 @@ The test checks the root `c598f69a5674cae9337261b669970e24abc0b46e6d284372a239ec
 
 | Issue #85 criterion | Implementation evidence | Test evidence |
 | --- | --- | --- |
-| Bloom construction/query matches known vectors. | `bloomAdd`, `bloomMayContain`, `logsBloom`, and `receiptsBloom` operate on 256-byte Ethereum blooms. | Tests assert the exact Keccak-256(`abc`) bloom bytes, membership behavior, inclusion of addresses/topics, exclusion of data, and receipt aggregation. |
+| Bloom construction/query matches known vectors. | `bloom_filter.BloomFilter` provides `add` and `mayContain`; execution helpers build receipt and block blooms. | Tests assert the exact Keccak-256(`abc`) bloom bytes, membership behavior, inclusion of addresses/topics, exclusion of data, and receipt aggregation. |
 | Receipt encoding round-trips. | Existing codecs encode legacy and typed envelopes and decode all supported receipt tags. | Tests round-trip legacy, access-list, dynamic-fee, blob, and set-code receipts; malformed lengths and unknown tags are rejected. |
 | Receipts root matches the trie root for a sample block. | `receiptsRoot` serializes each receipt and calls the ordered trie root helper. | A pinned London block receipt yields the fixture's expected `receiptTrie`. |
 

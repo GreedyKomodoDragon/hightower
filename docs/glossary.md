@@ -48,7 +48,7 @@ Chain:      [Block 0] ───────────────────�
 | Blob transaction | A transaction that refers to data blobs by their versioned hashes. |
 | Authorization list | Signed permissions carried by a set-code transaction to delegate account behavior. |
 | Execution receipt | The status, gas tally, bloom, and logs produced by a transaction. |
-| Logs bloom | A 2048-bit filter built from log addresses and topics; it can rule out matches but may report false positives. |
+| Bloom filter (logs bloom) | A 2048-bit probabilistic filter built from log addresses and topics; it can rule out matches but may report false positives. |
 | Ommers | Older side-branch block headers; post-Merge execution blocks carry an empty list. |
 | Execution withdrawal | A consensus-authorized transfer of validator funds to an execution address. |
 | Requests hash | The header commitment to execution-layer requests produced while processing a block. |
