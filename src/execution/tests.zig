@@ -6,6 +6,10 @@ const execution = @import("execution");
 const rlp = @import("rlp");
 const testing = std.testing;
 
+test {
+    _ = @import("trie_test.zig");
+}
+
 test "transaction envelopes round trip and fixed vectors" {
     const legacy = execution.Transaction{ .legacy = .{ .nonce = 0, .gas_price = 1, .gas_limit = 2, .to = null, .value = 3, .data = "", .v = 27, .r = 1, .s = 2 } };
     const access = execution.Transaction{ .access_list = .{ .chain_id = 1, .nonce = 0, .gas_price = 2, .gas_limit = 3, .to = null, .value = 4, .data = "", .access_list = &.{.{ .address = .{1} ** 20, .storage_keys = &.{.{2} ** 32} }}, .y_parity = 1, .r = 2, .s = 3 } };

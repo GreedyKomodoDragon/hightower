@@ -11,6 +11,7 @@ const std = @import("std");
 const rlp = @import("rlp");
 const encoding = rlp.encoding;
 const decode = rlp.decode;
+pub const trie = @import("trie.zig");
 
 /// Ethereum execution address, always 20 bytes on the wire.
 pub const Address = [20]u8;
