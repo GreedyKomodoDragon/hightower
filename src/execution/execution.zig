@@ -206,8 +206,8 @@ fn fromValue(comptime T: type, allocator: std.mem.Allocator, value: decode.Value
     switch (@typeInfo(T)) {
         .int => {
             const bytes = try asString(value);
-            if (bytes.len > @sizeOf(T)) return error.IntegerOverflow;
             if (bytes.len > 0 and bytes[0] == 0) return error.NonCanonicalInteger;
+            if (bytes.len > @sizeOf(T)) return error.IntegerOverflow;
             var result: u256 = 0;
             for (bytes) |b| result = (result << 8) | b;
             return @intCast(result);
