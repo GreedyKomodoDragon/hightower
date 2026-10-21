@@ -1,7 +1,7 @@
 // Build graph for Hightower's Fulu schema and state-transition code. The public
 // module and consensus test root share the same Fulu, SSZ, Merkle, and BLS
 // modules, keeping exported BeaconState types compatible with transition APIs.
-// `test-transition` runs the selected pinned consensus fixtures separately
+// `test-transition` and `test-execution` run pinned fixture suites separately
 // from the default test step.
 const std = @import("std");
 
@@ -171,6 +171,14 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    const execution_fixture_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/execution/fixtures.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "execution", .module = execution_mod }},
+        }),
+    });
 
     // Shared library modules. Test roots import these by name
     // (@import("ssz") etc.) instead of relative paths, so files can
@@ -288,6 +296,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_tests.step);
     const run_execution_tests = b.addRunArtifact(execution_tests);
     test_step.dependOn(&run_execution_tests.step);
+
+    const run_execution_fixture_tests = b.addRunArtifact(execution_fixture_tests);
+    const execution_fixture_step = b.step("test-execution", "Run pinned execution fixture tests");
+    execution_fixture_step.dependOn(&run_execution_fixture_tests.step);
     test_step.dependOn(&run_tests_ssz.step);
     test_step.dependOn(&run_tests_merkle.step);
     test_step.dependOn(&run_fulu_tests.step);
