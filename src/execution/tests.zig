@@ -10,6 +10,103 @@ test {
     _ = @import("trie_test.zig");
 }
 
+// Account and storage updates must change the secure state commitment.
+test "execution state creates updates and deletes accounts and storage" {
+    var state = execution.state.State.init(testing.allocator);
+    defer state.deinit();
+    const empty_root = try state.stateRoot();
+    try testing.expectEqualSlices(u8, &execution.state.EMPTY_STORAGE_ROOT, &empty_root);
+
+    const address = [_]u8{0x11} ** 20;
+    try testing.expect((try state.getAccount(address)) == null);
+    try testing.expectEqual(@as(u64, 0), state.getNonce(address));
+    try testing.expectEqual(@as(u256, 0), state.getBalance(address));
+    try testing.expectEqual(@as(u256, 0), state.getStorage(address, 3));
+    try testing.expectEqualSlices(u8, "", state.getCode(address));
+
+    try state.createAccount(address);
+    const created = try state.stateRoot();
+    try testing.expect(!std.mem.eql(u8, &created, &empty_root));
+    const account = (try state.getAccount(address)).?;
+    try testing.expectEqual(@as(u64, 0), account.nonce);
+    try testing.expectEqual(@as(u256, 0), account.balance);
+    try testing.expectEqualSlices(u8, &execution.state.EMPTY_STORAGE_ROOT, &account.storage_root);
+    try testing.expectEqualSlices(u8, &execution.state.EMPTY_CODE_HASH, &account.code_hash);
+
+    try state.setNonce(address, std.math.maxInt(u64));
+    try state.setBalance(address, std.math.maxInt(u256));
+    const updated = try state.stateRoot();
+    try testing.expect(!std.mem.eql(u8, &updated, &created));
+    try testing.expectEqual(std.math.maxInt(u64), state.getNonce(address));
+    try testing.expectEqual(std.math.maxInt(u256), state.getBalance(address));
+
+    const max_slot = std.math.maxInt(u256);
+    const max_value = std.math.maxInt(u256);
+    try state.setStorage(address, 0, 0x1234);
+    try state.setStorage(address, max_slot, max_value);
+    const with_storage = try state.stateRoot();
+    try testing.expect(!std.mem.eql(u8, &with_storage, &updated));
+    try testing.expectEqual(@as(u256, 0x1234), state.getStorage(address, 0));
+    try testing.expectEqual(max_value, state.getStorage(address, max_slot));
+    try state.setStorage(address, 0, 0);
+    try state.setStorage(address, max_slot, 0);
+    try testing.expectEqual(@as(u256, 0), state.getStorage(address, 0));
+    try testing.expectEqual(@as(u256, 0), state.getStorage(address, max_slot));
+    try testing.expectEqualSlices(u8, &updated, &(try state.stateRoot()));
+
+    const code_hash = try state.setCode(address, "contract bytecode");
+    try testing.expectEqualSlices(u8, "contract bytecode", state.getCode(address));
+    const with_code = try state.getAccount(address);
+    try testing.expectEqualSlices(u8, &code_hash, &with_code.?.code_hash);
+
+    try state.deleteAccount(address);
+    try testing.expect((try state.getAccount(address)) == null);
+    try testing.expectEqualSlices(u8, &empty_root, &(try state.stateRoot()));
+}
+
+// Nested journal snapshots restore roots, and committing an inner snapshot keeps parent history.
+test "execution state snapshots revert and commit in LIFO order" {
+    var state = execution.state.State.init(testing.allocator);
+    defer state.deinit();
+    const address = [_]u8{0x22} ** 20;
+    const empty_root = try state.stateRoot();
+
+    const outer = try state.snapshot();
+    try state.setBalance(address, 10);
+    const outer_root = try state.stateRoot();
+    const inner = try state.snapshot();
+    try testing.expectError(error.InvalidSnapshot, state.commit(outer));
+    try state.setStorage(address, 1, 2);
+    _ = try state.setCode(address, "nested code");
+    try state.revert(inner);
+    try testing.expectEqualSlices(u8, &outer_root, &(try state.stateRoot()));
+    try state.revert(outer);
+    try testing.expectEqualSlices(u8, &empty_root, &(try state.stateRoot()));
+
+    const parent_commit = try state.snapshot();
+    try state.setNonce(address, 4);
+    const child_commit = try state.snapshot();
+    try state.setBalance(address, 6);
+    try state.setStorage(address, 9, 10);
+    _ = try state.setCode(address, "committed code");
+    try state.commit(child_commit);
+    const committed_root = try state.stateRoot();
+    try state.revert(parent_commit);
+    try testing.expectEqualSlices(u8, &empty_root, &(try state.stateRoot()));
+
+    try state.setNonce(address, 4);
+    try state.setBalance(address, 6);
+    try state.setStorage(address, 9, 10);
+    _ = try state.setCode(address, "committed code");
+    const before_delete = try state.stateRoot();
+    const delete_snapshot = try state.snapshot();
+    try state.deleteAccount(address);
+    try testing.expectEqualSlices(u8, &empty_root, &(try state.stateRoot()));
+    try state.revert(delete_snapshot);
+    try testing.expectEqualSlices(u8, &before_delete, &(try state.stateRoot()));
+    try testing.expectEqualSlices(u8, &committed_root, &(try state.stateRoot()));
+}
+
 // Confirms blooms use only log addresses and topics, and combine receipt logs.
 test "receipt blooms include addresses and topics but not data" {
     const logs = [_]execution.Log{.{ .address = .{0x11} ** 20, .topics = &.{.{0x22} ** 32}, .data = "ignored" }};
