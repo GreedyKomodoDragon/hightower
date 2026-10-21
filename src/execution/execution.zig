@@ -4,12 +4,13 @@
 // the root, while bloom bit order follows the Keccak-derived bit positions.
 // Typed envelopes prefix their RLP payload with one type byte. Blocks wrap
 // typed transactions as RLP strings and keep legacy lists inline. Fulu uses
-// Prague's 21-field header, empty ommers, and withdrawals. These codecs and
-// bloom helpers do not apply transactions or validate state.
+// Prague's 21-field header, empty ommers, and withdrawals. Transaction sender
+// recovery validates signature bounds and chain IDs but does not execute state.
 //
 // transaction bytes -> block transaction list -> header transactions root
 const std = @import("std");
 const rlp = @import("rlp");
+const tx_crypto = @import("crypto.zig");
 const encoding = rlp.encoding;
 const decode = rlp.decode;
 pub const bloom_filter = @import("bloom_filter");
@@ -353,4 +354,68 @@ pub fn parse(comptime T: type, allocator: std.mem.Allocator, bytes: []const u8) 
         break :blk try fromValue(T, a, value);
     };
     return .{ .value = result, .arena = arena };
+}
+
+const SigningDetails = struct { hash: Hash, parity: u8, r: u256, s: u256 };
+
+/// EXPERIMENTAL: Recovers a sender after checking its chain ID; fixture coverage is limited and this is not audited.
+pub fn recoverSender(allocator: std.mem.Allocator, transaction: Transaction, expected_chain_id: u256) !Address {
+    const signature = try transactionSigningDetails(allocator, transaction, expected_chain_id);
+    return tx_crypto.recoverAddress(signature.hash, signature.r, signature.s, signature.parity);
+}
+
+/// Builds the fork-independent signing hash and signature fields for one supported transaction envelope.
+fn transactionSigningDetails(allocator: std.mem.Allocator, transaction: Transaction, expected_chain_id: u256) !SigningDetails {
+    return switch (transaction) {
+        .legacy => |tx| blk: {
+            const parity: u8 = if (tx.v == 27 or tx.v == 28) blk2: {
+                break :blk2 @intCast(tx.v - 27);
+            } else if (tx.v >= 35) blk2: {
+                const encoded_chain_id = (tx.v - 35) / 2;
+                if (encoded_chain_id != expected_chain_id) return error.ChainIdMismatch;
+                break :blk2 @intCast((tx.v - 35) % 2);
+            } else return error.InvalidV;
+
+            const hash = if (tx.v == 27 or tx.v == 28)
+                try hashRlp(allocator, null, .{ tx.nonce, tx.gas_price, tx.gas_limit, tx.to, tx.value, tx.data })
+            else
+                try hashRlp(allocator, null, .{ tx.nonce, tx.gas_price, tx.gas_limit, tx.to, tx.value, tx.data, (tx.v - 35) / 2, @as(u8, 0), @as(u8, 0) });
+            break :blk .{ .hash = hash, .parity = parity, .r = tx.r, .s = tx.s };
+        },
+        .access_list => |tx| typedDetails(allocator, expected_chain_id, 1, tx.chain_id, tx.y_parity, tx.r, tx.s, .{
+            tx.chain_id, tx.nonce, tx.gas_price, tx.gas_limit, tx.to, tx.value, tx.data, tx.access_list,
+        }),
+        .dynamic_fee => |tx| typedDetails(allocator, expected_chain_id, 2, tx.chain_id, tx.y_parity, tx.r, tx.s, .{
+            tx.chain_id, tx.nonce, tx.max_priority_fee_per_gas, tx.max_fee_per_gas, tx.gas_limit, tx.to, tx.value, tx.data, tx.access_list,
+        }),
+        .blob => |tx| typedDetails(allocator, expected_chain_id, 3, tx.chain_id, tx.y_parity, tx.r, tx.s, .{
+            tx.chain_id, tx.nonce, tx.max_priority_fee_per_gas, tx.max_fee_per_gas, tx.gas_limit, tx.to, tx.value, tx.data, tx.access_list, tx.max_fee_per_blob_gas, tx.blob_versioned_hashes,
+        }),
+        .set_code => |tx| typedDetails(allocator, expected_chain_id, 4, tx.chain_id, tx.y_parity, tx.r, tx.s, .{
+            tx.chain_id, tx.nonce, tx.max_priority_fee_per_gas, tx.max_fee_per_gas, tx.gas_limit, tx.destination, tx.value, tx.data, tx.access_list, tx.authorization_list,
+        }),
+    };
+}
+
+/// Validates typed-envelope signature metadata and hashes its unsigned RLP payload.
+fn typedDetails(allocator: std.mem.Allocator, expected_chain_id: u256, envelope: u8, chain_id: u256, parity: u8, r: u256, s: u256, payload: anytype) !SigningDetails {
+    if (chain_id != expected_chain_id) return error.ChainIdMismatch;
+    if (parity > 1) return error.InvalidYParity;
+    return .{ .hash = try hashRlp(allocator, envelope, payload), .parity = parity, .r = r, .s = s };
+}
+
+/// Hashes an RLP signing payload, prepending its EIP-2718 envelope byte when present.
+fn hashRlp(allocator: std.mem.Allocator, envelope: ?u8, payload: anytype) !Hash {
+    const encoded = try encode(allocator, payload);
+    defer allocator.free(encoded);
+    var hash: Hash = undefined;
+    if (envelope) |tag| {
+        var hasher = std.crypto.hash.sha3.Keccak256.init(.{});
+        hasher.update(&.{tag});
+        hasher.update(encoded);
+        hasher.final(&hash);
+    } else {
+        std.crypto.hash.sha3.Keccak256.hash(encoded, &hash, .{});
+    }
+    return hash;
 }

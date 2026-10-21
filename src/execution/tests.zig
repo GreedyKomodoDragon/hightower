@@ -10,6 +10,215 @@ test {
     _ = @import("trie_test.zig");
 }
 
+/// Recovers and checks the oracle sender from one pinned transaction fixture.
+fn expectFixtureSender(json_bytes: []const u8, fork: []const u8, expected_chain_id: u256) !void {
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json_bytes, .{});
+    defer parsed.deinit();
+    const test_case = parsed.value.object.values()[0];
+    const hex = test_case.object.get("txbytes").?.string;
+    const raw = try testing.allocator.alloc(u8, (hex.len - 2) / 2);
+    defer testing.allocator.free(raw);
+    _ = try std.fmt.hexToBytes(raw, hex[2..]);
+
+    var transaction = try execution.parse(execution.Transaction, testing.allocator, raw);
+    defer transaction.deinit();
+    const sender = try execution.recoverSender(testing.allocator, transaction.value, expected_chain_id);
+    const expected_hex = test_case.object.get("result").?.object.get(fork).?.object.get("sender").?.string;
+    var expected: execution.Address = undefined;
+    _ = try std.fmt.hexToBytes(&expected, expected_hex[2..]);
+    try testing.expectEqualSlices(u8, &expected, &sender);
+}
+
+/// Independently assembles typed signing payloads for deterministic recovery tests.
+fn expectedSigningHash(allocator: std.mem.Allocator, transaction: execution.Transaction) ![32]u8 {
+    const tag: ?u8 = switch (transaction) {
+        .legacy => null,
+        .access_list => 1,
+        .dynamic_fee => 2,
+        .blob => 3,
+        .set_code => 4,
+    };
+    const payload = switch (transaction) {
+        .legacy => |tx| try execution.encode(allocator, .{ tx.nonce, tx.gas_price, tx.gas_limit, tx.to, tx.value, tx.data }),
+        .access_list => |tx| try execution.encode(allocator, .{ tx.chain_id, tx.nonce, tx.gas_price, tx.gas_limit, tx.to, tx.value, tx.data, tx.access_list }),
+        .dynamic_fee => |tx| try execution.encode(allocator, .{ tx.chain_id, tx.nonce, tx.max_priority_fee_per_gas, tx.max_fee_per_gas, tx.gas_limit, tx.to, tx.value, tx.data, tx.access_list }),
+        .blob => |tx| try execution.encode(allocator, .{ tx.chain_id, tx.nonce, tx.max_priority_fee_per_gas, tx.max_fee_per_gas, tx.gas_limit, tx.to, tx.value, tx.data, tx.access_list, tx.max_fee_per_blob_gas, tx.blob_versioned_hashes }),
+        .set_code => |tx| try execution.encode(allocator, .{ tx.chain_id, tx.nonce, tx.max_priority_fee_per_gas, tx.max_fee_per_gas, tx.gas_limit, tx.destination, tx.value, tx.data, tx.access_list, tx.authorization_list }),
+    };
+    defer allocator.free(payload);
+    var hash: [32]u8 = undefined;
+    if (tag) |typed_tag| {
+        var hasher = std.crypto.hash.sha3.Keccak256.init(.{});
+        hasher.update(&.{typed_tag});
+        hasher.update(payload);
+        hasher.final(&hash);
+    } else {
+        std.crypto.hash.sha3.Keccak256.hash(payload, &hash, .{});
+    }
+    return hash;
+}
+
+/// Signs a typed test transaction with private key 1 and checks the recovered known address.
+fn expectSyntheticSender(allocator: std.mem.Allocator, transaction: *execution.Transaction) !void {
+    const hash = try expectedSigningHash(allocator, transaction.*);
+    const Scheme = std.crypto.sign.ecdsa.Ecdsa(std.crypto.ecc.Secp256k1, std.crypto.hash.sha3.Keccak256);
+    var secret_key = [_]u8{0} ** 32;
+    secret_key[31] = 1;
+    const key_pair = try Scheme.KeyPair.fromSecretKey(.{ .bytes = secret_key });
+    const signature = try key_pair.signPrehashed(hash, null);
+    const r = std.mem.readInt(u256, &signature.r, .big);
+    var s = std.mem.readInt(u256, &signature.s, .big);
+    const order = std.crypto.ecc.Secp256k1.scalar.field_order;
+    if (s > order / 2) s = order - s;
+    switch (transaction.*) {
+        .legacy => |*tx| {
+            tx.r = r;
+            tx.s = s;
+        },
+        .access_list => |*tx| {
+            tx.r = r;
+            tx.s = s;
+        },
+        .dynamic_fee => |*tx| {
+            tx.r = r;
+            tx.s = s;
+        },
+        .blob => |*tx| {
+            tx.r = r;
+            tx.s = s;
+        },
+        .set_code => |*tx| {
+            tx.r = r;
+            tx.s = s;
+        },
+    }
+    const expected = [_]u8{ 0x7e, 0x5f, 0x45, 0x52, 0x09, 0x1a, 0x69, 0x12, 0x5d, 0x5d, 0xfc, 0xb7, 0xb8, 0xc2, 0x65, 0x90, 0x29, 0x39, 0x5b, 0xdf };
+    var recovered = false;
+    for (0..2) |parity| {
+        switch (transaction.*) {
+            .legacy => |*tx| tx.v = 27 + parity,
+            .access_list => |*tx| tx.y_parity = @intCast(parity),
+            .dynamic_fee => |*tx| tx.y_parity = @intCast(parity),
+            .blob => |*tx| tx.y_parity = @intCast(parity),
+            .set_code => |*tx| tx.y_parity = @intCast(parity),
+        }
+        const address = try execution.recoverSender(allocator, transaction.*, 1);
+        if (std.mem.eql(u8, &address, &expected)) recovered = true;
+    }
+    try testing.expect(recovered);
+}
+
+test "sender recovery matches pinned legacy and typed transaction fixtures" {
+    try expectFixtureSender(@embedFile("fixtures/tx_simple_type_0_shanghai.json"), "Shanghai", 1);
+    try expectFixtureSender(@embedFile("fixtures/accessListStorage32Bytes.json"), "Cancun", 1);
+}
+
+test "sender recovery hashes dynamic fee blob and set-code typed payloads" {
+    var dynamic = execution.Transaction{ .dynamic_fee = .{
+        .chain_id = 1,
+        .nonce = 2,
+        .max_priority_fee_per_gas = 3,
+        .max_fee_per_gas = 4,
+        .gas_limit = 5,
+        .to = null,
+        .value = 6,
+        .data = "dynamic",
+        .access_list = &.{},
+        .y_parity = 0,
+        .r = 1,
+        .s = 1,
+    } };
+    var blob = execution.Transaction{ .blob = .{
+        .chain_id = 1,
+        .nonce = 2,
+        .max_priority_fee_per_gas = 3,
+        .max_fee_per_gas = 4,
+        .gas_limit = 5,
+        .to = [_]u8{0x11} ** 20,
+        .value = 6,
+        .data = "blob",
+        .access_list = &.{},
+        .max_fee_per_blob_gas = 7,
+        .blob_versioned_hashes = &.{},
+        .y_parity = 0,
+        .r = 1,
+        .s = 1,
+    } };
+    var set_code = execution.Transaction{ .set_code = .{
+        .chain_id = 1,
+        .nonce = 2,
+        .max_priority_fee_per_gas = 3,
+        .max_fee_per_gas = 4,
+        .gas_limit = 5,
+        .destination = [_]u8{0x22} ** 20,
+        .value = 6,
+        .data = "set-code",
+        .access_list = &.{},
+        .authorization_list = &.{},
+        .y_parity = 0,
+        .r = 1,
+        .s = 1,
+    } };
+    try expectSyntheticSender(testing.allocator, &dynamic);
+    try expectSyntheticSender(testing.allocator, &blob);
+    try expectSyntheticSender(testing.allocator, &set_code);
+}
+
+test "sender recovery accepts replay-unprotected legacy transactions" {
+    var legacy = execution.Transaction{ .legacy = .{
+        .nonce = 1,
+        .gas_price = 2,
+        .gas_limit = 21_000,
+        .to = [_]u8{0x11} ** 20,
+        .value = 3,
+        .data = "legacy",
+        .v = 27,
+        .r = 1,
+        .s = 1,
+    } };
+    try expectSyntheticSender(testing.allocator, &legacy);
+}
+
+test "sender recovery rejects invalid v parity chain ID and high s" {
+    var legacy_json = try std.json.parseFromSlice(std.json.Value, testing.allocator, @embedFile("fixtures/tx_simple_type_0_shanghai.json"), .{});
+    defer legacy_json.deinit();
+    const legacy_case = legacy_json.value.object.values()[0];
+    const legacy_hex = legacy_case.object.get("txbytes").?.string;
+    const legacy_raw = try testing.allocator.alloc(u8, (legacy_hex.len - 2) / 2);
+    defer testing.allocator.free(legacy_raw);
+    _ = try std.fmt.hexToBytes(legacy_raw, legacy_hex[2..]);
+    var legacy = try execution.parse(execution.Transaction, testing.allocator, legacy_raw);
+    defer legacy.deinit();
+    legacy.value.legacy.v = 34;
+    try testing.expectError(error.InvalidV, execution.recoverSender(testing.allocator, legacy.value, 1));
+    legacy.value.legacy.v = 38;
+    try testing.expectError(error.ChainIdMismatch, execution.recoverSender(testing.allocator, legacy.value, 2));
+    const curve_order = std.crypto.ecc.Secp256k1.scalar.field_order;
+    legacy.value.legacy.r = 0;
+    try testing.expectError(error.InvalidSignature, execution.recoverSender(testing.allocator, legacy.value, 1));
+    legacy.value.legacy.r = curve_order;
+    try testing.expectError(error.InvalidSignature, execution.recoverSender(testing.allocator, legacy.value, 1));
+    legacy.value.legacy.r = 1;
+    legacy.value.legacy.s = 0;
+    try testing.expectError(error.InvalidSignature, execution.recoverSender(testing.allocator, legacy.value, 1));
+    legacy.value.legacy.s = curve_order - 1;
+    try testing.expectError(error.HighS, execution.recoverSender(testing.allocator, legacy.value, 1));
+
+    var typed_json = try std.json.parseFromSlice(std.json.Value, testing.allocator, @embedFile("fixtures/accessListStorage32Bytes.json"), .{});
+    defer typed_json.deinit();
+    const typed_case = typed_json.value.object.values()[0];
+    const typed_hex = typed_case.object.get("txbytes").?.string;
+    const typed_raw = try testing.allocator.alloc(u8, (typed_hex.len - 2) / 2);
+    defer testing.allocator.free(typed_raw);
+    _ = try std.fmt.hexToBytes(typed_raw, typed_hex[2..]);
+    var typed = try execution.parse(execution.Transaction, testing.allocator, typed_raw);
+    defer typed.deinit();
+    typed.value.access_list.y_parity = 2;
+    try testing.expectError(error.InvalidYParity, execution.recoverSender(testing.allocator, typed.value, 1));
+    typed.value.access_list.y_parity = 1;
+    try testing.expectError(error.ChainIdMismatch, execution.recoverSender(testing.allocator, typed.value, 2));
+}
+
 // Account and storage updates must change the secure state commitment.
 test "execution state creates updates and deletes accounts and storage" {
     var state = execution.state.State.init(testing.allocator);
