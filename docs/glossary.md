@@ -91,6 +91,8 @@ Chain:      [Block 0] ───────────────────�
 | SSZ | Ethereum consensus's encoding and hashing format for structured data. |
 | Signing domain | A 32-byte value that binds a signature to an operation type, network, and selected fork version. |
 | Signing root | The SSZ hash of an object's root together with its signing domain; this is the message verified by consensus BLS signatures. |
+| ECDSA | Elliptic-curve signing used by Ethereum execution transactions; a transaction's signature and signing hash recover the sender's public key. |
+| secp256k1 | The elliptic curve Ethereum execution transactions use for ECDSA signatures. |
 | Fork version | Four bytes identifying a network's consensus rules at a particular upgrade. |
 | Genesis validators root | The SSZ root of the initial validator registry, used to distinguish chains in signing domains. |
 | ForkData | The SSZ container pairing a fork version with the genesis validators root. |
