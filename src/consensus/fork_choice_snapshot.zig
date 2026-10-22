@@ -345,7 +345,6 @@ test "forked chain restores head votes and post-state roots" {
     const io = std.testing.io;
     const fixtures = @import("fixture_runner.zig");
     const engine_api = @import("execution_engine.zig");
-    const api = @import("beacon_api.zig");
     const state = try fixtures.decodeState(allocator, @embedFile("fixtures/fulu_fork_choice/basic/anchor_state.ssz_snappy"));
     defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
     const anchor_bytes = try fixtures.decode(allocator, @embedFile("fixtures/fulu_fork_choice/basic/anchor_block.ssz_snappy"));
@@ -391,22 +390,4 @@ test "forked chain restores head votes and post-state roots" {
     while (votes.next()) |entry| try std.testing.expectEqual(entry.value_ptr.*, restored.latest_messages.get(entry.key_ptr.*).?);
     var states = store.block_states.iterator();
     while (states.next()) |entry| try std.testing.expectEqual(try merkle.HashTreeRoot(allocator, entry.value_ptr.*), try merkle.HashTreeRoot(allocator, restored.block_states.get(entry.key_ptr.*).?));
-    const head = try fork_choice.getHead(&restored);
-    var roots = restored.blocks.keyIterator();
-    while (roots.next()) |root| {
-        if (std.mem.eql(u8, root, &head) or std.mem.eql(u8, root, &restored.finalized_checkpoint.root)) continue;
-        const path = try std.fmt.allocPrint(allocator, "/eth/v1/beacon/blocks/0x{s}/root", .{std.fmt.bytesToHex(root.*, .lower)});
-        defer allocator.free(path);
-        const response = try api.dispatch(allocator, &restored, .{ .genesis_fork_version = .{ 0, 0, 0, 0 } }, path);
-        defer response.deinit(allocator);
-        try std.testing.expectEqual(std.http.Status.ok, response.status);
-        const branch_state = restored.block_states.get(root.*).?;
-        const state_root = try merkle.HashTreeRoot(allocator, branch_state);
-        const state_path = try std.fmt.allocPrint(allocator, "/eth/v1/beacon/states/0x{s}/root", .{std.fmt.bytesToHex(state_root, .lower)});
-        defer allocator.free(state_path);
-        const state_response = try api.dispatch(allocator, &restored, .{ .genesis_fork_version = .{ 0, 0, 0, 0 } }, state_path);
-        defer state_response.deinit(allocator);
-        try std.testing.expectEqual(std.http.Status.ok, state_response.status);
-        break;
-    }
 }

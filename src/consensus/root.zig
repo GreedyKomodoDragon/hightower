@@ -3,8 +3,7 @@
 // at boundaries; stateTransition applies a signed block and checks its claimed
 // post-state root. The caller supplies an execution engine to judge the block's
 // execution payload, and discards the mutable state if a transition fails.
-// Fork choice selects the head; snapshots preserve its state across restarts,
-// and the read-only Beacon API exposes a stable view supplied by the caller.
+// Fork choice selects the head; snapshots preserve its state across restarts.
 pub const stateTransition = @import("block.zig").stateTransition;
 pub const processSlots = @import("transition.zig").processSlots;
 pub const processSlot = @import("transition.zig").processSlot;
@@ -22,9 +21,7 @@ pub const getForkChoiceWeight = @import("fork_choice.zig").getWeight;
 pub const getForkChoiceHead = @import("fork_choice.zig").getHead;
 pub const saveForkChoiceStore = @import("fork_choice_snapshot.zig").saveForkChoiceStore;
 pub const loadForkChoiceStore = @import("fork_choice_snapshot.zig").loadForkChoiceStore;
-pub const BeaconApiMetadata = @import("beacon_api.zig").Metadata;
-pub const serveBeaconApi = @import("beacon_api.zig").serve;
-pub const dispatchBeaconApi = @import("beacon_api.zig").dispatch;
+pub const fixtureRunner = @import("fixture_runner.zig");
 pub const DataAvailabilityCheck = @import("fork_choice.zig").DataAvailabilityCheck;
 pub const computeWeakSubjectivityPeriod = @import("helpers.zig").computeWeakSubjectivityPeriod;
 pub const isWithinWeakSubjectivityPeriod = @import("fork_choice.zig").isWithinWeakSubjectivityPeriod;

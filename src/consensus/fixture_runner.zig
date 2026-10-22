@@ -1,7 +1,19 @@
+// Pinned consensus fixtures encode trusted starting states and blocks plus
+// later transitions. Fork-choice blocks are imported in slot order so parent
+// roots exist before children; the fixed test corpus bounds fixture input.
 const std = @import("std");
 const fulu = @import("fulu");
 const ssz = @import("ssz");
 const snappy = @import("snappy.zig");
+
+pub const fork_choice_anchor_state = @embedFile("fixtures/fulu_fork_choice/basic/anchor_state.ssz_snappy");
+pub const fork_choice_anchor_block = @embedFile("fixtures/fulu_fork_choice/basic/anchor_block.ssz_snappy");
+pub const fork_choice_heavier_blocks = [_][]const u8{
+    @embedFile("fixtures/fulu_fork_choice/heavier_branch/block_0xbc8706b8945c619414fb557decb7cb893c5e240ea95ec8a0e9d97c6f56532cff.ssz_snappy"),
+    @embedFile("fixtures/fulu_fork_choice/heavier_branch/block_0xc44a335c2ae08ad57a68b81affd6b22d79427b4c755214eebcc74351d2b29347.ssz_snappy"),
+    @embedFile("fixtures/fulu_fork_choice/heavier_branch/block_0x1db47324a6822813b02b053d39930e385d1fbfe474e4ad3d0b4ee89748c857b8.ssz_snappy"),
+    @embedFile("fixtures/fulu_fork_choice/heavier_branch/block_0x0ae189fc2d624f5c04b4f1075245ba3a0b9aaa0bfeacacc9df6e7d58a9f035c7.ssz_snappy"),
+};
 
 pub const Kind = enum { slots, epoch_processing, block };
 pub const Expectation = enum { post_state, reject };

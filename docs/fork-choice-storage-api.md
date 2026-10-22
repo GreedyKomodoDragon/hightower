@@ -25,7 +25,8 @@ The standalone read-only service accepts a caller-supplied stable store plus
 sync status and genesis fork version. The selected response shapes follow the
 [Beacon API schemas at revision
 `79b9b05e`](https://github.com/ethereum/beacon-APIs/tree/79b9b05e354da4f80d8f18879871af6f0068108d).
-It implements:
+Import it as the `hightower_api` Zig module or through `hightower.api`. It
+depends on the consensus module and implements:
 
 | Endpoint | Returned data |
 | --- | --- |
