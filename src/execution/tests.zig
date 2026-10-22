@@ -113,6 +113,56 @@ test "sender recovery matches pinned legacy and typed transaction fixtures" {
     try expectFixtureSender(@embedFile("fixtures/accessListStorage32Bytes.json"), "Cancun", 1);
 }
 
+const SenderVector = struct {
+    name: []const u8,
+    source: []const u8,
+    transaction_type: u8,
+    chain_id: u256,
+    y_parity: u8,
+    txbytes: []const u8,
+    sender: []const u8,
+};
+
+test "sender recovery matches pinned type 2 3 and 4 vectors and exact parity" {
+    var vectors = try std.json.parseFromSlice([]SenderVector, testing.allocator, @embedFile("fixtures/sender_recovery_vectors.json"), .{});
+    defer vectors.deinit();
+    try testing.expectEqual(@as(usize, 3), vectors.value.len);
+    for (vectors.value, 2..) |vector, expected_type| {
+        try testing.expectEqual(@as(u8, @intCast(expected_type)), vector.transaction_type);
+        try testing.expect(std.mem.startsWith(u8, vector.txbytes, "0x"));
+        const raw = try testing.allocator.alloc(u8, (vector.txbytes.len - 2) / 2);
+        defer testing.allocator.free(raw);
+        _ = try std.fmt.hexToBytes(raw, vector.txbytes[2..]);
+        try testing.expectEqual(vector.transaction_type, raw[0]);
+
+        var transaction = try execution.parse(execution.Transaction, testing.allocator, raw);
+        defer transaction.deinit();
+        const parity = switch (transaction.value) {
+            .dynamic_fee => |tx| tx.y_parity,
+            .blob => |tx| tx.y_parity,
+            .set_code => |tx| tx.y_parity,
+            else => return error.UnexpectedTransactionType,
+        };
+        try testing.expectEqual(vector.y_parity, parity);
+
+        var expected: execution.Address = undefined;
+        try testing.expect(std.mem.startsWith(u8, vector.sender, "0x"));
+        _ = try std.fmt.hexToBytes(&expected, vector.sender[2..]);
+        const sender = try execution.recoverSender(testing.allocator, transaction.value, vector.chain_id);
+        try testing.expectEqualSlices(u8, &expected, &sender);
+        try testing.expectError(error.ChainIdMismatch, execution.recoverSender(testing.allocator, transaction.value, vector.chain_id + 1));
+
+        switch (transaction.value) {
+            .dynamic_fee => |*tx| tx.y_parity ^= 1,
+            .blob => |*tx| tx.y_parity ^= 1,
+            .set_code => |*tx| tx.y_parity ^= 1,
+            else => unreachable,
+        }
+        const other_sender = try execution.recoverSender(testing.allocator, transaction.value, vector.chain_id);
+        try testing.expect(!std.mem.eql(u8, &expected, &other_sender));
+    }
+}
+
 test "sender recovery hashes dynamic fee blob and set-code typed payloads" {
     var dynamic = execution.Transaction{ .dynamic_fee = .{
         .chain_id = 1,
