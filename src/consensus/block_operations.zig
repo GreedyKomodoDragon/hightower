@@ -184,6 +184,7 @@ pub fn getAttestingIndices(allocator: std.mem.Allocator, state: *const fulu.Beac
     if (committees.len == 0) return error.InvalidAttestation;
     var attesting = std.ArrayList(fulu.ValidatorIndex).empty;
     errdefer attesting.deinit(allocator);
+    // Aggregation bits concatenate the selected committees in committee-index order.
     var offset: usize = 0;
     for (committees) |committee_index| {
         const committee = try helpers.getBeaconCommittee(allocator, state, attestation.data.slot, committee_index);
@@ -200,6 +201,7 @@ pub fn getAttestingIndices(allocator: std.mem.Allocator, state: *const fulu.Beac
         offset += committee.len;
     }
     if (offset != attestation.aggregation_bits.data.len) return error.InvalidAttestation;
+    // Indexed attestations require strictly increasing validator indices for signature checks.
     std.mem.sort(fulu.ValidatorIndex, attesting.items, {}, std.sort.asc(fulu.ValidatorIndex));
     for (attesting.items, 0..) |index, i| {
         if (index >= state.validators.data.len or (i != 0 and attesting.items[i - 1] == index)) return error.InvalidAttestation;
