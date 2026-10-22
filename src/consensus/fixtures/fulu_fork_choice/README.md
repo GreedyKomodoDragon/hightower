@@ -1,5 +1,28 @@
-# Selected Fulu fork-choice fixture
+# Selected Fulu fork-choice fixtures
 
-`basic/anchor_state.ssz_snappy` and `basic/anchor_block.ssz_snappy` are copied from the minimal Fulu `fork_choice/on_block/pyspec_tests/basic` case in consensus-specs v1.6.1. The test checks the official anchor root and initial store fields before the fixture's later block events.
+`basic/` is the minimal Fulu `on_block/basic` anchor from consensus-spec-tests v1.6.1. `availability/` is `on_block_peerdas__not_available` from the same release; the signed block is also used in the paired available case. Availability is injected at the fork-choice boundary.
 
-`availability/` contains the anchor and block from `on_block_peerdas__not_available`. The signed block is unchanged in the paired `on_block_peerdas__ok` case; tests inject availability directly to cover both outcomes without storing sidecar state.
+`bad_parent/`, `heavier_branch/`, and `slashing/` are from [consensus-spec-tests commit `bc5c1a7fb2a8871aaffd4b16ee4dd9c72bb81908`](https://github.com/ethereum/consensus-spec-tests/tree/bc5c1a7fb2a8871aaffd4b16ee4dd9c72bb81908/tests/minimal/fulu/fork_choice). They correspond to `on_block/on_block_bad_parent_root`, `get_head/shorter_chain_but_heavier_weight`, and `get_head/discard_equivocations_on_attester_slashing`. All three share the byte-identical anchor in `basic/`, so it is stored once. The YAML files preserve the official event order and expected results; the Zig tests replay the selected events directly.
+
+SHA-256 checksums (paths relative to this directory):
+
+```
+e593071bc54be34e7e3a014eef5e6d763d3d757573b92b4f55e856bd7760708d  basic/anchor_block.ssz_snappy
+84d8397d165659d520a34601fd726970a4b0e1d984d9532cc4283a0c37767cc6  basic/anchor_state.ssz_snappy
+e593071bc54be34e7e3a014eef5e6d763d3d757573b92b4f55e856bd7760708d  availability/anchor_block.ssz_snappy
+84d8397d165659d520a34601fd726970a4b0e1d984d9532cc4283a0c37767cc6  availability/anchor_state.ssz_snappy
+90e01d57de2df0c55f4ad87131ffb2d0174d8cecc82f844757acf338a9ca294d  availability/block.ssz_snappy
+86328300bb84863c3ffef2d78567ba8e933f2d251f11fd3183217a39b843879a  bad_parent/block_0xa5667dda587576392d5ce9396751b4761abe367219f379b58333d0017eda3970.ssz_snappy
+48b6693aa1af1972370a7aff068787c034531e50e5416131c2d6d6dd9a708385  bad_parent/steps.yaml
+586f86abe470cbe9124203c15e9da1bb51c193bbece463842de9ed8d00097bd9  heavier_branch/attestation_0xfd7837e56b89c2042febfa3e790e8e4f12177170bcb7a6abcfc08b37474f20ba.ssz_snappy
+a2b50161e0b67507ef87a3d8255c8dca3e55781d56fdd0cbb6b71a5e5e17f203  heavier_branch/block_0x0ae189fc2d624f5c04b4f1075245ba3a0b9aaa0bfeacacc9df6e7d58a9f035c7.ssz_snappy
+9f3d64a8a38a0b12d78b8e70158136cc5a8c4a4c1fb54af4dedc322e6c28e138  heavier_branch/block_0x1db47324a6822813b02b053d39930e385d1fbfe474e4ad3d0b4ee89748c857b8.ssz_snappy
+8fbdb097cee2aa86f44e4a229627afd4b900b4e31eff6dea2d6096f9226e603e  heavier_branch/block_0xbc8706b8945c619414fb557decb7cb893c5e240ea95ec8a0e9d97c6f56532cff.ssz_snappy
+9cd03f07b06174d90a408375cd1b86ba3a2607b675d3a553aa6a036c849e38e8  heavier_branch/block_0xc44a335c2ae08ad57a68b81affd6b22d79427b4c755214eebcc74351d2b29347.ssz_snappy
+bf0d06b6a7d56ebe26afbd9da6e6779df16500af1672d918468bcff89eb604e0  heavier_branch/steps.yaml
+28d7e98482cdac96e90c9fafa34c6a30c34d24a21faa59dae8c4f448c60a4a20  slashing/attestation_0x5172be6898efefa589c2182765c8e7a74272ed2b0004d0577921a4808b364fcf.ssz_snappy
+e91715182cd911721dc3ff74bc67fe8e316120eeaff12c4cb2d702cdd4ea9167  slashing/attester_slashing_0x37f647afd2845d3e479b0f3a7fface55f4aca82464d477681094d1950e5923c5.ssz_snappy
+d6138b2864033ab7cad82bef52dec6b62875984defc1faf5433ae009ede06985  slashing/block_0x267dad33839d51d5cebd0f400aface00fb9852dc30bfd1f5eee92a2f655d91dc.ssz_snappy
+19ca6a95c56768bf91a33965aac2098e33cb144606b1a9a9c7b5151731f31eb1  slashing/block_0x2c1cbf2a02a84caf257b074dfac21f7b549b741fd815dcd29de52308a4cd477d.ssz_snappy
+ca242c6d934186fbae006f2e570fb465e45a6063fcb4e4b04c75a429dcaf6ef8  slashing/steps.yaml
+```
