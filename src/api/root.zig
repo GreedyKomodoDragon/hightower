@@ -31,6 +31,7 @@ pub const Response = struct {
 pub fn dispatch(allocator: std.mem.Allocator, store: ?*const consensus.ForkChoiceStore, metadata: Metadata, target: []const u8) !Response {
     if (target.len > 1024) return reply(allocator, .bad_request, "invalid request target");
     const path = target[0 .. std.mem.indexOfScalar(u8, target, '?') orelse target.len];
+    // shortcut: route matching scans each endpoint, use the router in https://github.com/GreedyKomodoDragon/hightower/issues/111 when implemented.
     if (std.mem.eql(u8, path, "/eth/v1/node/health")) {
         if (!metadata.ready or store == null) return reply(allocator, .service_unavailable, "service unavailable");
         return .{ .status = if (metadata.is_syncing) .partial_content else .ok, .body = try allocator.dupe(u8, "") };
