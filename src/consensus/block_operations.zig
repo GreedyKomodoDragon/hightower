@@ -78,7 +78,8 @@ pub fn processAttesterSlashing(allocator: std.mem.Allocator, state: *fulu.Beacon
     for (slashable.items) |index| try slashValidator(state, index);
 }
 
-fn validateIndexedAttestation(allocator: std.mem.Allocator, state: *const fulu.BeaconState, attestation: fulu.IndexedAttestation) !void {
+/// Validate sorted validator indices and the aggregate attester signature.
+pub fn validateIndexedAttestation(allocator: std.mem.Allocator, state: *const fulu.BeaconState, attestation: fulu.IndexedAttestation) !void {
     const indices = attestation.attesting_indices.data;
     if (indices.len == 0) return error.InvalidIndexedAttestation;
     var pubkeys = try allocator.alloc(fulu.BLSPubkey, indices.len);
@@ -93,7 +94,8 @@ fn validateIndexedAttestation(allocator: std.mem.Allocator, state: *const fulu.B
     try bls.verifyAggregate(pubkeys, domains.computeSigningRoot(root, domain), attestation.signature);
 }
 
-fn isSlashableAttestationData(first: fulu.AttestationData, second: fulu.AttestationData) bool {
+/// Report whether two votes are a double vote or surround vote.
+pub fn isSlashableAttestationData(first: fulu.AttestationData, second: fulu.AttestationData) bool {
     if (first.target.epoch == second.target.epoch and !std.meta.eql(first, second)) return true;
     return (first.source.epoch < second.source.epoch and second.target.epoch < first.target.epoch) or
         (second.source.epoch < first.source.epoch and first.target.epoch < second.target.epoch);
@@ -118,6 +120,7 @@ fn slashValidator(state: *fulu.BeaconState, index: fulu.ValidatorIndex) !void {
     @constCast(state.balances.data)[proposer_index] = std.math.add(u64, state.balances.data[proposer_index], whistleblower_reward - proposer_reward) catch return error.BalanceOverflow;
 }
 
+/// Validate an included attestation and credit its participants and proposer.
 pub fn processAttestation(allocator: std.mem.Allocator, state: *fulu.BeaconState, attestation: fulu.Attestation) !void {
     const data = attestation.data;
     const current_epoch = helpers.getCurrentEpoch(state);
@@ -127,34 +130,10 @@ pub fn processAttestation(allocator: std.mem.Allocator, state: *fulu.BeaconState
         data.slot > state.slot or state.slot - data.slot < preset.MIN_ATTESTATION_INCLUSION_DELAY or state.slot - data.slot > helpers.SLOTS_PER_EPOCH)
         return error.InvalidAttestation;
 
-    const committees = try getCommitteeIndices(allocator, &attestation.committee_bits.data);
-    defer allocator.free(committees);
-    if (committees.len == 0) return error.InvalidAttestation;
-    var attesting = std.ArrayList(fulu.ValidatorIndex).empty;
-    defer attesting.deinit(allocator);
-    var offset: usize = 0;
-    for (committees) |committee_index| {
-        const committee = try helpers.getBeaconCommittee(allocator, state, data.slot, committee_index);
-        defer allocator.free(committee);
-        if (attestation.aggregation_bits.data.len < offset + committee.len) return error.InvalidAttestation;
-        var committee_participants: usize = 0;
-        for (committee, 0..) |validator_index, i| {
-            if (attestation.aggregation_bits.data[offset + i]) {
-                try attesting.append(allocator, validator_index);
-                committee_participants += 1;
-            }
-        }
-        if (committee_participants == 0) return error.InvalidAttestation;
-        offset += committee.len;
-    }
-    if (offset != attestation.aggregation_bits.data.len) return error.InvalidAttestation;
-    std.mem.sort(fulu.ValidatorIndex, attesting.items, {}, std.sort.asc(fulu.ValidatorIndex));
-    for (attesting.items, 0..) |index, i| {
-        if (i != 0 and attesting.items[i - 1] == index) continue;
-        if (index >= state.validators.data.len) return error.InvalidAttestation;
-    }
+    const attesting = try getAttestingIndices(allocator, state, attestation);
+    defer allocator.free(attesting);
     const indexed = fulu.IndexedAttestation{
-        .attesting_indices = .{ .data = attesting.items },
+        .attesting_indices = .{ .data = attesting },
         .data = data,
         .signature = attestation.signature,
     };
@@ -181,7 +160,7 @@ pub fn processAttestation(allocator: std.mem.Allocator, state: *fulu.BeaconState
     const total_active_balance = try helpers.getTotalActiveBalance(state.validators.data, current_epoch);
     const denominator = (helpers.WEIGHT_DENOMINATOR - helpers.PROPOSER_WEIGHT) * helpers.WEIGHT_DENOMINATOR / helpers.PROPOSER_WEIGHT;
     var proposer_reward_numerator: u128 = 0;
-    for (attesting.items) |index| {
+    for (attesting) |index| {
         if (index >= participation.len) return error.InvalidAttestation;
         for (0..helpers.PARTICIPATION_FLAG_WEIGHTS.len) |flag_index| {
             if (!flags[flag_index]) continue;
@@ -196,6 +175,38 @@ pub fn processAttestation(allocator: std.mem.Allocator, state: *fulu.BeaconState
     const proposer = state.proposer_lookahead[state.slot % helpers.SLOTS_PER_EPOCH];
     if (proposer >= state.balances.data.len) return error.InvalidState;
     @constCast(state.balances.data)[proposer] = std.math.add(u64, state.balances.data[proposer], proposer_reward) catch return error.BalanceOverflow;
+}
+
+/// Return sorted attesters selected by Fulu committee and aggregation bits; caller frees them.
+pub fn getAttestingIndices(allocator: std.mem.Allocator, state: *const fulu.BeaconState, attestation: fulu.Attestation) ![]fulu.ValidatorIndex {
+    const committees = try getCommitteeIndices(allocator, &attestation.committee_bits.data);
+    defer allocator.free(committees);
+    if (committees.len == 0) return error.InvalidAttestation;
+    var attesting = std.ArrayList(fulu.ValidatorIndex).empty;
+    errdefer attesting.deinit(allocator);
+    // Aggregation bits concatenate the selected committees in committee-index order.
+    var offset: usize = 0;
+    for (committees) |committee_index| {
+        const committee = try helpers.getBeaconCommittee(allocator, state, attestation.data.slot, committee_index);
+        defer allocator.free(committee);
+        if (attestation.aggregation_bits.data.len < offset + committee.len) return error.InvalidAttestation;
+        var participants: usize = 0;
+        for (committee, 0..) |validator_index, i| {
+            if (attestation.aggregation_bits.data[offset + i]) {
+                try attesting.append(allocator, validator_index);
+                participants += 1;
+            }
+        }
+        if (participants == 0) return error.InvalidAttestation;
+        offset += committee.len;
+    }
+    if (offset != attestation.aggregation_bits.data.len) return error.InvalidAttestation;
+    // Indexed attestations require strictly increasing validator indices for signature checks.
+    std.mem.sort(fulu.ValidatorIndex, attesting.items, {}, std.sort.asc(fulu.ValidatorIndex));
+    for (attesting.items, 0..) |index, i| {
+        if (index >= state.validators.data.len or (i != 0 and attesting.items[i - 1] == index)) return error.InvalidAttestation;
+    }
+    return attesting.toOwnedSlice(allocator);
 }
 
 fn getCommitteeIndices(allocator: std.mem.Allocator, bits: []const bool) ![]usize {

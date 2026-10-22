@@ -67,6 +67,9 @@ Chain:      [Block 0] ───────────────────�
 | Checkpoint | A block reference at an epoch boundary, used when deciding which chain history is justified or finalized. |
 | Weak subjectivity checkpoint | A recent, trusted point in Ethereum's history that a new or long-offline node uses to identify the correct chain. |
 | Fork choice | The rule a node uses to select one chain head when multiple valid branches exist. |
+| Latest message | A validator's most recent accepted attestation, whose block vote adds weight to one branch in fork choice. |
+| Equivocation | Conflicting signed votes by the same validator; fork choice ignores that validator's latest-message weight. |
+| Pulled-up justification | A checkpoint inferred by applying justification rules early to a block's post-state, before the next epoch transition. |
 | Data availability | Whether the data carried by a block can be retrieved and verified, so nodes can safely accept the block. |
 | Proposer boost | Temporary extra weight given to the first timely block seen in a slot, helping nodes converge on the same head. |
 | Unrealized checkpoint | A justified or finalized checkpoint inferred from a block's state before that checkpoint has been processed at an epoch boundary. |

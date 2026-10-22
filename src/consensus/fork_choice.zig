@@ -15,7 +15,11 @@ const ssz = @import("ssz");
 const helpers = @import("helpers.zig");
 const preset = @import("consensus_preset").Config;
 const block_transition = @import("block.zig");
+const operations = @import("block_operations.zig");
+const epoch_transition = @import("epoch.zig");
+const transition = @import("transition.zig");
 const engine_api = @import("execution_engine.zig");
+const PROPOSER_SCORE_BOOST: u64 = 40;
 
 pub const LatestMessage = struct {
     epoch: fulu.Epoch,
@@ -26,6 +30,7 @@ pub const DataAvailabilityCheck = struct {
     context: *anyopaque,
     is_available: *const fn (*anyopaque, fulu.Root) anyerror!bool,
 
+    /// Check whether all required data for a block root is available.
     pub fn check(self: DataAvailabilityCheck, root: fulu.Root) anyerror!bool {
         return self.is_available(self.context, root);
     }
@@ -48,6 +53,7 @@ pub const Store = struct {
     latest_messages: std.AutoHashMap(fulu.ValidatorIndex, LatestMessage),
     unrealized_justifications: std.AutoHashMap(fulu.Root, fulu.Checkpoint),
 
+    /// Free all owned blocks and states in the fork-choice store.
     pub fn deinit(self: *Store) void {
         const allocator = self.allocator;
         var blocks = self.blocks.valueIterator();
@@ -65,11 +71,13 @@ pub const Store = struct {
         self.unrealized_justifications.deinit();
     }
 
+    /// Return the slot represented by the store's explicit timestamp.
     pub fn currentSlot(self: *const Store) u64 {
         return (self.time - self.genesis_time) / preset.SECONDS_PER_SLOT;
     }
 };
 
+/// Build a fork-choice store from a trusted anchor whose state root matches.
 pub fn initStore(
     allocator: std.mem.Allocator,
     anchor_state: *const fulu.BeaconState,
@@ -109,6 +117,7 @@ pub fn initStore(
     return store;
 }
 
+/// Advance explicit time, processing every crossed slot and epoch boundary.
 pub fn onTick(store: *Store, time: u64) !void {
     if (time < store.time) return error.TimeRegression;
     if (time == store.time) return;
@@ -117,13 +126,16 @@ pub fn onTick(store: *Store, time: u64) !void {
     while (store.currentSlot() < target_slot) {
         const next_slot = store.currentSlot() + 1;
         const elapsed = try std.math.mul(u64, next_slot, preset.SECONDS_PER_SLOT);
-        store.time = try std.math.add(u64, store.genesis_time, elapsed);
+        const next_time = try std.math.add(u64, store.genesis_time, elapsed);
+        if (next_slot % helpers.SLOTS_PER_EPOCH == 0) try ensureCheckpointState(store, store.unrealized_justified_checkpoint);
+        store.time = next_time;
         store.proposer_boost_root = [_]u8{0} ** 32;
         if (next_slot % helpers.SLOTS_PER_EPOCH == 0) updateCheckpoints(store);
     }
     store.time = time;
 }
 
+/// Promote unrealized checkpoints when an epoch starts.
 fn updateCheckpoints(store: *Store) void {
     if (store.unrealized_justified_checkpoint.epoch > store.justified_checkpoint.epoch) {
         store.justified_checkpoint = store.unrealized_justified_checkpoint;
@@ -133,6 +145,7 @@ fn updateCheckpoints(store: *Store) void {
     }
 }
 
+/// Return the ancestor at or before the first slot of an epoch.
 fn checkpointBlock(store: *const Store, root: fulu.Root, epoch: fulu.Epoch) !fulu.Root {
     const start_slot = try helpers.computeStartSlotAtEpoch(epoch);
     var current_root = root;
@@ -162,6 +175,7 @@ pub fn isWithinWeakSubjectivityPeriod(store: *const Store, state: *const fulu.Be
     return current_epoch <= checkpoint.epoch or current_epoch - checkpoint.epoch <= period;
 }
 
+/// Import a validated, available block without changing the store on rejection.
 pub fn onBlock(store: *Store, signed_block: fulu.SignedBeaconBlock, engine: engine_api.ExecutionEngine, availability: DataAvailabilityCheck) !void {
     const block = signed_block.message;
     const parent_state = store.block_states.getPtr(block.parent_root) orelse return error.UnknownParent;
@@ -178,22 +192,43 @@ pub fn onBlock(store: *Store, signed_block: fulu.SignedBeaconBlock, engine: engi
     defer ssz.freeDecoded(store.allocator, fulu.BeaconState, state);
     try block_transition.stateTransition(store.allocator, &state, signed_block, engine);
 
+    var pulled = try cloneSSZ(store.allocator, fulu.BeaconState, state);
+    defer ssz.freeDecoded(store.allocator, fulu.BeaconState, pulled);
+    try epoch_transition.processJustificationAndFinalization(&pulled, helpers.getCurrentEpoch(&pulled));
+
+    // Roll back each owned insertion if a later allocation fails.
     try putBlock(store, block_root, block);
+    errdefer if (store.blocks.fetchRemove(block_root)) |entry| ssz.freeDecoded(store.allocator, fulu.BeaconBlock, entry.value);
     try putState(store, block_root, state);
+    errdefer if (store.block_states.fetchRemove(block_root)) |entry| ssz.freeDecoded(store.allocator, fulu.BeaconState, entry.value);
     const seconds_into_slot = (store.time - store.genesis_time) % preset.SECONDS_PER_SLOT;
     const timely = store.currentSlot() == block.slot and seconds_into_slot < preset.PROPOSER_BOOST_WINDOW_SECONDS;
     try store.block_timeliness.put(block_root, timely);
+    errdefer _ = store.block_timeliness.remove(block_root);
+    try store.unrealized_justifications.put(block_root, pulled.current_justified_checkpoint);
+    errdefer _ = store.unrealized_justifications.remove(block_root);
+    const past_epoch = helpers.computeEpochAtSlot(block.slot) < helpers.computeEpochAtSlot(store.currentSlot());
+    const next_justified = if (past_epoch and pulled.current_justified_checkpoint.epoch > state.current_justified_checkpoint.epoch)
+        pulled.current_justified_checkpoint
+    else
+        state.current_justified_checkpoint;
+    if (next_justified.epoch > store.justified_checkpoint.epoch) try ensureCheckpointState(store, next_justified);
+
     if (timely and std.mem.eql(u8, &store.proposer_boost_root, &([_]u8{0} ** 32))) {
         store.proposer_boost_root = block_root;
     }
-    if (state.current_justified_checkpoint.epoch > store.unrealized_justified_checkpoint.epoch) {
-        store.unrealized_justified_checkpoint = state.current_justified_checkpoint;
+    if (state.current_justified_checkpoint.epoch > store.justified_checkpoint.epoch) store.justified_checkpoint = state.current_justified_checkpoint;
+    if (state.finalized_checkpoint.epoch > store.finalized_checkpoint.epoch) store.finalized_checkpoint = state.finalized_checkpoint;
+    if (pulled.current_justified_checkpoint.epoch > store.unrealized_justified_checkpoint.epoch) {
+        store.unrealized_justified_checkpoint = pulled.current_justified_checkpoint;
     }
-    if (state.finalized_checkpoint.epoch > store.unrealized_finalized_checkpoint.epoch) {
-        store.unrealized_finalized_checkpoint = state.finalized_checkpoint;
+    if (pulled.finalized_checkpoint.epoch > store.unrealized_finalized_checkpoint.epoch) {
+        store.unrealized_finalized_checkpoint = pulled.finalized_checkpoint;
     }
+    if (past_epoch) updateCheckpoints(store);
 }
 
+/// Deep-copy an SSZ value so store ownership is independent of caller memory.
 fn cloneSSZ(allocator: std.mem.Allocator, comptime T: type, value: T) !T {
     const bytes = try ssz.serializeAlloc(allocator, value);
     defer allocator.free(bytes);
@@ -201,6 +236,7 @@ fn cloneSSZ(allocator: std.mem.Allocator, comptime T: type, value: T) !T {
     return ssz.deserialize(allocator, T, &reader);
 }
 
+/// Insert an owned copy of a validated block under its root.
 fn putBlock(store: *Store, root: fulu.Root, block: fulu.BeaconBlock) !void {
     const copy = try cloneSSZ(store.allocator, fulu.BeaconBlock, block);
     store.blocks.put(root, copy) catch |err| {
@@ -209,6 +245,7 @@ fn putBlock(store: *Store, root: fulu.Root, block: fulu.BeaconBlock) !void {
     };
 }
 
+/// Insert an owned copy of a block's post-state.
 fn putState(store: *Store, root: fulu.Root, state: fulu.BeaconState) !void {
     const copy = try cloneSSZ(store.allocator, fulu.BeaconState, state);
     store.block_states.put(root, copy) catch |err| {
@@ -217,12 +254,157 @@ fn putState(store: *Store, root: fulu.Root, state: fulu.BeaconState) !void {
     };
 }
 
+/// Insert an owned state snapshot for a checkpoint.
 fn putCheckpointState(store: *Store, checkpoint: fulu.Checkpoint, state: fulu.BeaconState) !void {
     const copy = try cloneSSZ(store.allocator, fulu.BeaconState, state);
     store.checkpoint_states.put(checkpoint, copy) catch |err| {
         ssz.freeDecoded(store.allocator, fulu.BeaconState, copy);
         return err;
     };
+}
+
+/// Cache a checkpoint's state at its epoch boundary before it becomes justified.
+fn ensureCheckpointState(store: *Store, checkpoint: fulu.Checkpoint) !void {
+    if (store.checkpoint_states.contains(checkpoint)) return;
+    const source = store.block_states.get(checkpoint.root) orelse return error.UnknownCheckpoint;
+    var state = try cloneSSZ(store.allocator, fulu.BeaconState, source);
+    defer ssz.freeDecoded(store.allocator, fulu.BeaconState, state);
+    const slot = try helpers.computeStartSlotAtEpoch(checkpoint.epoch);
+    if (state.slot > slot) return error.InvalidCheckpoint;
+    if (state.slot < slot) try transition.processSlots(store.allocator, &state, slot, epoch_transition.processEpoch);
+    try putCheckpointState(store, checkpoint, state);
+}
+
+/// Import a valid attestation after timing and ancestry checks; block attestations may be older.
+pub fn onAttestation(store: *Store, attestation: fulu.Attestation, is_from_block: bool) !void {
+    const data = attestation.data;
+    const current_epoch = helpers.computeEpochAtSlot(store.currentSlot());
+    if (!is_from_block and data.target.epoch != current_epoch and data.target.epoch != current_epoch -| 1) return error.InvalidAttestationTime;
+    if (data.target.epoch != helpers.computeEpochAtSlot(data.slot)) return error.InvalidAttestation;
+    if (!store.blocks.contains(data.target.root)) return error.UnknownTarget;
+    const vote_block = store.blocks.get(data.beacon_block_root) orelse return error.UnknownBlock;
+    if (vote_block.slot > data.slot or
+        !std.mem.eql(u8, &data.target.root, &(try checkpointBlock(store, data.beacon_block_root, data.target.epoch)))) return error.InvalidAttestationAncestry;
+    if (data.slot >= store.currentSlot()) return error.EarlyAttestation;
+
+    var target_state = try cloneSSZ(store.allocator, fulu.BeaconState, (store.checkpoint_states.get(data.target) orelse
+        store.block_states.get(data.target.root) orelse return error.UnknownTarget));
+    defer ssz.freeDecoded(store.allocator, fulu.BeaconState, target_state);
+    const start_slot = try helpers.computeStartSlotAtEpoch(data.target.epoch);
+    if (target_state.slot < start_slot) try transition.processSlots(store.allocator, &target_state, start_slot, epoch_transition.processEpoch);
+    const indices = try operations.getAttestingIndices(store.allocator, &target_state, attestation);
+    defer store.allocator.free(indices);
+    try operations.validateIndexedAttestation(store.allocator, &target_state, .{
+        .attesting_indices = .{ .data = indices },
+        .data = data,
+        .signature = attestation.signature,
+    });
+
+    try store.latest_messages.ensureUnusedCapacity(@intCast(indices.len));
+    if (!store.checkpoint_states.contains(data.target)) try putCheckpointState(store, data.target, target_state);
+    for (indices) |index| {
+        if (store.equivocating_indices.contains(index)) continue;
+        if (store.latest_messages.get(index)) |old| if (old.epoch >= data.target.epoch) continue;
+        store.latest_messages.putAssumeCapacity(index, .{ .epoch = data.target.epoch, .root = data.beacon_block_root });
+    }
+}
+
+/// Record validators proven to have made conflicting signed attestations.
+pub fn onAttesterSlashing(store: *Store, slashing: fulu.AttesterSlashing) !void {
+    const first = slashing.attestation_1;
+    const second = slashing.attestation_2;
+    if (!operations.isSlashableAttestationData(first.data, second.data)) return error.InvalidAttesterSlashing;
+    const state = store.block_states.getPtr(store.justified_checkpoint.root) orelse return error.UnknownCheckpoint;
+    try operations.validateIndexedAttestation(store.allocator, state, first);
+    try operations.validateIndexedAttestation(store.allocator, state, second);
+    try store.equivocating_indices.ensureUnusedCapacity(@intCast(@min(first.attesting_indices.data.len, second.attesting_indices.data.len)));
+    var i: usize = 0;
+    var j: usize = 0;
+    while (i < first.attesting_indices.data.len and j < second.attesting_indices.data.len) {
+        const a = first.attesting_indices.data[i];
+        const b = second.attesting_indices.data[j];
+        if (a < b) {
+            i += 1;
+        } else if (b < a) {
+            j += 1;
+        } else {
+            store.equivocating_indices.putAssumeCapacity(a, {});
+            i += 1;
+            j += 1;
+        }
+    }
+}
+
+/// Sum active, unslashed latest votes on a block's branch and its current proposer boost.
+pub fn getWeight(store: *const Store, root: fulu.Root) !u64 {
+    const block = store.blocks.get(root) orelse return error.UnknownBlock;
+    const state = store.checkpoint_states.get(store.justified_checkpoint) orelse return error.UnknownCheckpoint;
+    const epoch_number = helpers.getCurrentEpoch(&state);
+    var weight: u128 = 0;
+    for (state.validators.data, 0..) |validator, index| {
+        if (!helpers.isActiveValidator(validator, epoch_number) or validator.slashed or store.equivocating_indices.contains(index)) continue;
+        const message = store.latest_messages.get(index) orelse continue;
+        if (std.mem.eql(u8, &(try checkpointBlockAtSlot(store, message.root, block.slot)), &root)) weight += validator.effective_balance;
+    }
+    if (!std.mem.eql(u8, &store.proposer_boost_root, &([_]u8{0} ** 32)) and
+        std.mem.eql(u8, &(try checkpointBlockAtSlot(store, store.proposer_boost_root, block.slot)), &root))
+    {
+        const balance = try helpers.getTotalActiveBalance(state.validators.data, epoch_number);
+        weight += (@as(u128, balance) / helpers.SLOTS_PER_EPOCH) * PROPOSER_SCORE_BOOST / 100;
+    }
+    return std.math.cast(u64, weight) orelse error.WeightOverflow;
+}
+
+/// Return the ancestor at or before a slot, rejecting unknown roots.
+fn checkpointBlockAtSlot(store: *const Store, root: fulu.Root, slot: fulu.Slot) !fulu.Root {
+    var current = root;
+    while (true) {
+        const block = store.blocks.get(current) orelse return error.UnknownBlock;
+        if (block.slot <= slot) return current;
+        current = block.parent_root;
+    }
+}
+
+/// Select the viable descendant with the highest latest-message weight at each fork.
+pub fn getHead(store: *const Store) !fulu.Root {
+    var head = store.justified_checkpoint.root;
+    if (!store.blocks.contains(head)) return error.UnknownCheckpoint;
+    while (true) {
+        var best: ?fulu.Root = null;
+        var best_weight: u64 = 0;
+        var iter = store.blocks.iterator();
+        while (iter.next()) |entry| {
+            const root = entry.key_ptr.*;
+            if (!std.mem.eql(u8, &entry.value_ptr.parent_root, &head) or !try viableBranch(store, root)) continue;
+            const weight = try getWeight(store, root);
+            if (best == null or weight > best_weight or (weight == best_weight and std.mem.order(u8, &root, &best.?) == .gt)) {
+                best = root;
+                best_weight = weight;
+            }
+        }
+        head = best orelse return head;
+    }
+}
+
+/// A branch is viable when a leaf below it has compatible justification and finality.
+fn viableBranch(store: *const Store, root: fulu.Root) !bool {
+    var has_child = false;
+    var iter = store.blocks.iterator();
+    while (iter.next()) |entry| {
+        if (!std.mem.eql(u8, &entry.value_ptr.parent_root, &root)) continue;
+        has_child = true;
+        if (try viableBranch(store, entry.key_ptr.*)) return true;
+    }
+    if (has_child) return false;
+    const block = store.blocks.get(root) orelse return error.UnknownBlock;
+    const current_epoch = helpers.computeEpochAtSlot(store.currentSlot());
+    const source = if (current_epoch > helpers.computeEpochAtSlot(block.slot))
+        store.unrealized_justifications.get(root) orelse return error.UnknownCheckpoint
+    else
+        (store.block_states.get(root) orelse return error.UnknownBlock).current_justified_checkpoint;
+    const justified = store.justified_checkpoint.epoch == 0 or source.epoch == store.justified_checkpoint.epoch or source.epoch + 2 >= current_epoch;
+    const finalized = store.finalized_checkpoint.epoch == 0 or std.mem.eql(u8, &store.finalized_checkpoint.root, &(try checkpointBlock(store, root, store.finalized_checkpoint.epoch)));
+    return justified and finalized;
 }
 
 test "fork-choice store initializes from the pinned Fulu anchor fixture" {
@@ -312,7 +494,7 @@ test "fork-choice ticks clear proposer boost, promote checkpoints, and reject re
 
     var store = try initStore(allocator, &anchor_state, &anchor_block);
     defer store.deinit();
-    const next_checkpoint = fulu.Checkpoint{ .epoch = 1, .root = [_]u8{0x11} ** 32 };
+    const next_checkpoint = fulu.Checkpoint{ .epoch = 1, .root = store.justified_checkpoint.root };
     store.unrealized_justified_checkpoint = next_checkpoint;
     store.unrealized_finalized_checkpoint = next_checkpoint;
     store.proposer_boost_root = [_]u8{0xaa} ** 32;
@@ -341,6 +523,7 @@ const AvailabilityTestContext = struct {
     available: bool,
     calls: usize = 0,
 
+    /// Return the configured availability result and count checks.
     fn check(context: *anyopaque, _: fulu.Root) anyerror!bool {
         const self: *AvailabilityTestContext = @ptrCast(@alignCast(context));
         self.calls += 1;
@@ -348,6 +531,7 @@ const AvailabilityTestContext = struct {
     }
 };
 
+/// Decode the shared official anchor and data-availability block fixture.
 fn loadAvailabilityFixture(allocator: std.mem.Allocator) !struct { fulu.BeaconState, fulu.BeaconBlock, fulu.SignedBeaconBlock } {
     const fixtures = @import("fixture_runner.zig");
     const state = try fixtures.decodeState(allocator, @embedFile("fixtures/fulu_fork_choice/availability/anchor_state.ssz_snappy"));
@@ -382,6 +566,7 @@ test "fork-choice rejects unavailable block without changing the store" {
     try std.testing.expectEqual(@as(usize, 1), store.block_states.count());
     try std.testing.expectEqual(@as(usize, 0), store.block_timeliness.count());
     try std.testing.expectEqual([_]u8{0} ** 32, store.proposer_boost_root);
+    try std.testing.expectEqual(store.justified_checkpoint.root, try getHead(&store));
 }
 
 test "fork-choice stores an available block and assigns timely proposer boost" {
@@ -392,10 +577,6 @@ test "fork-choice stores an available block and assigns timely proposer boost" {
     defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, fixture[2]);
     var store = try initStore(allocator, &fixture[0], &fixture[1]);
     defer store.deinit();
-    const imported_checkpoint = fulu.Checkpoint{ .epoch = 1, .root = [_]u8{0x11} ** 32 };
-    const parent_root = try merkle.HashTreeRoot(allocator, fixture[1]);
-    store.block_states.getPtr(parent_root).?.current_justified_checkpoint = imported_checkpoint;
-    store.block_states.getPtr(parent_root).?.finalized_checkpoint = imported_checkpoint;
     try onTick(&store, fixture[2].message.slot * preset.SECONDS_PER_SLOT);
     var availability = AvailabilityTestContext{ .available = true };
     var engine: engine_api.TestEngine = .{ .status = .valid };
@@ -412,6 +593,185 @@ test "fork-choice stores an available block and assigns timely proposer boost" {
     try std.testing.expectEqual(block_root, store.proposer_boost_root);
     try std.testing.expectEqual(@as(u64, 0), store.justified_checkpoint.epoch);
     try std.testing.expectEqual(@as(u64, 0), store.finalized_checkpoint.epoch);
-    try std.testing.expectEqual(imported_checkpoint, store.unrealized_justified_checkpoint);
-    try std.testing.expectEqual(imported_checkpoint, store.unrealized_finalized_checkpoint);
+    try std.testing.expectEqual(store.justified_checkpoint, store.unrealized_justified_checkpoint);
+    try std.testing.expectEqual(store.finalized_checkpoint, store.unrealized_finalized_checkpoint);
+    try std.testing.expectEqual(@as(usize, 2), store.unrealized_justifications.count());
+    try std.testing.expectEqual(block_root, try getHead(&store));
+    try std.testing.expect((try getWeight(&store, block_root)) > 0);
+}
+
+test "fork-choice votes, proposer boost, expiry, and invalid events" {
+    const allocator = std.testing.allocator;
+    const fixtures = @import("fixture_runner.zig");
+    var state = try fixtures.decodeState(allocator, @embedFile("fixtures/fulu_fork_choice/basic/anchor_state.ssz_snappy"));
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
+    const bytes = try fixtures.decode(allocator, @embedFile("fixtures/fulu_fork_choice/basic/anchor_block.ssz_snappy"));
+    defer allocator.free(bytes);
+    var reader: std.Io.Reader = .fixed(bytes);
+    const anchor = try ssz.deserialize(allocator, fulu.BeaconBlock, &reader);
+    defer ssz.freeDecoded(allocator, fulu.BeaconBlock, anchor);
+    var store = try initStore(allocator, &state, &anchor);
+    defer store.deinit();
+
+    const a = [_]u8{0x11} ** 32;
+    const b = [_]u8{0x22} ** 32;
+    var child = anchor;
+    child.slot = 1;
+    child.parent_root = store.justified_checkpoint.root;
+    try putBlock(&store, a, child);
+    try putBlock(&store, b, child);
+    try putState(&store, a, state);
+    try putState(&store, b, state);
+    try store.unrealized_justifications.put(a, store.justified_checkpoint);
+    try store.unrealized_justifications.put(b, store.justified_checkpoint);
+    try store.latest_messages.put(0, .{ .epoch = 0, .root = a });
+    try std.testing.expectEqual(state.validators.data[0].effective_balance, try getWeight(&store, a));
+    try std.testing.expectEqual(a, try getHead(&store));
+
+    store.proposer_boost_root = b;
+    try std.testing.expectEqual(b, try getHead(&store));
+    try onTick(&store, preset.SECONDS_PER_SLOT);
+    try std.testing.expectEqual(a, try getHead(&store));
+
+    try store.equivocating_indices.put(0, {});
+    try std.testing.expectEqual(@as(u64, 0), try getWeight(&store, a));
+    try std.testing.expectEqual(b, try getHead(&store));
+    store.finalized_checkpoint = .{ .epoch = 1, .root = a };
+    try std.testing.expectEqual(a, try getHead(&store));
+
+    try std.testing.expectError(error.UnknownTarget, onAttestation(&store, std.mem.zeroes(fulu.Attestation), false));
+    try std.testing.expectError(error.InvalidAttesterSlashing, onAttesterSlashing(&store, std.mem.zeroes(fulu.AttesterSlashing)));
+    try std.testing.expectEqual(@as(usize, 1), store.latest_messages.count());
+    try std.testing.expectEqual(@as(usize, 1), store.equivocating_indices.count());
+}
+
+test "fork-choice rejects an unknown parent and records late blocks without boost" {
+    const allocator = std.testing.allocator;
+    var fixture = try loadAvailabilityFixture(allocator);
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, fixture[0]);
+    defer ssz.freeDecoded(allocator, fulu.BeaconBlock, fixture[1]);
+    defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, fixture[2]);
+    var store = try initStore(allocator, &fixture[0], &fixture[1]);
+    defer store.deinit();
+    var availability = AvailabilityTestContext{ .available = true };
+    var engine: engine_api.TestEngine = .{ .status = .valid };
+    const check = DataAvailabilityCheck{ .context = &availability, .is_available = AvailabilityTestContext.check };
+    var bad = fixture[2];
+    bad.message.parent_root = [_]u8{0xff} ** 32;
+    try std.testing.expectError(error.UnknownParent, onBlock(&store, bad, engine.interface(), check));
+    try std.testing.expectEqual(@as(usize, 1), store.blocks.count());
+    try std.testing.expectEqual(@as(usize, 0), availability.calls);
+
+    try onTick(&store, (fixture[2].message.slot + 1) * preset.SECONDS_PER_SLOT);
+    try onBlock(&store, fixture[2], engine.interface(), check);
+    const root = try merkle.HashTreeRoot(allocator, fixture[2].message);
+    try std.testing.expectEqual(false, store.block_timeliness.get(root).?);
+    try std.testing.expectEqual([_]u8{0} ** 32, store.proposer_boost_root);
+}
+
+test "official Fulu heavier-branch fixture changes head after attestation" {
+    const allocator = std.testing.allocator;
+    const fixtures = @import("fixture_runner.zig");
+    const dir = "fixtures/fulu_fork_choice/heavier_branch/";
+    var state = try fixtures.decodeState(allocator, @embedFile("fixtures/fulu_fork_choice/basic/anchor_state.ssz_snappy"));
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
+    const bytes = try fixtures.decode(allocator, @embedFile("fixtures/fulu_fork_choice/basic/anchor_block.ssz_snappy"));
+    defer allocator.free(bytes);
+    var reader: std.Io.Reader = .fixed(bytes);
+    const anchor = try ssz.deserialize(allocator, fulu.BeaconBlock, &reader);
+    defer ssz.freeDecoded(allocator, fulu.BeaconBlock, anchor);
+    var store = try initStore(allocator, &state, &anchor);
+    defer store.deinit();
+    var engine: engine_api.TestEngine = .{ .status = .valid };
+    var availability = AvailabilityTestContext{ .available = true };
+    const check = DataAvailabilityCheck{ .context = &availability, .is_available = AvailabilityTestContext.check };
+    const bad_parent = try fixtures.decodeBlock(allocator, @embedFile("fixtures/fulu_fork_choice/bad_parent/block_0xa5667dda587576392d5ce9396751b4761abe367219f379b58333d0017eda3970.ssz_snappy"));
+    defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, bad_parent);
+    if (onBlock(&store, bad_parent, engine.interface(), check)) |_| return error.ExpectedRejection else |_| {}
+    try std.testing.expectEqual(@as(usize, 1), store.blocks.count());
+    try std.testing.expectEqual(@as(usize, 1), store.block_states.count());
+    try std.testing.expectEqual(@as(usize, 0), store.block_timeliness.count());
+    try std.testing.expectEqual(@as(usize, 1), store.unrealized_justifications.count());
+    const compressed = [_][]const u8{
+        @embedFile(dir ++ "block_0xbc8706b8945c619414fb557decb7cb893c5e240ea95ec8a0e9d97c6f56532cff.ssz_snappy"),
+        @embedFile(dir ++ "block_0xc44a335c2ae08ad57a68b81affd6b22d79427b4c755214eebcc74351d2b29347.ssz_snappy"),
+        @embedFile(dir ++ "block_0x1db47324a6822813b02b053d39930e385d1fbfe474e4ad3d0b4ee89748c857b8.ssz_snappy"),
+        @embedFile(dir ++ "block_0x0ae189fc2d624f5c04b4f1075245ba3a0b9aaa0bfeacacc9df6e7d58a9f035c7.ssz_snappy"),
+    };
+    const times = [_]u64{ 6, 12, 18, 18 };
+    for (compressed, times) |input, time| {
+        try onTick(&store, time);
+        const signed = try fixtures.decodeBlock(allocator, input);
+        defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, signed);
+        try onBlock(&store, signed, engine.interface(), check);
+    }
+    var expected: fulu.Root = undefined;
+    _ = try std.fmt.hexToBytes(&expected, "f2597784a2d11269a56a61e256c4830c3ba3c467fd178f11146a8bdf9be198df");
+    try std.testing.expectEqual(expected, try getHead(&store));
+    const attestation_bytes = try fixtures.decode(allocator, @embedFile(dir ++ "attestation_0xfd7837e56b89c2042febfa3e790e8e4f12177170bcb7a6abcfc08b37474f20ba.ssz_snappy"));
+    defer allocator.free(attestation_bytes);
+    var attestation_reader: std.Io.Reader = .fixed(attestation_bytes);
+    const attestation = try ssz.deserialize(allocator, fulu.Attestation, &attestation_reader);
+    defer ssz.freeDecoded(allocator, fulu.Attestation, attestation);
+    var wrong_target = attestation;
+    wrong_target.data.target.root = expected;
+    try std.testing.expectError(error.InvalidAttestationAncestry, onAttestation(&store, wrong_target, false));
+    var bad_signature = attestation;
+    bad_signature.signature = [_]u8{0} ** 96;
+    if (onAttestation(&store, bad_signature, false)) |_| return error.ExpectedRejection else |_| {}
+    try std.testing.expectEqual(@as(usize, 0), store.latest_messages.count());
+    try onAttestation(&store, attestation, false);
+    _ = try std.fmt.hexToBytes(&expected, "c892833adc0fff2de4366886a5eaecfaa6228dfddc6dc0a9c44d2fda4518d5e5");
+    try std.testing.expectEqual(expected, try getHead(&store));
+}
+
+test "official Fulu slashing fixture excludes equivocating votes" {
+    const allocator = std.testing.allocator;
+    const fixtures = @import("fixture_runner.zig");
+    const anchor_dir = "fixtures/fulu_fork_choice/basic/";
+    const dir = "fixtures/fulu_fork_choice/slashing/";
+    var state = try fixtures.decodeState(allocator, @embedFile(anchor_dir ++ "anchor_state.ssz_snappy"));
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
+    const anchor_bytes = try fixtures.decode(allocator, @embedFile(anchor_dir ++ "anchor_block.ssz_snappy"));
+    defer allocator.free(anchor_bytes);
+    var anchor_reader: std.Io.Reader = .fixed(anchor_bytes);
+    const anchor = try ssz.deserialize(allocator, fulu.BeaconBlock, &anchor_reader);
+    defer ssz.freeDecoded(allocator, fulu.BeaconBlock, anchor);
+    var store = try initStore(allocator, &state, &anchor);
+    defer store.deinit();
+    try onTick(&store, 36);
+    var engine: engine_api.TestEngine = .{ .status = .valid };
+    var availability = AvailabilityTestContext{ .available = true };
+    const check = DataAvailabilityCheck{ .context = &availability, .is_available = AvailabilityTestContext.check };
+    for ([_][]const u8{
+        @embedFile(dir ++ "block_0x2c1cbf2a02a84caf257b074dfac21f7b549b741fd815dcd29de52308a4cd477d.ssz_snappy"),
+        @embedFile(dir ++ "block_0x267dad33839d51d5cebd0f400aface00fb9852dc30bfd1f5eee92a2f655d91dc.ssz_snappy"),
+    }) |input| {
+        const signed = try fixtures.decodeBlock(allocator, input);
+        defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, signed);
+        try onBlock(&store, signed, engine.interface(), check);
+    }
+    const attestation_bytes = try fixtures.decode(allocator, @embedFile(dir ++ "attestation_0x5172be6898efefa589c2182765c8e7a74272ed2b0004d0577921a4808b364fcf.ssz_snappy"));
+    defer allocator.free(attestation_bytes);
+    var reader: std.Io.Reader = .fixed(attestation_bytes);
+    const attestation = try ssz.deserialize(allocator, fulu.Attestation, &reader);
+    defer ssz.freeDecoded(allocator, fulu.Attestation, attestation);
+    try onAttestation(&store, attestation, false);
+    const message_count = store.latest_messages.count();
+    try std.testing.expect(message_count > 0);
+    const slashing_bytes = try fixtures.decode(allocator, @embedFile(dir ++ "attester_slashing_0x37f647afd2845d3e479b0f3a7fface55f4aca82464d477681094d1950e5923c5.ssz_snappy"));
+    defer allocator.free(slashing_bytes);
+    var slashing_reader: std.Io.Reader = .fixed(slashing_bytes);
+    const slashing = try ssz.deserialize(allocator, fulu.AttesterSlashing, &slashing_reader);
+    defer ssz.freeDecoded(allocator, fulu.AttesterSlashing, slashing);
+    var bad_signature = slashing;
+    bad_signature.attestation_1.signature = [_]u8{0} ** 96;
+    if (onAttesterSlashing(&store, bad_signature)) |_| return error.ExpectedRejection else |_| {}
+    try std.testing.expectEqual(@as(usize, 0), store.equivocating_indices.count());
+    try onAttesterSlashing(&store, slashing);
+    try std.testing.expect(store.equivocating_indices.count() > 0);
+    try std.testing.expectEqual(message_count, store.latest_messages.count());
+    var expected: fulu.Root = undefined;
+    _ = try std.fmt.hexToBytes(&expected, "738b28897c8ca84f0b800f5847dc5fdfc009d289fc226d047cf8d660af9342dc");
+    try std.testing.expectEqual(expected, try getHead(&store));
 }
