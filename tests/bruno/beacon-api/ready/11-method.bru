@@ -1,0 +1,16 @@
+meta {
+  name: Unsupported method
+  type: http
+  seq: 11
+}
+
+post {
+  url: {{host}}/eth/v1/node/syncing
+}
+
+tests {
+  test("write methods are rejected", function () {
+    expect(res.status).to.equal(405);
+    expect(res.body).to.deep.equal({ code: 405, message: "GET required" });
+  });
+}

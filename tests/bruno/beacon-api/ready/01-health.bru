@@ -1,0 +1,16 @@
+meta {
+  name: Health
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{host}}/eth/v1/node/health
+}
+
+tests {
+  test("healthy node responds over HTTP", function () {
+    expect(res.status).to.equal(200);
+    expect(res.getHeader("content-type")).to.equal("application/json");
+  });
+}

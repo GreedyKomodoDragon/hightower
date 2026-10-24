@@ -1,0 +1,16 @@
+meta {
+  name: Unknown block identifier
+  type: http
+  seq: 10
+}
+
+get {
+  url: {{host}}/eth/v1/beacon/blocks/999/root
+}
+
+tests {
+  test("unknown slots return 404", function () {
+    expect(res.status).to.equal(404);
+    expect(res.body).to.deep.equal({ code: 404, message: "not found" });
+  });
+}

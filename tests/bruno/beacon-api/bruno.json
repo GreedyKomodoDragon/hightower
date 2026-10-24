@@ -1,0 +1,6 @@
+{
+  "version": "1",
+  "name": "Hightower Beacon API",
+  "type": "collection",
+  "ignore": ["node_modules", ".git"]
+}

@@ -46,3 +46,10 @@ identifiers return 400, unknown data 404, and an unavailable store 503. Request
 headers are capped at 8 KiB; request bodies are rejected. The API does not
 expose complete signed blocks or arbitrary states because the fork-choice
 store does not retain all data required by those endpoints.
+
+The [Bruno collection](../tests/bruno/beacon-api/bruno.json) checks all six
+endpoints over HTTP, including root identifiers, errors, syncing, and readiness. Run
+`zig build api-test-server`, install `@usebruno/cli@4.3.0`, then run
+`bash scripts/test_beacon_api.sh` from the repository root. The test server
+loads the pinned fork-choice anchor fixture and listens only on loopback port
+18080; it is not part of the node runtime.

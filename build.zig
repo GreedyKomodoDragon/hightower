@@ -279,6 +279,22 @@ pub fn build(b: *std.Build) void {
         },
     });
     mod.addImport("api", api_mod);
+    const api_test_server = b.addExecutable(.{
+        .name = "hightower-api-test-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/api/test_server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "api", .module = api_mod },
+                .{ .name = "consensus", .module = consensus_mod },
+                .{ .name = "fulu", .module = fulu_mod },
+                .{ .name = "ssz", .module = ssz_mod },
+            },
+        }),
+    });
+    const api_test_server_step = b.step("api-test-server", "Build the fixture-backed Beacon API test server");
+    api_test_server_step.dependOn(&b.addInstallArtifact(api_test_server, .{}).step);
 
     const ssz_tests = b.addTest(.{
         .root_module = b.createModule(.{
