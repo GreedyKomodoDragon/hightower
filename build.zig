@@ -205,7 +205,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/execution/fixtures.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "execution", .module = execution_mod }},
+            .imports = &.{ .{ .name = "execution", .module = execution_mod }, .{ .name = "rlp", .module = rlp_mod } },
         }),
     });
     const evm_fixture_tests = b.addTest(.{

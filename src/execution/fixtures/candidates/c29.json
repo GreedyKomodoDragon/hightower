@@ -1,0 +1,96 @@
+{
+  "tests/frontier/opcodes/test_swap.py::test_stack_underflow[fork_Cancun-state_test-SWAP11]": {
+    "env": {
+      "currentCoinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+      "currentGasLimit": "0x07270e00",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentDifficulty": "0x00",
+      "currentBaseFee": "0x07",
+      "currentExcessBlobGas": "0x00"
+    },
+    "pre": {
+      "0x75f6bdb5fb19674d7c65e882431dd64f8eab5982": {
+        "nonce": "0x01",
+        "balance": "0x00",
+        "code": "0x60006001600260036004600560066007600860099a600055",
+        "storage": {}
+      },
+      "0x993c4a4fd6611decefdabdff023458d734707700": {
+        "nonce": "0x00",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "gasLimit": [
+        "0x07a120"
+      ],
+      "to": "0x75f6bdb5fb19674d7c65e882431dd64f8eab5982",
+      "value": [
+        "0x00"
+      ],
+      "data": [
+        "0x"
+      ],
+      "sender": "0x993c4a4fd6611decefdabdff023458d734707700",
+      "secretKey": "0x65d86eb833886910d6f48d4175f6bdb5fb19674d7c65e882431dd64f8eab5982"
+    },
+    "post": {
+      "Cancun": [
+        {
+          "hash": "0x35f6b9b1e63e658268ba5017fff399b58f968063999f6a9698ef1678b1294d97",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+          "txbytes": "0xf860800a8307a1209475f6bdb5fb19674d7c65e882431dd64f8eab5982808026a075787895d1ea9e97643bb48784bdf5eb9b8fe79286e0e317de744a294c3785cea030b3a198f165eca6256df670c5d20f560b852fa08bf05bfa91bbbabb91ed6551",
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "state": {
+            "0x75f6bdb5fb19674d7c65e882431dd64f8eab5982": {
+              "nonce": "0x01",
+              "balance": "0x00",
+              "code": "0x60006001600260036004600560066007600860099a600055",
+              "storage": {}
+            },
+            "0x993c4a4fd6611decefdabdff023458d734707700": {
+              "nonce": "0x01",
+              "balance": "0x3635c9adc5de53b4c0",
+              "code": "0x",
+              "storage": {}
+            },
+            "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba": {
+              "nonce": "0x00",
+              "balance": "0x16e360",
+              "code": "0x",
+              "storage": {}
+            }
+          }
+        }
+      ]
+    },
+    "config": {
+      "blobSchedule": {
+        "Cancun": {
+          "target": "0x03",
+          "max": "0x06",
+          "baseFeeUpdateFraction": "0x32f0ed"
+        }
+      },
+      "chainid": "0x01"
+    },
+    "_info": {
+      "hash": "0xfceaa6a0bd86e1e1ad955177f266af4bc20b82d2845d03d0afb14ea71a8d3a61",
+      "comment": "`execution-specs` generated test",
+      "filling-transition-tool": "2.18.0rc6",
+      "description": "A test to ensure that the stack underflow when there are not enough\n    elements for the `SWAP*` opcode to operate.\n\n    For each SWAPn operation, we push exactly (n-1) elements to cause an\n    underflow when trying to swap with the nth element.",
+      "url": "https://github.com/ethereum/execution-specs/blob/tests-v5.4.0/tests/frontier/opcodes/test_swap.py#L106",
+      "fixture-format": "state_test"
+    }
+  }
+}

@@ -1,0 +1,114 @@
+{
+  "tests/frontier/opcodes/test_dup.py::test_dup[fork_Cancun-evm_code_type_LEGACY-state_test-DUP15]": {
+    "env": {
+      "currentCoinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+      "currentGasLimit": "0x07270e00",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentDifficulty": "0x00",
+      "currentBaseFee": "0x07",
+      "currentExcessBlobGas": "0x00"
+    },
+    "pre": {
+      "0xef40634d6a6d30a71e474060be537c19d4d7eb8b": {
+        "nonce": "0x00",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x2a5b1e7df848bd9c737d6f28a5be993d3f035c5c": {
+        "nonce": "0x01",
+        "balance": "0x00",
+        "code": "0x6000600160026003600460056006600760086009600a600b600c600d600e600f60108e600055600155600255600355600455600555600655600755600855600955600a55600b55600c55600d55600e55600f55601055",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "gasLimit": [
+        "0x07a120"
+      ],
+      "to": "0x2a5b1e7df848bd9c737d6f28a5be993d3f035c5c",
+      "value": [
+        "0x00"
+      ],
+      "data": [
+        "0x"
+      ],
+      "sender": "0xef40634d6a6d30a71e474060be537c19d4d7eb8b",
+      "secretKey": "0x7904bd8a700fe140af811ec92a5b1e7df848bd9c737d6f28a5be993d3f035c5c"
+    },
+    "post": {
+      "Cancun": [
+        {
+          "hash": "0x250dd73abfd36b21b1a1d4a66c29a1a8431549e06e022bbf7a28756fe477f6f6",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+          "txbytes": "0xf860800a8307a120942a5b1e7df848bd9c737d6f28a5be993d3f035c5c808025a0a8f8f135a55f4ec57f281ba9c0cb25542631ce834503025b3581ef1fd7851669a00d93f68770e6cff96762abd91787f96a36bc062279046957790ef228cca34f8e",
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "state": {
+            "0xef40634d6a6d30a71e474060be537c19d4d7eb8b": {
+              "nonce": "0x01",
+              "balance": "0x3635c9adc5de6373ce",
+              "code": "0x",
+              "storage": {}
+            },
+            "0x2a5b1e7df848bd9c737d6f28a5be993d3f035c5c": {
+              "nonce": "0x01",
+              "balance": "0x00",
+              "code": "0x6000600160026003600460056006600760086009600a600b600c600d600e600f60108e600055600155600255600355600455600555600655600755600855600955600a55600b55600c55600d55600e55600f55601055",
+              "storage": {
+                "0x00": "0x02",
+                "0x01": "0x10",
+                "0x02": "0x0f",
+                "0x03": "0x0e",
+                "0x04": "0x0d",
+                "0x05": "0x0c",
+                "0x06": "0x0b",
+                "0x07": "0x0a",
+                "0x08": "0x09",
+                "0x09": "0x08",
+                "0x0a": "0x07",
+                "0x0b": "0x06",
+                "0x0c": "0x05",
+                "0x0d": "0x04",
+                "0x0e": "0x03",
+                "0x0f": "0x02",
+                "0x10": "0x01"
+              }
+            },
+            "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba": {
+              "nonce": "0x00",
+              "balance": "0x122a0f",
+              "code": "0x",
+              "storage": {}
+            }
+          }
+        }
+      ]
+    },
+    "config": {
+      "blobSchedule": {
+        "Cancun": {
+          "target": "0x03",
+          "max": "0x06",
+          "baseFeeUpdateFraction": "0x32f0ed"
+        }
+      },
+      "chainid": "0x01"
+    },
+    "_info": {
+      "hash": "0xfe2a74203be15a7a33438fdcf67502de0a86c3bd10e068d76a51678b772e76ac",
+      "comment": "`execution-specs` generated test",
+      "filling-transition-tool": "2.18.0rc6",
+      "description": "Test the DUP1-DUP16 opcodes.\n\n    Note: Test case ported from\n    [ethereum/tests](https://github.com/ethereum/tests).\n\n    Test ported from [ethereum/tests/GeneralStateTests/VMTests/\n    vmTests/dup.json](https://github.com/ethereum/tests/blob/\n    v14.0/GeneralStateTests/VMTests/vmTests/dup.json) by Ori Pomerantz.",
+      "url": "https://github.com/ethereum/execution-specs/blob/tests-v5.4.0/tests/frontier/opcodes/test_dup.py#L16",
+      "fixture-format": "state_test"
+    }
+  }
+}
