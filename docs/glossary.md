@@ -58,6 +58,11 @@ Chain:      [Block 0] ───────────────────�
 | Persistent storage | A contract's word-addressed state committed to its storage trie across transactions. |
 | Transient storage | A contract's word-addressed data shared within one transaction and discarded afterward; reverted frames undo their writes. |
 | Warm storage slot | A contract storage key already accessed in the transaction, so later access costs less gas. |
+| Warm account | An address already accessed or declared by a transaction, so later account access costs less gas. |
+| Gas refund | A credit earned by certain storage writes and applied after execution, limited to one fifth of the gas used. |
+| EVM log | An event record emitted by contract code with an address, up to four searchable topics, and byte data. |
+| Precompile | A built-in execution function reached through a reserved address rather than contract bytecode. |
+| Call stipend | Extra gas made available to a child call that transfers value. |
 | State snapshot | A checkpoint that lets a reverted or failed frame undo its state changes. |
 | REVERT | An EVM instruction that returns bytes and remaining gas while undoing the frame's state changes. |
 | Bloom filter (logs bloom) | A 2048-bit probabilistic filter built from log addresses and topics; it can rule out matches but may report false positives. |
