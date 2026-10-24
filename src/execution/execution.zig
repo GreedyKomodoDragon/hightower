@@ -16,6 +16,7 @@ const decode = rlp.decode;
 pub const bloom_filter = @import("bloom_filter");
 pub const state = @import("state.zig");
 pub const evm = @import("evm.zig");
+pub const transition = @import("transition.zig");
 pub const trie = @import("trie.zig");
 
 /// Ethereum execution address, always 20 bytes on the wire.

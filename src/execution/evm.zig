@@ -3,6 +3,7 @@
 // The public API stays here while implementation and tests live in the evm package.
 const core = @import("evm/machine.zig");
 
+pub const Fork = core.Fork;
 pub const Environment = core.Environment;
 pub const Access = core.Access;
 pub const Log = core.Log;

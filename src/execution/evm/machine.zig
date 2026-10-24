@@ -10,8 +10,12 @@
 const std = @import("std");
 const state = @import("../state.zig");
 
+/// Executable opcode schedules supported by the transaction machine.
+pub const Fork = enum { london, cancun, fulu };
+
 /// Host values shared by every frame of one transaction. Block hashes are newest first.
 pub const Environment = struct {
+    fork: Fork = .fulu,
     origin: state.Address,
     gas_price: u256,
     coinbase: state.Address,
@@ -22,6 +26,7 @@ pub const Environment = struct {
     chain_id: u256,
     base_fee: u256,
     blob_base_fee: u256,
+    blob_base_fee_supported: bool = true,
     blob_hashes: []const state.Hash = &.{},
     block_hashes: ?[]const state.Hash = null,
 };
@@ -42,7 +47,7 @@ pub const Input = struct {
     depth: u16 = 0,
     is_static: bool = false,
 };
-pub const Fault = enum { out_of_gas, stack_underflow, stack_overflow, invalid_opcode, invalid_jump, depth, write_protection, memory_overflow, missing_context, unsupported_precompile };
+pub const Fault = enum { out_of_gas, stack_underflow, stack_overflow, invalid_opcode, invalid_jump, depth, write_protection, memory_overflow, missing_context, unsupported_precompile, unsupported_opcode };
 pub const Status = union(enum) { success, revert, fault: Fault };
 pub const Result = struct {
     status: Status,
@@ -79,7 +84,12 @@ pub const Machine = struct {
         _ = try self.touchAccount(sender);
         _ = try self.touchAccount(recipient);
         _ = try self.touchAccount(environment.coinbase);
-        for (1..18) |i| {
+        const precompile_count: usize = switch (environment.fork) {
+            .london => 9,
+            .cancun => 10,
+            .fulu => 17,
+        };
+        for (1..precompile_count + 1) |i| {
             var address: state.Address = .{0} ** 20;
             address[19] = @intCast(i);
             _ = try self.touchAccount(address);
@@ -133,6 +143,7 @@ pub const Machine = struct {
                 error.MemoryOverflow => .memory_overflow,
                 error.MissingContext => .missing_context,
                 error.UnsupportedPrecompile => .unsupported_precompile,
+                error.UnsupportedOpcode => .unsupported_opcode,
                 else => .invalid_opcode,
             } }, .gas_remaining = 0, .output = try self.allocator.dupe(u8, "") };
         };
@@ -388,6 +399,7 @@ const Frame = struct {
                         try self.push(if (index < env.blob_hashes.len) std.mem.readInt(u256, &env.blob_hashes[@intCast(index)], .big) else 0);
                     },
                     0x4a => {
+                        if (!env.blob_base_fee_supported) return error.UnsupportedOpcode;
                         try self.charge(2);
                         try self.push(env.blob_base_fee);
                     },
@@ -476,7 +488,12 @@ const Frame = struct {
         const warm = try self.machine.touchAccount(target);
         var precompile: state.Address = .{0} ** 20;
         precompile[19] = target[19];
-        if (target[19] >= 1 and target[19] <= 0x11 and same(target, precompile)) return error.UnsupportedPrecompile;
+        const precompile_limit: u8 = switch (if (self.machine.environment) |env| env.fork else Fork.fulu) {
+            .london => 9,
+            .cancun => 10,
+            .fulu => 17,
+        };
+        if (target[19] >= 1 and target[19] <= precompile_limit and same(target, precompile)) return error.UnsupportedPrecompile;
         const transfer = (op == 0xf1 or op == 0xf2) and value != 0;
         const account = if (op == 0xf1 and value != 0) try self.machine.world.getAccount(target) else null;
         const is_empty = if (account) |a| a.nonce == 0 and a.balance == 0 and std.mem.eql(u8, &a.code_hash, &state.EMPTY_CODE_HASH) else true;
@@ -509,6 +526,11 @@ const Frame = struct {
             .is_static = self.input.is_static or op == 0xfa,
         });
         defer result.deinit(self.machine.allocator);
+        if (result.status == .fault) {
+            if (result.status.fault == .unsupported_precompile) return error.UnsupportedPrecompile;
+            if (result.status.fault == .unsupported_opcode) return error.UnsupportedOpcode;
+            if (result.status.fault == .missing_context) return error.MissingContext;
+        }
         switch (result.status) {
             .success => {
                 try self.machine.world.commit(snap);
@@ -531,6 +553,9 @@ const Frame = struct {
         while (self.pc < self.input.code.len) {
             const op = self.input.code[self.pc];
             self.pc += 1;
+            if (self.machine.environment) |env| {
+                if (env.fork == .london and (op == 0x49 or op == 0x4a or (op >= 0x5c and op <= 0x5f))) return error.InvalidOpcode;
+            }
             if (op >= 0x60 and op <= 0x7f) {
                 try self.charge(3);
                 var word: u256 = 0;
@@ -649,6 +674,7 @@ const Frame = struct {
                     try self.charge(2);
                     try self.push(0);
                 },
+                0x20, 0xf0, 0xf5, 0xff => return error.UnsupportedOpcode,
                 0xa0...0xa4 => try self.log(op - 0xa0),
                 0xf1, 0xf2, 0xf4, 0xfa => try self.call(op),
                 0xf3, 0xfd => {
