@@ -223,61 +223,83 @@ fn nextBaseFee(parent_gas_limit: u64, parent_gas_used: u64, parent_base_fee: u25
     return parent_base_fee -| change;
 }
 
-/// Applies ordered transactions and withdrawals, checking all claimed roots atomically.
-pub fn applyBlock(allocator: std.mem.Allocator, world: *state.State, fork: Fork, chain_id: u256, parent: execution.Header, header: execution.Header, transactions: []const []const u8, withdrawals: []const execution.Withdrawal) !BlockResult {
+/// Rejects headers and withdrawals that cannot follow the supplied parent and fork.
+fn validateBlockHeader(fork: Fork, parent: execution.Header, header: execution.Header, withdrawals: []const execution.Withdrawal) !void {
     if (header.number != std.math.add(u64, parent.number, 1) catch return error.InvalidBlockNumber) return error.InvalidBlockNumber;
     if (header.timestamp <= parent.timestamp) return error.InvalidTimestamp;
     if (parent.gas_used > parent.gas_limit) return error.InvalidParentGasUsed;
     if (header.gas_limit < 5000 or @abs(@as(i128, header.gas_limit) - @as(i128, parent.gas_limit)) >= parent.gas_limit / 1024) return error.InvalidGasLimit;
     if (header.base_fee_per_gas != try nextBaseFee(parent.gas_limit, parent.gas_used, parent.base_fee_per_gas)) return error.InvalidBaseFee;
     if (fork == .london and withdrawals.len != 0) return error.UnsupportedWithdrawals;
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    errdefer arena.deinit();
-    const a = arena.allocator();
-    const receipts = try a.alloc(execution.Receipt, transactions.len);
-    const snapshot = try world.snapshot();
-    var open = true;
-    errdefer if (open) world.revert(snapshot) catch {};
+}
+
+/// Runs transactions in order and copies their logs into the block-owned arena.
+fn applyBlockTransactions(allocator: std.mem.Allocator, world: *state.State, context: Context, transactions: []const []const u8, receipts: []execution.Receipt) !u64 {
     var gas_used: u64 = 0;
-    const context: Context = .{ .fork = fork, .chain_id = chain_id, .coinbase = header.fee_recipient, .number = header.number, .timestamp = header.timestamp, .gas_limit = header.gas_limit, .base_fee = header.base_fee_per_gas, .prev_randao = header.prev_randao, .difficulty = header.difficulty };
     for (transactions, 0..) |raw, i| {
-        var outcome = try applyTransaction(a, world, context, raw, header.gas_limit - gas_used, gas_used);
+        var outcome = try applyTransaction(allocator, world, context, raw, context.gas_limit - gas_used, gas_used);
+        defer outcome.deinit();
         receipts[i] = outcome.receipt;
         gas_used += outcome.gas_used;
-        // The outer arena owns the nested outcome arena's backing allocations.
-        // Copy receipt data before releasing the nested arena.
         const payload = switch (receipts[i]) {
             inline else => |p| p,
         };
-        const logs = try a.alloc(execution.Log, payload.logs.len);
-        for (logs, payload.logs) |*dest, source| dest.* = .{ .address = source.address, .topics = try a.dupe(execution.Hash, source.topics), .data = try a.dupe(u8, source.data) };
+        const logs = try allocator.alloc(execution.Log, payload.logs.len);
+        for (logs, payload.logs) |*dest, source| dest.* = .{ .address = source.address, .topics = try allocator.dupe(execution.Hash, source.topics), .data = try allocator.dupe(u8, source.data) };
         switch (receipts[i]) {
             inline else => |*p| p.logs = logs,
         }
-        outcome.deinit();
     }
-    if (gas_used != header.gas_used) return error.InvalidGasUsed;
+    return gas_used;
+}
+
+/// Credits London issuance and then each consensus withdrawal in block order.
+fn applyBlockCredits(world: *state.State, fork: Fork, coinbase: execution.Address, withdrawals: []const execution.Withdrawal) !void {
     if (fork == .london) {
-        try world.setBalance(header.fee_recipient, std.math.add(u256, world.getBalance(header.fee_recipient), 2_000_000_000_000_000_000) catch return error.BalanceOverflow);
+        try world.setBalance(coinbase, std.math.add(u256, world.getBalance(coinbase), 2_000_000_000_000_000_000) catch return error.BalanceOverflow);
     }
     for (withdrawals) |withdrawal| {
         const amount = std.math.mul(u256, withdrawal.amount, 1_000_000_000) catch return error.BalanceOverflow;
         try world.setBalance(withdrawal.address, std.math.add(u256, world.getBalance(withdrawal.address), amount) catch return error.BalanceOverflow);
     }
-    const values = try a.alloc([]const u8, transactions.len);
-    for (transactions, 0..) |raw, i| values[i] = raw;
-    const tx_root = try execution.trie.orderedRoot(a, values);
-    const receipts_root = try execution.receiptsRoot(a, receipts);
+}
+
+/// Computes ordered trie roots, bloom, and post-state root for the completed block.
+fn blockResult(arena: *std.heap.ArenaAllocator, world: *state.State, fork: Fork, transactions: []const []const u8, withdrawals: []const execution.Withdrawal, receipts: []execution.Receipt, gas_used: u64) !BlockResult {
+    const allocator = arena.allocator();
+    const tx_root = try execution.trie.orderedRoot(allocator, transactions);
+    const receipts_root = try execution.receiptsRoot(allocator, receipts);
     const bloom = execution.receiptsBloom(receipts);
     const withdrawals_root: ?execution.Hash = if (fork == .london) null else blk: {
-        const encoded = try a.alloc([]const u8, withdrawals.len);
-        for (withdrawals, 0..) |withdrawal, i| encoded[i] = try execution.encode(a, withdrawal);
-        break :blk try execution.trie.orderedRoot(a, encoded);
+        const encoded = try allocator.alloc([]const u8, withdrawals.len);
+        for (withdrawals, 0..) |withdrawal, i| encoded[i] = try execution.encode(allocator, withdrawal);
+        break :blk try execution.trie.orderedRoot(allocator, encoded);
     };
-    const state_root = try world.stateRoot();
-    if (!std.mem.eql(u8, &tx_root, &header.transactions_root) or !std.mem.eql(u8, &receipts_root, &header.receipts_root) or !std.mem.eql(u8, &state_root, &header.state_root) or !std.mem.eql(u8, &bloom, &header.logs_bloom)) return error.InvalidCommitment;
-    if (withdrawals_root) |root| if (!std.mem.eql(u8, &root, &header.withdrawals_root)) return error.InvalidCommitment;
+    return .{ .arena = arena.*, .receipts = receipts, .state_root = try world.stateRoot(), .transactions_root = tx_root, .receipts_root = receipts_root, .withdrawals_root = withdrawals_root, .logs_bloom = bloom, .gas_used = gas_used };
+}
+
+/// Requires every computed commitment to match the block's claimed header.
+fn verifyBlockCommitments(header: execution.Header, result: BlockResult) !void {
+    if (!std.mem.eql(u8, &result.transactions_root, &header.transactions_root) or !std.mem.eql(u8, &result.receipts_root, &header.receipts_root) or !std.mem.eql(u8, &result.state_root, &header.state_root) or !std.mem.eql(u8, &result.logs_bloom, &header.logs_bloom)) return error.InvalidCommitment;
+    if (result.withdrawals_root) |root| if (!std.mem.eql(u8, &root, &header.withdrawals_root)) return error.InvalidCommitment;
+}
+
+/// Applies ordered transactions and withdrawals, checking all claimed roots atomically.
+pub fn applyBlock(allocator: std.mem.Allocator, world: *state.State, fork: Fork, chain_id: u256, parent: execution.Header, header: execution.Header, transactions: []const []const u8, withdrawals: []const execution.Withdrawal) !BlockResult {
+    try validateBlockHeader(fork, parent, header, withdrawals);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const receipts = try arena.allocator().alloc(execution.Receipt, transactions.len);
+    const snapshot = try world.snapshot();
+    var open = true;
+    errdefer if (open) world.revert(snapshot) catch {};
+    const context: Context = .{ .fork = fork, .chain_id = chain_id, .coinbase = header.fee_recipient, .number = header.number, .timestamp = header.timestamp, .gas_limit = header.gas_limit, .base_fee = header.base_fee_per_gas, .prev_randao = header.prev_randao, .difficulty = header.difficulty };
+    const gas_used = try applyBlockTransactions(arena.allocator(), world, context, transactions, receipts);
+    if (gas_used != header.gas_used) return error.InvalidGasUsed;
+    try applyBlockCredits(world, fork, header.fee_recipient, withdrawals);
+    const result = try blockResult(&arena, world, fork, transactions, withdrawals, receipts, gas_used);
+    try verifyBlockCommitments(header, result);
     try world.commit(snapshot);
     open = false;
-    return .{ .arena = arena, .receipts = receipts, .state_root = state_root, .transactions_root = tx_root, .receipts_root = receipts_root, .withdrawals_root = withdrawals_root, .logs_bloom = bloom, .gas_used = gas_used };
+    return result;
 }
