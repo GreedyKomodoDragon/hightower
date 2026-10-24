@@ -310,7 +310,7 @@ fn runStateFixture(allocator: std.mem.Allocator, root: std.json.Value, fixture: 
         .gas_limit = @intCast(try quantity(try member(env, "currentGasLimit"))),
         .base_fee = try quantity(try member(env, "currentBaseFee")),
         .prev_randao = try fixedHex(32, allocator, try member(env, "currentRandom")),
-        .blob_base_fee = if (try quantity(try member(env, "currentExcessBlobGas")) == 0) 1 else null,
+        .blob_base_fee = if (fork == .london) null else try execution.transition.blobBaseFee(fork, @intCast(try quantity(try member(env, "currentExcessBlobGas")))),
     };
     if (fixture.expected == .invalid_transaction) {
         if (!std.mem.eql(u8, try stringMember(expected, "expectException"), "TransactionException.INTRINSIC_GAS_TOO_LOW")) return error.MissingExpectation;
@@ -351,6 +351,28 @@ fn runStateFixture(allocator: std.mem.Allocator, root: std.json.Value, fixture: 
     return true;
 }
 
+/// Reads the complete London header used by the pinned parent-hash oracle.
+fn londonHeader(allocator: std.mem.Allocator, value: std.json.Value) !execution.Header {
+    var header: execution.Header = std.mem.zeroes(execution.Header);
+    header.parent_hash = try fixedHex(32, allocator, try member(value, "parentHash"));
+    header.ommers_hash = try fixedHex(32, allocator, try member(value, "uncleHash"));
+    header.fee_recipient = try fixedHex(20, allocator, try member(value, "coinbase"));
+    header.state_root = try fixedHex(32, allocator, try member(value, "stateRoot"));
+    header.transactions_root = try fixedHex(32, allocator, try member(value, "transactionsTrie"));
+    header.receipts_root = try fixedHex(32, allocator, try member(value, "receiptTrie"));
+    header.logs_bloom = try fixedHex(256, allocator, try member(value, "bloom"));
+    header.difficulty = try quantity(try member(value, "difficulty"));
+    header.number = @intCast(try quantity(try member(value, "number")));
+    header.gas_limit = @intCast(try quantity(try member(value, "gasLimit")));
+    header.gas_used = @intCast(try quantity(try member(value, "gasUsed")));
+    header.timestamp = @intCast(try quantity(try member(value, "timestamp")));
+    header.extra_data = try decodeHex(allocator, try stringMember(value, "extraData"));
+    header.prev_randao = try fixedHex(32, allocator, try member(value, "mixHash"));
+    header.nonce = try fixedHex(8, allocator, try member(value, "nonce"));
+    header.base_fee_per_gas = try quantity(try member(value, "baseFeePerGas"));
+    return header;
+}
+
 // The London block fixture is a targeted oracle here; full blockchain fixture
 // processing (including RLP block traversal) belongs to FULU-062.
 test "London block transition matches pinned state and receipt commitments" {
@@ -365,13 +387,12 @@ test "London block transition matches pinned state and receipt commitments" {
     const blocks = try member(test_value, "blocks");
     const block_json = blocks.array.items[0];
     const header_json = try member(block_json, "blockHeader");
-    var parent: execution.Header = std.mem.zeroes(execution.Header);
-    parent.number = @intCast(try quantity(try member(parent_json, "number")));
-    parent.timestamp = @intCast(try quantity(try member(parent_json, "timestamp")));
-    parent.gas_limit = @intCast(try quantity(try member(parent_json, "gasLimit")));
-    parent.gas_used = @intCast(try quantity(try member(parent_json, "gasUsed")));
-    parent.base_fee_per_gas = try quantity(try member(parent_json, "baseFeePerGas"));
+    const parent = try londonHeader(allocator, parent_json);
+    defer allocator.free(parent.extra_data);
+    const oracle_parent_hash = try fixedHex(32, allocator, try member(parent_json, "hash"));
+    try std.testing.expectEqualSlices(u8, &oracle_parent_hash, &(try execution.transition.headerHash(allocator, .london, parent)));
     var header: execution.Header = std.mem.zeroes(execution.Header);
+    header.parent_hash = try fixedHex(32, allocator, try member(header_json, "parentHash"));
     header.number = @intCast(try quantity(try member(header_json, "number")));
     header.timestamp = @intCast(try quantity(try member(header_json, "timestamp")));
     header.gas_limit = @intCast(try quantity(try member(header_json, "gasLimit")));
@@ -388,7 +409,7 @@ test "London block transition matches pinned state and receipt commitments" {
     const post = try member(try member(state_case, "post"), "Cancun");
     const tx = try decodeHex(allocator, try stringMember(post.array.items[0], "txbytes"));
     defer allocator.free(tx);
-    var result = try execution.transition.applyBlock(allocator, &world, .london, 1, parent, header, &.{tx}, &.{});
+    var result = try execution.transition.applyBlock(allocator, &world, .{ .fork = .london, .parent_fork = .london, .chain_id = 1 }, parent, header, &.{tx}, &.{});
     defer result.deinit();
     try std.testing.expectEqual(@as(u64, 0xa861), result.gas_used);
     try checkAccounts(allocator, &world, try member(test_value, "postState"));
@@ -467,19 +488,23 @@ test "block commitment failure rolls back transactions and withdrawals" {
     parent.gas_limit = sample.context.gas_limit;
     parent.base_fee_per_gas = 7;
     var header: execution.Header = std.mem.zeroes(execution.Header);
+    header.parent_hash = try execution.transition.headerHash(allocator, .london, parent);
     header.number = 1;
     header.timestamp = 1000;
     header.gas_limit = parent.gas_limit;
     header.base_fee_per_gas = 7;
     header.gas_used = 0xa861;
     header.fee_recipient = sample.context.coinbase;
+    header.parent_hash[0] ^= 1;
+    try std.testing.expectError(error.InvalidParentHash, execution.transition.applyBlock(allocator, &world, .{ .fork = .london, .parent_fork = .london, .chain_id = 1 }, parent, header, &.{sample.raw}, &.{}));
+    header.parent_hash[0] ^= 1;
     header.gas_limit = parent.gas_limit + parent.gas_limit / 1024;
-    try std.testing.expectError(error.InvalidGasLimit, execution.transition.applyBlock(allocator, &world, .london, 1, parent, header, &.{sample.raw}, &.{}));
+    try std.testing.expectError(error.InvalidGasLimit, execution.transition.applyBlock(allocator, &world, .{ .fork = .london, .parent_fork = .london, .chain_id = 1 }, parent, header, &.{sample.raw}, &.{}));
     header.gas_limit = parent.gas_limit;
     header.base_fee_per_gas = 8;
-    try std.testing.expectError(error.InvalidBaseFee, execution.transition.applyBlock(allocator, &world, .london, 1, parent, header, &.{sample.raw}, &.{}));
+    try std.testing.expectError(error.InvalidBaseFee, execution.transition.applyBlock(allocator, &world, .{ .fork = .london, .parent_fork = .london, .chain_id = 1 }, parent, header, &.{sample.raw}, &.{}));
     header.base_fee_per_gas = 7;
-    try std.testing.expectError(error.InvalidCommitment, execution.transition.applyBlock(allocator, &world, .london, 1, parent, header, &.{sample.raw}, &.{}));
+    try std.testing.expectError(error.InvalidCommitment, execution.transition.applyBlock(allocator, &world, .{ .fork = .london, .parent_fork = .london, .chain_id = 1 }, parent, header, &.{sample.raw}, &.{}));
     try std.testing.expectEqualSlices(u8, &original, &(try world.stateRoot()));
     const destination: execution.Address = .{9} ** 20;
     const withdrawal: execution.Withdrawal = .{ .index = 0, .validator_index = 0, .address = destination, .amount = 3 };
@@ -494,7 +519,8 @@ test "block commitment failure rolls back transactions and withdrawals" {
     try world.setBalance(destination, 3_000_000_000);
     header.state_root = try world.stateRoot();
     try world.revert(snapshot);
-    var result = try execution.transition.applyBlock(allocator, &world, .cancun, 1, parent, header, &.{}, &.{withdrawal});
+    header.parent_hash = try execution.transition.headerHash(allocator, .london, parent);
+    var result = try execution.transition.applyBlock(allocator, &world, .{ .fork = .cancun, .parent_fork = .london, .chain_id = 1 }, parent, header, &.{}, &.{withdrawal});
     defer result.deinit();
     try std.testing.expectEqual(@as(u256, 3_000_000_000), world.getBalance(destination));
 }
@@ -509,5 +535,120 @@ test "unsupported precompile nested in a transaction rolls back" {
     _ = try world.setCode(recipient, &.{ 0x5f, 0x5f, 0x5f, 0x5f, 0x5f, 0x60, 1, 0x61, 0xff, 0xff, 0xfa, 0x00 });
     const original = try world.stateRoot();
     try std.testing.expectError(error.UnsupportedExecution, execution.transition.applyTransaction(allocator, &world, sample.context, sample.raw, sample.context.gas_limit, 0));
+    try std.testing.expectEqualSlices(u8, &original, &(try world.stateRoot()));
+}
+
+// The first hash is the parent; an older hash is supplied by the caller.
+test "block BLOCKHASH reads provided ancestors and missing history is unsupported" {
+    const allocator = std.testing.allocator;
+    var world = execution.state.State.init(allocator);
+    defer world.deinit();
+    const sample = try sampleTransaction(allocator, &world);
+    defer allocator.free(sample.raw);
+    const recipient: execution.Address = try fixedHex(20, allocator, .{ .string = "0x1000000000000000000000000000000000000000" });
+    _ = try world.setCode(recipient, &.{ 0x60, 0, 0x40, 0x60, 0, 0x52, 0x60, 32, 0x60, 0, 0xf3 });
+    var parent: execution.Header = std.mem.zeroes(execution.Header);
+    parent.number = 1;
+    parent.gas_limit = sample.context.gas_limit;
+    parent.base_fee_per_gas = 7;
+    var header: execution.Header = std.mem.zeroes(execution.Header);
+    header.parent_hash = try execution.transition.headerHash(allocator, .cancun, parent);
+    header.number = 2;
+    header.timestamp = 1000;
+    header.gas_limit = parent.gas_limit;
+    header.base_fee_per_gas = 7;
+    header.fee_recipient = sample.context.coinbase;
+    const older: execution.Hash = .{0x42} ** 32;
+    var context = sample.context;
+    context.number = 2;
+    context.block_hashes = &.{ header.parent_hash, older };
+    context.blob_base_fee = 1;
+    const original = try world.stateRoot();
+    var missing = context;
+    missing.block_hashes = &.{header.parent_hash};
+    try std.testing.expectError(error.UnsupportedExecution, execution.transition.applyTransaction(allocator, &world, missing, sample.raw, context.gas_limit, 0));
+    try std.testing.expectEqualSlices(u8, &original, &(try world.stateRoot()));
+    const snapshot = try world.snapshot();
+    var outcome = try execution.transition.applyTransaction(allocator, &world, context, sample.raw, context.gas_limit, 0);
+    defer outcome.deinit();
+    try std.testing.expectEqualSlices(u8, &older, outcome.output);
+    header.gas_used = outcome.gas_used;
+    header.state_root = try world.stateRoot();
+    header.transactions_root = try execution.trie.orderedRoot(allocator, &.{sample.raw});
+    header.receipts_root = try execution.receiptsRoot(allocator, &.{outcome.receipt});
+    header.logs_bloom = execution.receiptsBloom(&.{outcome.receipt});
+    const empty = try execution.trie.orderedRoot(allocator, &.{});
+    header.withdrawals_root = empty;
+    try world.revert(snapshot);
+    var result = try execution.transition.applyBlock(allocator, &world, .{ .fork = .cancun, .parent_fork = .cancun, .chain_id = 1, .older_hashes = &.{older} }, parent, header, &.{sample.raw}, &.{});
+    defer result.deinit();
+    try std.testing.expectEqualSlices(u8, &header.state_root, &(try world.stateRoot()));
+}
+
+test "Cancun and Fulu blocks expose fork-specific blob base fees" {
+    const allocator = std.testing.allocator;
+    inline for (.{ .{ execution.transition.Fork.cancun, @as(u64, 393_216), @as(u256, 19) }, .{ execution.transition.Fork.fulu, @as(u64, 786_432), @as(u256, 7) } }) |case| {
+        var world = execution.state.State.init(allocator);
+        defer world.deinit();
+        const sample = try sampleTransaction(allocator, &world);
+        defer allocator.free(sample.raw);
+        const recipient: execution.Address = try fixedHex(20, allocator, .{ .string = "0x1000000000000000000000000000000000000000" });
+        _ = try world.setCode(recipient, &.{ 0x4a, 0x60, 0, 0x52, 0x60, 32, 0x60, 0, 0xf3 });
+        var parent: execution.Header = std.mem.zeroes(execution.Header);
+        parent.number = 100;
+        parent.gas_limit = sample.context.gas_limit;
+        parent.gas_used = parent.gas_limit / 2;
+        parent.base_fee_per_gas = 7;
+        parent.excess_blob_gas = 10_000_000 + case[1];
+        var header: execution.Header = std.mem.zeroes(execution.Header);
+        header.parent_hash = try execution.transition.headerHash(allocator, case[0], parent);
+        header.number = 101;
+        header.timestamp = 1000;
+        header.gas_limit = parent.gas_limit;
+        header.base_fee_per_gas = 7;
+        header.fee_recipient = sample.context.coinbase;
+        header.excess_blob_gas = 10_000_000;
+        header.excess_blob_gas += 1;
+        try std.testing.expectError(error.InvalidExcessBlobGas, execution.transition.applyBlock(allocator, &world, .{ .fork = case[0], .parent_fork = case[0], .chain_id = 1 }, parent, header, &.{sample.raw}, &.{}));
+        header.excess_blob_gas -= 1;
+        const snapshot = try world.snapshot();
+        var context = sample.context;
+        context.fork = case[0];
+        context.number = header.number;
+        context.blob_base_fee = case[2];
+        context.block_hashes = &.{header.parent_hash};
+        var outcome = try execution.transition.applyTransaction(allocator, &world, context, sample.raw, context.gas_limit, 0);
+        defer outcome.deinit();
+        var fee_bytes: [32]u8 = undefined;
+        std.mem.writeInt(u256, &fee_bytes, case[2], .big);
+        try std.testing.expectEqualSlices(u8, &fee_bytes, outcome.output);
+        header.gas_used = outcome.gas_used;
+        header.state_root = try world.stateRoot();
+        header.transactions_root = try execution.trie.orderedRoot(allocator, &.{sample.raw});
+        header.receipts_root = try execution.receiptsRoot(allocator, &.{outcome.receipt});
+        header.logs_bloom = execution.receiptsBloom(&.{outcome.receipt});
+        header.withdrawals_root = try execution.trie.orderedRoot(allocator, &.{});
+        try world.revert(snapshot);
+        var result = try execution.transition.applyBlock(allocator, &world, .{ .fork = case[0], .parent_fork = case[0], .chain_id = 1 }, parent, header, &.{sample.raw}, &.{});
+        defer result.deinit();
+        try std.testing.expectEqualSlices(u8, &header.state_root, &(try world.stateRoot()));
+    }
+}
+
+test "missing BLOCKHASH context in a child call is unsupported" {
+    const allocator = std.testing.allocator;
+    var world = execution.state.State.init(allocator);
+    defer world.deinit();
+    const sample = try sampleTransaction(allocator, &world);
+    defer allocator.free(sample.raw);
+    const recipient: execution.Address = try fixedHex(20, allocator, .{ .string = "0x1000000000000000000000000000000000000000" });
+    const child: execution.Address = .{0} ** 19 ++ .{0x21};
+    _ = try world.setCode(recipient, &.{ 0x60, 96, 0x5f, 0x5f, 0x5f, 0x60, 0x21, 0x61, 0xff, 0xff, 0xfa, 0x00 });
+    _ = try world.setCode(child, &.{ 0x60, 0, 0x40, 0x00 });
+    var context = sample.context;
+    context.number = 2;
+    context.block_hashes = &.{.{3} ** 32};
+    const original = try world.stateRoot();
+    try std.testing.expectError(error.UnsupportedExecution, execution.transition.applyTransaction(allocator, &world, context, sample.raw, context.gas_limit, 0));
     try std.testing.expectEqualSlices(u8, &original, &(try world.stateRoot()));
 }

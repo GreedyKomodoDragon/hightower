@@ -25,6 +25,15 @@ pub const Context = struct {
     prev_randao: execution.Hash = .{0} ** 32,
     difficulty: u256 = 0,
     blob_base_fee: ?u256 = null,
+    block_hashes: ?[]const execution.Hash = null,
+};
+
+/// Selects block rules; callers supply up to 255 validated older hashes, newest first.
+pub const BlockContext = struct {
+    fork: Fork,
+    parent_fork: Fork,
+    chain_id: u256,
+    older_hashes: []const execution.Hash = &.{},
 };
 
 /// Owns a receipt's logs and return bytes until deinit.
@@ -157,10 +166,10 @@ fn executeFrame(allocator: std.mem.Allocator, owner: std.mem.Allocator, world: *
         for (item.storage_keys, 0..) |key, j| keys[j] = std.mem.readInt(u256, &key, .big);
         access[i] = .{ .address = item.address, .storage_keys = keys };
     }
-    try machine.configure(.{ .fork = context.fork, .origin = tx.sender, .gas_price = tx.effective_price, .coinbase = context.coinbase, .timestamp = context.timestamp, .number = context.number, .prev_randao = if (context.fork == .london) context.difficulty else std.mem.readInt(u256, &context.prev_randao, .big), .gas_limit = context.gas_limit, .chain_id = context.chain_id, .base_fee = context.base_fee, .blob_base_fee = context.blob_base_fee orelse 0, .blob_base_fee_supported = context.blob_base_fee != null }, tx.sender, tx.recipient, access);
+    try machine.configure(.{ .fork = context.fork, .origin = tx.sender, .gas_price = tx.effective_price, .coinbase = context.coinbase, .timestamp = context.timestamp, .number = context.number, .prev_randao = if (context.fork == .london) context.difficulty else std.mem.readInt(u256, &context.prev_randao, .big), .gas_limit = context.gas_limit, .chain_id = context.chain_id, .base_fee = context.base_fee, .blob_base_fee = context.blob_base_fee orelse 0, .blob_base_fee_supported = context.blob_base_fee != null, .block_hashes = context.block_hashes }, tx.sender, tx.recipient, access);
     var result = try machine.run(.{ .code = world.getCode(tx.recipient), .gas = tx.fields.gas_limit - tx.intrinsic_gas, .caller = tx.sender, .callee = tx.recipient, .value = tx.fields.value, .data = tx.fields.data });
     defer result.deinit(allocator);
-    if (result.status == .fault and (result.status.fault == .unsupported_precompile or result.status.fault == .unsupported_opcode)) return error.UnsupportedExecution;
+    if (result.status == .fault and (result.status.fault == .unsupported_precompile or result.status.fault == .unsupported_opcode or result.status.fault == .missing_context)) return error.UnsupportedExecution;
     const success = result.status == .success;
     if (success) {
         try world.commit(frame);
@@ -223,14 +232,55 @@ fn nextBaseFee(parent_gas_limit: u64, parent_gas_used: u64, parent_base_fee: u25
     return parent_base_fee -| change;
 }
 
+/// Hashes exactly the header fields active in the selected fork.
+pub fn headerHash(allocator: std.mem.Allocator, fork: Fork, header: execution.Header) !execution.Hash {
+    const prefix = .{ header.parent_hash, header.ommers_hash, header.fee_recipient, header.state_root, header.transactions_root, header.receipts_root, header.logs_bloom, header.difficulty, header.number, header.gas_limit, header.gas_used, header.timestamp, header.extra_data, header.prev_randao, header.nonce, header.base_fee_per_gas };
+    const encoded = switch (fork) {
+        .london => try execution.encode(allocator, prefix),
+        .cancun => try execution.encode(allocator, prefix ++ .{ header.withdrawals_root, header.blob_gas_used, header.excess_blob_gas, header.parent_beacon_block_root }),
+        .fulu => try execution.encode(allocator, prefix ++ .{ header.withdrawals_root, header.blob_gas_used, header.excess_blob_gas, header.parent_beacon_block_root, header.requests_hash }),
+    };
+    defer allocator.free(encoded);
+    var hash: execution.Hash = undefined;
+    std.crypto.hash.sha3.Keccak256.hash(encoded, &hash, .{});
+    return hash;
+}
+
+/// Calculates the EIP-4844 blob base fee using the active fork's update fraction.
+pub fn blobBaseFee(fork: Fork, excess_blob_gas: u64) !u256 {
+    if (fork == .london) return error.UnsupportedBlobBaseFee;
+    const denominator: u512 = if (fork == .cancun) 3_338_477 else 5_007_716;
+    var term: u512 = denominator;
+    var sum: u512 = 0;
+    var index: u512 = 1;
+    while (term != 0) : (index += 1) {
+        sum = std.math.add(u512, sum, term) catch return error.BlobBaseFeeOverflow;
+        const numerator = std.math.mul(u512, term, excess_blob_gas) catch return error.BlobBaseFeeOverflow;
+        term = numerator / (denominator * index);
+    }
+    const fee = sum / denominator;
+    if (fee > std.math.maxInt(u256)) return error.BlobBaseFeeOverflow;
+    return @intCast(fee);
+}
+
 /// Rejects headers and withdrawals that cannot follow the supplied parent and fork.
-fn validateBlockHeader(fork: Fork, parent: execution.Header, header: execution.Header, withdrawals: []const execution.Withdrawal) !void {
+fn validateBlockHeader(allocator: std.mem.Allocator, block: BlockContext, parent: execution.Header, header: execution.Header, withdrawals: []const execution.Withdrawal) !execution.Hash {
+    if (@intFromEnum(block.parent_fork) > @intFromEnum(block.fork)) return error.InvalidForkOrder;
+    const parent_hash = try headerHash(allocator, block.parent_fork, parent);
+    if (!std.mem.eql(u8, &header.parent_hash, &parent_hash)) return error.InvalidParentHash;
     if (header.number != std.math.add(u64, parent.number, 1) catch return error.InvalidBlockNumber) return error.InvalidBlockNumber;
     if (header.timestamp <= parent.timestamp) return error.InvalidTimestamp;
     if (parent.gas_used > parent.gas_limit) return error.InvalidParentGasUsed;
     if (header.gas_limit < 5000 or @abs(@as(i128, header.gas_limit) - @as(i128, parent.gas_limit)) >= parent.gas_limit / 1024) return error.InvalidGasLimit;
     if (header.base_fee_per_gas != try nextBaseFee(parent.gas_limit, parent.gas_used, parent.base_fee_per_gas)) return error.InvalidBaseFee;
-    if (fork == .london and withdrawals.len != 0) return error.UnsupportedWithdrawals;
+    if (block.fork == .london and withdrawals.len != 0) return error.UnsupportedWithdrawals;
+    if (block.fork != .london) {
+        const target: u64 = if (block.fork == .cancun) 393_216 else 786_432;
+        const prior: u64 = if (block.parent_fork == .london) 0 else std.math.add(u64, parent.excess_blob_gas, parent.blob_gas_used) catch return error.InvalidExcessBlobGas;
+        if (header.excess_blob_gas != prior -| target) return error.InvalidExcessBlobGas;
+        if (header.blob_gas_used != 0) return error.UnsupportedBlobTransaction;
+    }
+    return parent_hash;
 }
 
 /// Runs transactions in order and copies their logs into the block-owned arena.
@@ -285,19 +335,23 @@ fn verifyBlockCommitments(header: execution.Header, result: BlockResult) !void {
 }
 
 /// Applies ordered transactions and withdrawals, checking all claimed roots atomically.
-pub fn applyBlock(allocator: std.mem.Allocator, world: *state.State, fork: Fork, chain_id: u256, parent: execution.Header, header: execution.Header, transactions: []const []const u8, withdrawals: []const execution.Withdrawal) !BlockResult {
-    try validateBlockHeader(fork, parent, header, withdrawals);
+pub fn applyBlock(allocator: std.mem.Allocator, world: *state.State, block: BlockContext, parent: execution.Header, header: execution.Header, transactions: []const []const u8, withdrawals: []const execution.Withdrawal) !BlockResult {
+    const parent_hash = try validateBlockHeader(allocator, block, parent, header, withdrawals);
+    if (block.older_hashes.len > 255) return error.TooManyAncestorHashes;
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const receipts = try arena.allocator().alloc(execution.Receipt, transactions.len);
+    const block_hashes = try arena.allocator().alloc(execution.Hash, block.older_hashes.len + 1);
+    block_hashes[0] = parent_hash;
+    @memcpy(block_hashes[1..], block.older_hashes);
     const snapshot = try world.snapshot();
     var open = true;
     errdefer if (open) world.revert(snapshot) catch {};
-    const context: Context = .{ .fork = fork, .chain_id = chain_id, .coinbase = header.fee_recipient, .number = header.number, .timestamp = header.timestamp, .gas_limit = header.gas_limit, .base_fee = header.base_fee_per_gas, .prev_randao = header.prev_randao, .difficulty = header.difficulty };
+    const context: Context = .{ .fork = block.fork, .chain_id = block.chain_id, .coinbase = header.fee_recipient, .number = header.number, .timestamp = header.timestamp, .gas_limit = header.gas_limit, .base_fee = header.base_fee_per_gas, .prev_randao = header.prev_randao, .difficulty = header.difficulty, .blob_base_fee = if (block.fork == .london) null else try blobBaseFee(block.fork, header.excess_blob_gas), .block_hashes = block_hashes };
     const gas_used = try applyBlockTransactions(arena.allocator(), world, context, transactions, receipts);
     if (gas_used != header.gas_used) return error.InvalidGasUsed;
-    try applyBlockCredits(world, fork, header.fee_recipient, withdrawals);
-    const result = try blockResult(&arena, world, fork, transactions, withdrawals, receipts, gas_used);
+    try applyBlockCredits(world, block.fork, header.fee_recipient, withdrawals);
+    const result = try blockResult(&arena, world, block.fork, transactions, withdrawals, receipts, gas_used);
     try verifyBlockCommitments(header, result);
     try world.commit(snapshot);
     open = false;

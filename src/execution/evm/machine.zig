@@ -529,6 +529,7 @@ const Frame = struct {
         if (result.status == .fault) {
             if (result.status.fault == .unsupported_precompile) return error.UnsupportedPrecompile;
             if (result.status.fault == .unsupported_opcode) return error.UnsupportedOpcode;
+            if (result.status.fault == .missing_context) return error.MissingContext;
         }
         switch (result.status) {
             .success => {

@@ -64,6 +64,8 @@ Chain:      [Block 0] ───────────────────�
 | Base fee | The per-gas charge set by the previous block's fullness and burned instead of paid to the block producer. |
 | Priority fee | The per-gas amount paid to the block producer above the base fee. |
 | Calldata floor | Prague's minimum gas use for a transaction based on the zero and nonzero bytes it carries. |
+| Excess blob gas | The running amount of blob gas above the fork's target, used to set the next block's blob base fee. |
+| Blob base fee | The per-unit price of blob gas derived from a block's excess blob gas. |
 | Block reward | Execution-layer issuance paid to a block producer before the Merge; post-Merge blocks have no such issuance. |
 | Gas refund | A credit earned by certain storage writes and applied after execution, limited to one fifth of the gas used. |
 | EVM log | An event record emitted by contract code with an address, up to four searchable topics, and byte data. |
