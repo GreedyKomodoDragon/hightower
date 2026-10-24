@@ -451,8 +451,9 @@ const Frame = struct {
         if (self.input.is_static) return error.WriteProtection;
         const offset = try self.pop();
         const length = try self.pop();
-        if (length > std.math.maxInt(u64) / 8) return error.OutOfGas;
-        try self.charge(375 + @as(u64, topics_count) * 375 + @as(u64, @intCast(length)) * 8);
+        const fixed_cost: u64 = 375 + @as(u64, topics_count) * 375;
+        if (length > (std.math.maxInt(u64) - fixed_cost) / 8) return error.OutOfGas;
+        try self.charge(fixed_cost + @as(u64, @intCast(length)) * 8);
         const start = try self.expand(offset, length);
         var topics: [4]state.Hash = .{.{0} ** 32} ** 4;
         for (0..topics_count) |i| std.mem.writeInt(u256, &topics[i], try self.pop(), .big);
@@ -478,7 +479,8 @@ const Frame = struct {
         if (target[19] >= 1 and target[19] <= 0x11 and same(target, precompile)) return error.UnsupportedPrecompile;
         const transfer = (op == 0xf1 or op == 0xf2) and value != 0;
         const account = if (op == 0xf1 and value != 0) try self.machine.world.getAccount(target) else null;
-        try self.charge((if (warm) @as(u64, 100) else 2600) + (if (transfer) @as(u64, 9000) else 0) + (if (op == 0xf1 and value != 0 and account == null) @as(u64, 25000) else 0));
+        const is_empty = if (account) |a| a.nonce == 0 and a.balance == 0 and std.mem.eql(u8, &a.code_hash, &state.EMPTY_CODE_HASH) else true;
+        try self.charge((if (warm) @as(u64, 100) else 2600) + (if (transfer) @as(u64, 9000) else 0) + (if (op == 0xf1 and value != 0 and is_empty) @as(u64, 25000) else 0));
         self.return_data.clearRetainingCapacity();
         if (self.input.depth == 1023 or (transfer and self.machine.world.getBalance(self.input.callee) < value)) {
             try self.push(0);
@@ -1390,6 +1392,45 @@ test "LOG0 through LOG4 retain topic order" {
         try std.testing.expectEqual(@as(u8, @intCast(count)), log_entry.topic_count);
         for (0..count) |i| try std.testing.expectEqual(@as(u8, @intCast(i + 1)), log_entry.topics[i][31]);
     }
+}
+
+test "LOG data cost overflow faults instead of trapping" {
+    var world = state.State.init(std.testing.allocator);
+    defer world.deinit();
+    var machine = Machine.init(std.testing.allocator, &world);
+    defer machine.deinit();
+    const length = [_]u8{ 0x67, 0x1f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    const log0 = length ++ [_]u8{ 0x5f, 0xa0 };
+    var zero_topics = try machine.run(.{ .code = &log0, .gas = 100_000 });
+    defer zero_topics.deinit(std.testing.allocator);
+    try std.testing.expectEqual(Fault.out_of_gas, zero_topics.status.fault);
+    const log4 = [_]u8{ 0x5f, 0x5f, 0x5f, 0x5f } ++ length ++ [_]u8{ 0x5f, 0xa4 };
+    var four_topics = try machine.run(.{ .code = &log4, .gas = 100_000 });
+    defer four_topics.deinit(std.testing.allocator);
+    try std.testing.expectEqual(Fault.out_of_gas, four_topics.status.fault);
+}
+
+test "value CALL charges new-account gas for absent and explicit empty recipients" {
+    var world = state.State.init(std.testing.allocator);
+    defer world.deinit();
+    const parent: state.Address = .{0} ** 19 ++ .{0x20};
+    const empty: state.Address = .{0} ** 19 ++ .{0x22};
+    const nonempty: state.Address = .{0} ** 19 ++ .{0x23};
+    try world.createAccount(empty);
+    try world.setNonce(nonempty, 1);
+    var gas_remaining: [3]u64 = undefined;
+    for ([_]u8{ 0x21, 0x22, 0x23 }, 0..) |recipient, i| {
+        try world.setBalance(parent, 10);
+        var machine = Machine.init(std.testing.allocator, &world);
+        defer machine.deinit();
+        const code = [_]u8{ 0x5f, 0x5f, 0x5f, 0x5f, 0x60, 1, 0x60, recipient, 0x5f, 0xf1 };
+        var result = try machine.run(.{ .code = &code, .gas = 100_000, .callee = parent });
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expect(result.status == .success);
+        gas_remaining[i] = result.gas_remaining;
+    }
+    try std.testing.expectEqual(gas_remaining[0], gas_remaining[1]);
+    try std.testing.expectEqual(gas_remaining[0] + 25_000, gas_remaining[2]);
 }
 
 test "child storage and transient writes revert; STATICCALL cannot write" {
