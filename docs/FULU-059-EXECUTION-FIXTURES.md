@@ -2,7 +2,7 @@
 
 ## Summary
 
-Adds an offline execution fixture test step for transaction codec, state-transition, and EVM cases. The blockchain fixture processor remains separate.
+Adds an offline execution fixture test step for transaction codec, state-transition, and EVM cases. The blockchain processor and broader opcode suite were added in [FULU-062/063](FULU-062-063-EXECUTION-CONFORMANCE.md).
 
 The separate `zig build test-execution` step runs this fixed, offline transaction bundle and the later [EVM core fixture bundle](FULU-050-051-EVM-FIXTURES.md). Transaction cases verify the fixture checksum and oracle fields, decode `txbytes` with the execution RLP codec, and require byte-for-byte re-encoding for valid cases. Invalid cases pass only when the codec returns the expected error. The transaction codec cases do not claim to verify transaction hashes or execution state. The state cases below use the execution transition and compare sender, transaction fields, account state, roots, and logs.
 
@@ -25,13 +25,13 @@ The separate `zig build test-execution` step runs this fixed, offline transactio
 | Check in the six files at the pinned revisions without test-time downloads. | The table above records each source revision, source path, vendored file, and verified SHA-256. The state fixture was added under FULU-061. The files are compile-time embedded by [`fixtures.zig`](../src/execution/fixtures.zig). |
 | Use a fixed manifest and reject checksum, JSON-field, format, or expectation failures. | Each manifest entry includes format, fork, expected outcome, and checksum. The dedicated tests cover checksum mismatch, malformed JSON, a missing expectation, and an unknown format; the runner also validates each format's expected source fields. |
 | Decode and round-trip valid transactions; require the specified invalid-transaction errors without claiming unsupported checks. | `accessListStorage32Bytes` and `tx_simple_type_0_shanghai` decode and re-encode byte-for-byte. The short-address and leading-zero fee cases require `InvalidLength` and `NonCanonicalInteger`. Hashes, senders, and intrinsic gas remain unverified. |
-| Add an independent execution fixture test step with explicit unsupported-case reporting. | `zig build test-execution` reports `6 passed, 1 skipped`. The London blockchain test names the missing blockchain-test processor. |
+| Add an independent execution fixture test step with explicit unsupported-case reporting. | The original step reported `6 passed, 1 skipped`. The current suite and its named unsupported case are recorded in [FULU-062/063](FULU-062-063-EXECUTION-CONFORMANCE.md). |
 
-The pinned Cancun state fixture and the ethereum/tests invalid transaction fixture execute offline and check their selected oracle outcomes. The London blockchain fixture remains a named processor skip, while a focused London block test checks its state and receipt commitments.
+The pinned Cancun state fixture and the ethereum/tests invalid transaction fixture execute offline and check their selected oracle outcomes. The London blockchain fixture now runs through the block processor and checks its state and receipt commitments.
 
 ## Results
 
-The pinned bundle contains four transaction cases and two unsupported execution cases. Expected outcomes are: two canonical round trips, one `InvalidLength`, one `NonCanonicalInteger`, one state-processor skip, and one blockchain-processor skip. The runner additionally exercises malformed JSON, missing expectations, unknown formats, and checksum mismatch through focused failure-path checks.
+The original bundle contained four transaction cases plus state and blockchain fixtures. The current runner executes both formats through the production transition path; current counts and remaining skips are in [FULU-062/063](FULU-062-063-EXECUTION-CONFORMANCE.md). The runner also exercises malformed JSON, missing expectations, unknown formats, and checksum mismatch through focused failure-path checks.
 
 ## Verification
 

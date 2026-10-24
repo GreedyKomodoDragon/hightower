@@ -8,7 +8,13 @@
 // code → stack/memory → storage snapshot → commit or rollback
 // shortcut: transaction-local keys scan arrays and frame checkpoints copy them; use indexed journals if profiling shows this is costly.
 const std = @import("std");
+const builtin = @import("builtin");
 const state = @import("../state.zig");
+
+/// Test-only sink for opcodes fetched by the interpreter, including nested frames.
+pub const coverage = if (builtin.is_test) struct {
+    pub var opcodes: ?*[256]bool = null;
+} else struct {};
 
 /// Executable opcode schedules supported by the transaction machine.
 pub const Fork = enum { london, cancun, fulu };
@@ -552,6 +558,9 @@ const Frame = struct {
     fn execute(self: *Frame) !Result {
         while (self.pc < self.input.code.len) {
             const op = self.input.code[self.pc];
+            if (builtin.is_test) {
+                if (coverage.opcodes) |seen| seen[op] = true;
+            }
             self.pc += 1;
             if (self.machine.environment) |env| {
                 if (env.fork == .london and (op == 0x49 or op == 0x4a or (op >= 0x5c and op <= 0x5f))) return error.InvalidOpcode;

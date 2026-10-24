@@ -12,6 +12,7 @@ pub const Fault = core.Fault;
 pub const Status = core.Status;
 pub const Result = core.Result;
 pub const Machine = core.Machine;
+pub const coverage = core.coverage;
 
 test {
     _ = @import("evm/tests.zig");

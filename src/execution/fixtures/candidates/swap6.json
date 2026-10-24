@@ -1,0 +1,112 @@
+{
+  "tests/frontier/opcodes/test_swap.py::test_swap[fork_Cancun-state_test-SWAP6]": {
+    "env": {
+      "currentCoinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+      "currentGasLimit": "0x07270e00",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentDifficulty": "0x00",
+      "currentBaseFee": "0x07",
+      "currentExcessBlobGas": "0x00"
+    },
+    "pre": {
+      "0xbea8874097f7e7bb9eb5b2195da6d03a7cfb68f6": {
+        "nonce": "0x01",
+        "balance": "0x00",
+        "code": "0x601560146013601260116010600f600e600d600c600b600a600960086007600660056004600360026001600095600055600155600255600355600455600555600655600755600855600955600a55600b55600c55600d55600e55600f55",
+        "storage": {}
+      },
+      "0xd6f25c0a165bdf92d06e9e1a31aeacc9ddeb8ace": {
+        "nonce": "0x00",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "gasLimit": [
+        "0x07a120"
+      ],
+      "to": "0xbea8874097f7e7bb9eb5b2195da6d03a7cfb68f6",
+      "value": [
+        "0x00"
+      ],
+      "data": [
+        "0x"
+      ],
+      "sender": "0xd6f25c0a165bdf92d06e9e1a31aeacc9ddeb8ace",
+      "secretKey": "0x1a006d7fea1fab4243cf2542bea8874097f7e7bb9eb5b2195da6d03a7cfb68f6"
+    },
+    "post": {
+      "Cancun": [
+        {
+          "hash": "0xe66514f5feaf81595d0703269ff9d53765afb656913005e2374126a4b3bf9da2",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+          "txbytes": "0xf860800a8307a12094bea8874097f7e7bb9eb5b2195da6d03a7cfb68f6808026a0100c1db7369c4317b5006a5cb5738ee6a67fbdd872bc5b91aee53d9e15fd89e4a05eef153c32a1ca97539ec0285cb79907145d7aa859d3d093cbcfb209b815a99a",
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "state": {
+            "0xbea8874097f7e7bb9eb5b2195da6d03a7cfb68f6": {
+              "nonce": "0x01",
+              "balance": "0x00",
+              "code": "0x601560146013601260116010600f600e600d600c600b600a600960086007600660056004600360026001600095600055600155600255600355600455600555600655600755600855600955600a55600b55600c55600d55600e55600f55",
+              "storage": {
+                "0x00": "0x06",
+                "0x01": "0x01",
+                "0x02": "0x02",
+                "0x03": "0x03",
+                "0x04": "0x04",
+                "0x05": "0x05",
+                "0x07": "0x07",
+                "0x08": "0x08",
+                "0x09": "0x09",
+                "0x0a": "0x0a",
+                "0x0b": "0x0b",
+                "0x0c": "0x0c",
+                "0x0d": "0x0d",
+                "0x0e": "0x0e",
+                "0x0f": "0x0f"
+              }
+            },
+            "0xd6f25c0a165bdf92d06e9e1a31aeacc9ddeb8ace": {
+              "nonce": "0x01",
+              "balance": "0x3635c9adc5de69dbf6",
+              "code": "0x",
+              "storage": {}
+            },
+            "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba": {
+              "nonce": "0x00",
+              "balance": "0x103e03",
+              "code": "0x",
+              "storage": {}
+            }
+          }
+        }
+      ]
+    },
+    "config": {
+      "blobSchedule": {
+        "Cancun": {
+          "target": "0x03",
+          "max": "0x06",
+          "baseFeeUpdateFraction": "0x32f0ed"
+        }
+      },
+      "chainid": "0x01"
+    },
+    "_info": {
+      "hash": "0x968975329ab5f3dcb532fc94226ff377513c6703bc840c81a5d105229667f85b",
+      "comment": "`execution-specs` generated test",
+      "filling-transition-tool": "2.18.0rc6",
+      "description": "The set of `SWAP*` opcodes swaps the top of the stack with a specific\n    element.\n\n    In this test, we ensure that the set of `SWAP*` opcodes correctly swaps\n    the top element with the nth element and stores the result in storage.",
+      "url": "https://github.com/ethereum/execution-specs/blob/tests-v5.4.0/tests/frontier/opcodes/test_swap.py#L25",
+      "fixture-format": "state_test"
+    }
+  }
+}
