@@ -275,7 +275,6 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "consensus", .module = consensus_mod },
             .{ .name = "fulu", .module = fulu_mod },
-            .{ .name = "merkle", .module = merkle_mod },
         },
     });
     mod.addImport("api", api_mod);

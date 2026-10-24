@@ -70,6 +70,10 @@ test "Beacon API resolves canonical roots and rejects invalid requests" {
         }
     }
     const cases = [_]struct { path: []const u8, status: std.http.Status }{
+        .{ .path = "/eth/v1/beacon/blocks/root", .status = .bad_request },
+        .{ .path = "/eth/v1/beacon/blocks//root", .status = .bad_request },
+        .{ .path = "/eth/v1/beacon/states/root", .status = .bad_request },
+        .{ .path = "/eth/v1/beacon/states/finality_checkpoints", .status = .bad_request },
         .{ .path = "/eth/v1/beacon/blocks/nope/root", .status = .bad_request },
         .{ .path = "/eth/v1/beacon/blocks/0x1234/root", .status = .bad_request },
         .{ .path = "/eth/v1/beacon/blocks/999/root", .status = .not_found },

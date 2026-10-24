@@ -47,7 +47,7 @@ zig build test -- --fuzz
 
 The compiled binary lands in `zig-out/bin/hightower`.
 
-CI (`.github/workflows/ci.yml`): `zig fmt --check`, `zig build`, `zig build test`, and Bruno HTTP checks on Zig 0.16.0.
+CI (`.github/workflows/ci.yml`): `zig fmt --check`, `zig build`, `zig build test`, `zig build test-transition`, and Bruno HTTP checks on Zig 0.16.0.
 
 ## Project layout
 

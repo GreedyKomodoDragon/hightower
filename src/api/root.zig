@@ -7,7 +7,6 @@
 // the node owns concurrent imports in FULU-028.
 const std = @import("std");
 const fulu = @import("fulu");
-const merkle = @import("merkle");
 const consensus = @import("consensus");
 
 pub const Metadata = struct {
@@ -63,6 +62,7 @@ pub fn dispatch(allocator: std.mem.Allocator, store: ?*const consensus.ForkChoic
     const block_prefix = "/eth/v1/beacon/blocks/";
     const state_prefix = "/eth/v1/beacon/states/";
     if (std.mem.startsWith(u8, path, block_prefix) and std.mem.endsWith(u8, path, "/root")) {
+        if (path.len <= block_prefix.len + "/root".len) return reply(allocator, .bad_request, "invalid identifier");
         const id = path[block_prefix.len .. path.len - "/root".len];
         const root = resolveBlock(chain, head, id) catch |err| return idError(allocator, err);
         return jsonResponse(allocator, .ok, .{ .data = .{ .root = hexBytes(32, root) }, .execution_optimistic = false, .finalized = isFinalized(chain, root) });
@@ -72,8 +72,9 @@ pub fn dispatch(allocator: std.mem.Allocator, store: ?*const consensus.ForkChoic
         const state_root = std.mem.endsWith(u8, path, "/root");
         if (!finality and !state_root) return reply(allocator, .not_found, "not found");
         const suffix_len: usize = if (finality) "/finality_checkpoints".len else "/root".len;
+        if (path.len <= state_prefix.len + suffix_len) return reply(allocator, .bad_request, "invalid identifier");
         const id = path[state_prefix.len .. path.len - suffix_len];
-        const resolved = resolveState(allocator, chain, head, id) catch |err| return idError(allocator, err);
+        const resolved = resolveState(chain, head, id) catch |err| return idError(allocator, err);
         if (state_root) return jsonResponse(allocator, .ok, .{ .data = .{ .root = hexBytes(32, resolved.root) }, .execution_optimistic = false, .finalized = isFinalized(chain, resolved.block_root) });
         const state = resolved.state;
         var epoch_buffers: [3][20]u8 = undefined;
@@ -154,22 +155,23 @@ fn genesisRoot(store: *const consensus.ForkChoiceStore, head: fulu.Root) !fulu.R
 const ResolvedState = struct { root: fulu.Root, block_root: fulu.Root, state: fulu.BeaconState };
 
 /// Resolve a state by keyword, canonical block slot, or post-state root.
-fn resolveState(allocator: std.mem.Allocator, store: *const consensus.ForkChoiceStore, head: fulu.Root, id: []const u8) !ResolvedState {
-    var block_root: fulu.Root = undefined;
+fn resolveState(store: *const consensus.ForkChoiceStore, head: fulu.Root, id: []const u8) !ResolvedState {
     if (std.mem.startsWith(u8, id, "0x")) {
         if (id.len != 66) return error.MalformedId;
         var wanted: fulu.Root = undefined;
         _ = std.fmt.hexToBytes(&wanted, id[2..]) catch return error.MalformedId;
-        var states = store.block_states.iterator();
-        while (states.next()) |entry| {
-            const root = try merkle.HashTreeRoot(allocator, entry.value_ptr.*);
-            if (std.mem.eql(u8, &root, &wanted)) return .{ .root = root, .block_root = entry.key_ptr.*, .state = entry.value_ptr.* };
+        var blocks = store.blocks.iterator();
+        while (blocks.next()) |entry| {
+            if (!std.mem.eql(u8, &entry.value_ptr.state_root, &wanted)) continue;
+            const state = store.block_states.get(entry.key_ptr.*) orelse return error.UnknownId;
+            return .{ .root = wanted, .block_root = entry.key_ptr.*, .state = state };
         }
         return error.UnknownId;
     }
-    block_root = if (std.mem.eql(u8, id, "justified")) store.justified_checkpoint.root else try resolveBlock(store, head, id);
+    const block_root = if (std.mem.eql(u8, id, "justified")) store.justified_checkpoint.root else try resolveBlock(store, head, id);
+    const block = store.blocks.get(block_root) orelse return error.UnknownId;
     const state = store.block_states.get(block_root) orelse return error.UnknownId;
-    return .{ .root = try merkle.HashTreeRoot(allocator, state), .block_root = block_root, .state = state };
+    return .{ .root = block.state_root, .block_root = block_root, .state = state };
 }
 
 /// Parse a nonempty decimal slot without signs, separators, or overflow.
