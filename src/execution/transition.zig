@@ -100,11 +100,25 @@ fn calldataFloor(data: []const u8) !u64 {
     return gas;
 }
 
-/// Applies one signed encoded transaction, leaving state untouched for invalid input.
-pub fn applyTransaction(allocator: std.mem.Allocator, world: *state.State, context: Context, raw: []const u8, available_gas: u64, cumulative_gas: u64) !Outcome {
-    var decoded = try execution.parse(execution.Transaction, allocator, raw);
-    defer decoded.deinit();
-    const tx = decoded.value;
+const ValidatedTx = struct {
+    fields: TxFields,
+    sender: execution.Address,
+    recipient: execution.Address,
+    intrinsic_gas: u64,
+    max_cost: u256,
+    effective_price: u256,
+};
+
+const FrameOutcome = struct {
+    success: bool,
+    gas_remaining: u64,
+    refund: u64,
+    logs: []const execution.Log,
+    output: []const u8,
+};
+
+/// Checks every transaction rule that can reject input before any state mutation.
+fn validateTransaction(allocator: std.mem.Allocator, world: *state.State, context: Context, tx: execution.Transaction, available_gas: u64) !ValidatedTx {
     const f = try fields(tx, context.fork);
     const sender = try execution.recoverSender(allocator, tx, context.chain_id);
     if (world.getNonce(sender) != f.nonce) return error.InvalidNonce;
@@ -116,41 +130,35 @@ pub fn applyTransaction(allocator: std.mem.Allocator, world: *state.State, conte
     const upfront = std.math.add(u256, max_cost, f.value) catch return error.InsufficientBalance;
     if (world.getBalance(sender) < upfront) return error.InsufficientBalance;
     if (f.nonce == std.math.maxInt(u64)) return error.InvalidNonce;
-    if (f.to == null) return error.UnsupportedContractCreation;
-    const recipient = f.to.?;
+    const recipient = f.to orelse return error.UnsupportedContractCreation;
     const precompile_limit: u8 = switch (context.fork) {
         .london => 9,
         .cancun => 10,
         .fulu => 17,
     };
     if (recipient[19] != 0 and recipient[19] <= precompile_limit and std.mem.allEqual(u8, recipient[0..19], 0)) return error.UnsupportedExecution;
+    return .{ .fields = f, .sender = sender, .recipient = recipient, .intrinsic_gas = intrinsic, .max_cost = max_cost, .effective_price = @min(f.max_fee, std.math.add(u256, context.base_fee, f.priority_fee) catch std.math.maxInt(u256)) };
+}
 
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    errdefer arena.deinit();
-    const a = arena.allocator();
-    const snap = try world.snapshot();
-    var open = true;
-    errdefer if (open) world.revert(snap) catch {};
-    const effective_price = @min(f.max_fee, std.math.add(u256, context.base_fee, f.priority_fee) catch std.math.maxInt(u256));
-    try world.setBalance(sender, world.getBalance(sender) - max_cost);
-    try world.setNonce(sender, f.nonce + 1);
+/// Executes the value transfer and EVM frame, copying logs before the machine is released.
+fn executeFrame(allocator: std.mem.Allocator, owner: std.mem.Allocator, world: *state.State, context: Context, tx: ValidatedTx) !FrameOutcome {
     const frame = try world.snapshot();
     var frame_open = true;
     errdefer if (frame_open) world.revert(frame) catch {};
-    if (f.value != 0) {
-        try world.setBalance(sender, world.getBalance(sender) - f.value);
-        try world.setBalance(recipient, std.math.add(u256, world.getBalance(recipient), f.value) catch return error.BalanceOverflow);
+    if (tx.fields.value != 0) {
+        try world.setBalance(tx.sender, world.getBalance(tx.sender) - tx.fields.value);
+        try world.setBalance(tx.recipient, std.math.add(u256, world.getBalance(tx.recipient), tx.fields.value) catch return error.BalanceOverflow);
     }
     var machine = evm.Machine.init(allocator, world);
     defer machine.deinit();
-    const access = try a.alloc(evm.Access, f.access_list.len);
-    for (f.access_list, 0..) |item, i| {
-        const keys = try a.alloc(u256, item.storage_keys.len);
+    const access = try owner.alloc(evm.Access, tx.fields.access_list.len);
+    for (tx.fields.access_list, 0..) |item, i| {
+        const keys = try owner.alloc(u256, item.storage_keys.len);
         for (item.storage_keys, 0..) |key, j| keys[j] = std.mem.readInt(u256, &key, .big);
         access[i] = .{ .address = item.address, .storage_keys = keys };
     }
-    try machine.configure(.{ .fork = context.fork, .origin = sender, .gas_price = effective_price, .coinbase = context.coinbase, .timestamp = context.timestamp, .number = context.number, .prev_randao = if (context.fork == .london) context.difficulty else std.mem.readInt(u256, &context.prev_randao, .big), .gas_limit = context.gas_limit, .chain_id = context.chain_id, .base_fee = context.base_fee, .blob_base_fee = context.blob_base_fee orelse 0, .blob_base_fee_supported = context.blob_base_fee != null }, sender, recipient, access);
-    var result = try machine.run(.{ .code = world.getCode(recipient), .gas = f.gas_limit - intrinsic, .caller = sender, .callee = recipient, .value = f.value, .data = f.data });
+    try machine.configure(.{ .fork = context.fork, .origin = tx.sender, .gas_price = tx.effective_price, .coinbase = context.coinbase, .timestamp = context.timestamp, .number = context.number, .prev_randao = if (context.fork == .london) context.difficulty else std.mem.readInt(u256, &context.prev_randao, .big), .gas_limit = context.gas_limit, .chain_id = context.chain_id, .base_fee = context.base_fee, .blob_base_fee = context.blob_base_fee orelse 0, .blob_base_fee_supported = context.blob_base_fee != null }, tx.sender, tx.recipient, access);
+    var result = try machine.run(.{ .code = world.getCode(tx.recipient), .gas = tx.fields.gas_limit - tx.intrinsic_gas, .caller = tx.sender, .callee = tx.recipient, .value = tx.fields.value, .data = tx.fields.data });
     defer result.deinit(allocator);
     if (result.status == .fault and (result.status.fault == .unsupported_precompile or result.status.fault == .unsupported_opcode)) return error.UnsupportedExecution;
     const success = result.status == .success;
@@ -160,27 +168,47 @@ pub fn applyTransaction(allocator: std.mem.Allocator, world: *state.State, conte
         try world.revert(frame);
     }
     frame_open = false;
-    const spent = f.gas_limit - result.gas_remaining;
-    const refund: u64 = if (success) machine.cappedRefund(spent) else 0;
-    const floor = if (context.fork == .fulu) try calldataFloor(f.data) else 0;
-    const gas_used = @max(spent - refund, floor);
-    const actual_cost = std.math.mul(u256, effective_price, gas_used) catch return error.BalanceOverflow;
-    try world.setBalance(sender, std.math.add(u256, world.getBalance(sender), max_cost - actual_cost) catch return error.BalanceOverflow);
-    const tip = std.math.mul(u256, effective_price - context.base_fee, gas_used) catch return error.BalanceOverflow;
+    const spent = tx.fields.gas_limit - result.gas_remaining;
+    const logs = try owner.alloc(execution.Log, if (success) machine.emittedLogs().len else 0);
+    for (logs, machine.emittedLogs()) |*dest, source| dest.* = .{ .address = source.address, .topics = try owner.dupe(execution.Hash, source.topics[0..source.topic_count]), .data = try owner.dupe(u8, source.data) };
+    return .{ .success = success, .gas_remaining = result.gas_remaining, .refund = if (success) machine.cappedRefund(spent) else 0, .logs = logs, .output = try owner.dupe(u8, result.output) };
+}
+
+/// Refunds unused gas to the sender and pays only the priority fee to coinbase.
+fn settleFees(world: *state.State, context: Context, tx: ValidatedTx, gas_used: u64) !void {
+    const actual_cost = std.math.mul(u256, tx.effective_price, gas_used) catch return error.BalanceOverflow;
+    try world.setBalance(tx.sender, std.math.add(u256, world.getBalance(tx.sender), tx.max_cost - actual_cost) catch return error.BalanceOverflow);
+    const tip = std.math.mul(u256, tx.effective_price - context.base_fee, gas_used) catch return error.BalanceOverflow;
     try world.setBalance(context.coinbase, std.math.add(u256, world.getBalance(context.coinbase), tip) catch return error.BalanceOverflow);
-    const logs = try a.alloc(execution.Log, if (success) machine.emittedLogs().len else 0);
-    for (logs, machine.emittedLogs()) |*dest, source| dest.* = .{ .address = source.address, .topics = try a.dupe(execution.Hash, source.topics[0..source.topic_count]), .data = try a.dupe(u8, source.data) };
-    const payload: execution.ReceiptPayload = .{ .status = if (success) 1 else 0, .cumulative_gas_used = std.math.add(u64, cumulative_gas, gas_used) catch return error.BlockGasLimitExceeded, .logs = logs, .logs_bloom = execution.logsBloom(logs) };
-    const receipt: execution.Receipt = switch (tx) {
+}
+
+/// Applies one signed encoded transaction, leaving state untouched for invalid input.
+pub fn applyTransaction(allocator: std.mem.Allocator, world: *state.State, context: Context, raw: []const u8, available_gas: u64, cumulative_gas: u64) !Outcome {
+    var decoded = try execution.parse(execution.Transaction, allocator, raw);
+    defer decoded.deinit();
+    const tx = try validateTransaction(allocator, world, context, decoded.value, available_gas);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const snap = try world.snapshot();
+    var open = true;
+    errdefer if (open) world.revert(snap) catch {};
+    try world.setBalance(tx.sender, world.getBalance(tx.sender) - tx.max_cost);
+    try world.setNonce(tx.sender, tx.fields.nonce + 1);
+    const frame = try executeFrame(allocator, arena.allocator(), world, context, tx);
+    const spent = tx.fields.gas_limit - frame.gas_remaining;
+    const floor = if (context.fork == .fulu) try calldataFloor(tx.fields.data) else 0;
+    const gas_used = @max(spent - frame.refund, floor);
+    try settleFees(world, context, tx, gas_used);
+    const payload: execution.ReceiptPayload = .{ .status = if (frame.success) 1 else 0, .cumulative_gas_used = std.math.add(u64, cumulative_gas, gas_used) catch return error.BlockGasLimitExceeded, .logs = frame.logs, .logs_bloom = execution.logsBloom(frame.logs) };
+    const receipt: execution.Receipt = switch (decoded.value) {
         .legacy => .{ .legacy = payload },
         .access_list => .{ .access_list = payload },
         .dynamic_fee => .{ .dynamic_fee = payload },
         else => unreachable,
     };
-    const output = try a.dupe(u8, result.output);
     try world.commit(snap);
     open = false;
-    return .{ .arena = arena, .receipt = receipt, .gas_used = gas_used, .output = output };
+    return .{ .arena = arena, .receipt = receipt, .gas_used = gas_used, .output = frame.output };
 }
 
 /// Calculates EIP-1559's next base fee from the parent gas target.
