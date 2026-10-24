@@ -1,0 +1,16 @@
+meta {
+  name: Missing state identifier
+  type: http
+  seq: 13
+}
+
+get {
+  url: {{host}}/eth/v1/beacon/states/root
+}
+
+tests {
+  test("missing state identifiers return 400 without crashing the server", function () {
+    expect(res.status).to.equal(400);
+    expect(res.body).to.deep.equal({ code: 400, message: "invalid identifier" });
+  });
+}

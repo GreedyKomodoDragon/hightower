@@ -1,0 +1,23 @@
+meta {
+  name: Syncing
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{host}}/eth/v1/node/syncing
+}
+
+tests {
+  test("syncing response has Beacon API fields", function () {
+    expect(res.status).to.equal(200);
+    expect(res.getHeader("content-type")).to.equal("application/json");
+    expect(res.body.data).to.deep.equal({
+      head_slot: "0",
+      sync_distance: "0",
+      is_syncing: false,
+      is_optimistic: false,
+      el_offline: false
+    });
+  });
+}

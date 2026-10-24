@@ -1,0 +1,16 @@
+meta {
+  name: Block by root
+  type: http
+  seq: 5
+}
+
+get {
+  url: {{host}}/eth/v1/beacon/blocks/{{block_root}}/root
+}
+
+tests {
+  test("the returned block root resolves by identifier", function () {
+    expect(res.status).to.equal(200);
+    expect(res.body.data.root).to.equal(bru.getVar("block_root"));
+  });
+}

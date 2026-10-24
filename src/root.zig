@@ -3,13 +3,15 @@
 //! slots, epochs, and signed blocks. Block transitions require an injected
 //! execution engine because transaction validity is decided outside beacon
 //! consensus. Both exports use the same Fulu types so callers can pass a
-//! decoded `fulu.BeaconState` directly to the transition functions.
+//! decoded `fulu.BeaconState` directly to the transition functions. `api`
+//! provides the read-only HTTP layer over a stable consensus store.
 const std = @import("std");
 
 pub const fulu = @import("fulu");
 pub const preset = @import("consensus_preset");
 pub const execution = @import("execution");
-pub const consensus = @import("consensus/root.zig");
+pub const consensus = @import("consensus");
+pub const api = @import("api");
 
 test "Fulu shared types are exported" {
     _ = @sizeOf(fulu.SyncAggregate);

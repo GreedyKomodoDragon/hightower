@@ -1,0 +1,19 @@
+meta {
+  name: Genesis
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{host}}/eth/v1/beacon/genesis
+}
+
+tests {
+  test("genesis metadata is returned", function () {
+    expect(res.status).to.equal(200);
+    expect(res.getHeader("content-type")).to.equal("application/json");
+    expect(res.body.data.genesis_time).to.match(/^\d+$/);
+    expect(res.body.data.genesis_validators_root).to.match(/^0x[0-9a-f]{64}$/);
+    expect(res.body.data.genesis_fork_version).to.equal("0x00000000");
+  });
+}

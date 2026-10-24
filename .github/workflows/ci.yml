@@ -18,3 +18,10 @@ jobs:
       - run: zig fmt --check build.zig build.zig.zon src
       - run: zig build
       - run: zig build test
+      - run: zig build test-transition
+      - run: zig build api-test-server
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm install --global @usebruno/cli@4.3.0
+      - run: bash scripts/test_beacon_api.sh

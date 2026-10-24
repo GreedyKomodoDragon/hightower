@@ -255,6 +255,45 @@ pub fn build(b: *std.Build) void {
     });
     mod.addImport("ssz", ssz_mod);
     mod.addImport("merkle", merkle_mod);
+    const consensus_mod = b.createModule(.{
+        .root_source_file = b.path("src/consensus/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "fulu", .module = fulu_mod },
+            .{ .name = "blst", .module = blst },
+            .{ .name = "ssz", .module = ssz_mod },
+            .{ .name = "merkle", .module = merkle_mod },
+            .{ .name = "consensus_preset", .module = consensus_preset_mod },
+        },
+    });
+    mod.addImport("consensus", consensus_mod);
+    const api_mod = b.addModule("hightower_api", .{
+        .root_source_file = b.path("src/api/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "consensus", .module = consensus_mod },
+            .{ .name = "fulu", .module = fulu_mod },
+        },
+    });
+    mod.addImport("api", api_mod);
+    const api_test_server = b.addExecutable(.{
+        .name = "hightower-api-test-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/api/test_server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "api", .module = api_mod },
+                .{ .name = "consensus", .module = consensus_mod },
+                .{ .name = "fulu", .module = fulu_mod },
+                .{ .name = "ssz", .module = ssz_mod },
+            },
+        }),
+    });
+    const api_test_server_step = b.step("api-test-server", "Build the fixture-backed Beacon API test server");
+    api_test_server_step.dependOn(&b.addInstallArtifact(api_test_server, .{}).step);
 
     const ssz_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -309,12 +348,27 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    const api_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/api/tests.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "api", .module = api_mod },
+                .{ .name = "consensus", .module = consensus_mod },
+                .{ .name = "fulu", .module = fulu_mod },
+                .{ .name = "ssz", .module = ssz_mod },
+                .{ .name = "merkle", .module = merkle_mod },
+            },
+        }),
+    });
 
     const run_tests = b.addRunArtifact(rlp_tests);
     const run_tests_ssz = b.addRunArtifact(ssz_tests);
     const run_tests_merkle = b.addRunArtifact(merkle_tests);
     const run_fulu_tests = b.addRunArtifact(fulu_tests);
     const run_consensus_tests = b.addRunArtifact(consensus_tests);
+    const run_api_tests = b.addRunArtifact(api_tests);
 
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
@@ -335,6 +389,9 @@ pub fn build(b: *std.Build) void {
 
     const transition_test_step = b.step("test-transition", "Run selected Fulu transition fixture tests");
     transition_test_step.dependOn(&run_consensus_tests.step);
+    transition_test_step.dependOn(&run_api_tests.step);
+    const api_test_step = b.step("test-api", "Run Beacon API tests");
+    api_test_step.dependOn(&run_api_tests.step);
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
