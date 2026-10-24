@@ -49,6 +49,17 @@ Chain:      [Block 0] ───────────────────�
 | Authorization list | Signed permissions carried by a set-code transaction to delegate account behavior. |
 | Execution receipt | The status, gas tally, bloom, and logs produced by a transaction. |
 | Execution account | An address's nonce, balance, storage root, and code hash, encoded into the execution state trie. |
+| Ethereum Virtual Machine (EVM) | The execution engine that runs a contract's bytecode one instruction at a time. |
+| Opcode | A one-byte EVM instruction that operates on stack, memory, or state and consumes gas. |
+| Call frame | One invocation of contract code, with its own stack, memory, gas balance, and return data. |
+| Gas | The metered budget consumed by EVM operations; running out makes the current frame fail. |
+| EVM stack | A last-in, first-out list of up to 1,024 256-bit words used as instruction operands. |
+| EVM memory | Temporary byte-addressed data within a call frame, charged as it grows in 32-byte words. |
+| Persistent storage | A contract's word-addressed state committed to its storage trie across transactions. |
+| Transient storage | A contract's word-addressed data shared within one transaction and discarded afterward; reverted frames undo their writes. |
+| Warm storage slot | A contract storage key already accessed in the transaction, so later access costs less gas. |
+| State snapshot | A checkpoint that lets a reverted or failed frame undo its state changes. |
+| REVERT | An EVM instruction that returns bytes and remaining gas while undoing the frame's state changes. |
 | Bloom filter (logs bloom) | A 2048-bit probabilistic filter built from log addresses and topics; it can rule out matches but may report false positives. |
 | Ommers | Older side-branch block headers; post-Merge execution blocks carry an empty list. |
 | Execution withdrawal | A consensus-authorized transfer of validator funds to an execution address. |
