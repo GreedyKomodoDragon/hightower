@@ -59,6 +59,12 @@ Chain:      [Block 0] ───────────────────�
 | Transient storage | A contract's word-addressed data shared within one transaction and discarded afterward; reverted frames undo their writes. |
 | Warm storage slot | A contract storage key already accessed in the transaction, so later access costs less gas. |
 | Warm account | An address already accessed or declared by a transaction, so later account access costs less gas. |
+| Intrinsic gas | The minimum gas charged for a transaction's envelope, calldata, and access list before EVM code runs. |
+| Block gas limit | The maximum total gas transactions in an execution block may consume. |
+| Base fee | The per-gas charge set by the previous block's fullness and burned instead of paid to the block producer. |
+| Priority fee | The per-gas amount paid to the block producer above the base fee. |
+| Calldata floor | Prague's minimum gas use for a transaction based on the zero and nonzero bytes it carries. |
+| Block reward | Execution-layer issuance paid to a block producer before the Merge; post-Merge blocks have no such issuance. |
 | Gas refund | A credit earned by certain storage writes and applied after execution, limited to one fifth of the gas used. |
 | EVM log | An event record emitted by contract code with an address, up to four searchable topics, and byte data. |
 | Precompile | A built-in execution function reached through a reserved address rather than contract bytecode. |
