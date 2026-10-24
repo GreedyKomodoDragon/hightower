@@ -192,6 +192,14 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    const evm_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/execution/evm.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "rlp", .module = rlp_mod }},
+        }),
+    });
     const execution_fixture_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/execution/fixtures.zig"),
@@ -377,6 +385,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_tests.step);
     const run_execution_tests = b.addRunArtifact(execution_tests);
     test_step.dependOn(&run_execution_tests.step);
+    const run_evm_tests = b.addRunArtifact(evm_tests);
+    test_step.dependOn(&run_evm_tests.step);
     const run_bloom_filter_tests = b.addRunArtifact(bloom_filter_tests);
     test_step.dependOn(&run_bloom_filter_tests.step);
 
