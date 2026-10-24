@@ -1,0 +1,181 @@
+{
+  "sstore_source": "https://eips.ethereum.org/EIPS/eip-3529#test-cases",
+  "mcopy_source": "https://eips.ethereum.org/EIPS/eip-5656#test-cases",
+  "rules": "Fulu: EIP-3529 reduced-refund table plus 2100 for the initially cold slot under EIP-2929; MCOPY full-program gas includes PUSH, MSTORE and RETURN",
+  "sstore": [
+    {
+      "name": "original_0_writes_0_0",
+      "initial_slot": 0,
+      "code": "0x60006000556000600055",
+      "gas_used": 2312,
+      "refund": 0,
+      "final_slot": 0
+    },
+    {
+      "name": "original_0_writes_0_1",
+      "initial_slot": 0,
+      "code": "0x60006000556001600055",
+      "gas_used": 22212,
+      "refund": 0,
+      "final_slot": 1
+    },
+    {
+      "name": "original_0_writes_1_0",
+      "initial_slot": 0,
+      "code": "0x60016000556000600055",
+      "gas_used": 22212,
+      "refund": 19900,
+      "final_slot": 0
+    },
+    {
+      "name": "original_0_writes_1_2",
+      "initial_slot": 0,
+      "code": "0x60016000556002600055",
+      "gas_used": 22212,
+      "refund": 0,
+      "final_slot": 2
+    },
+    {
+      "name": "original_0_writes_1_1",
+      "initial_slot": 0,
+      "code": "0x60016000556001600055",
+      "gas_used": 22212,
+      "refund": 0,
+      "final_slot": 1
+    },
+    {
+      "name": "original_1_writes_0_0",
+      "initial_slot": 1,
+      "code": "0x60006000556000600055",
+      "gas_used": 5112,
+      "refund": 4800,
+      "final_slot": 0
+    },
+    {
+      "name": "original_1_writes_0_1",
+      "initial_slot": 1,
+      "code": "0x60006000556001600055",
+      "gas_used": 5112,
+      "refund": 2800,
+      "final_slot": 1
+    },
+    {
+      "name": "original_1_writes_0_2",
+      "initial_slot": 1,
+      "code": "0x60006000556002600055",
+      "gas_used": 5112,
+      "refund": 0,
+      "final_slot": 2
+    },
+    {
+      "name": "original_1_writes_2_0",
+      "initial_slot": 1,
+      "code": "0x60026000556000600055",
+      "gas_used": 5112,
+      "refund": 4800,
+      "final_slot": 0
+    },
+    {
+      "name": "original_1_writes_2_3",
+      "initial_slot": 1,
+      "code": "0x60026000556003600055",
+      "gas_used": 5112,
+      "refund": 0,
+      "final_slot": 3
+    },
+    {
+      "name": "original_1_writes_2_1",
+      "initial_slot": 1,
+      "code": "0x60026000556001600055",
+      "gas_used": 5112,
+      "refund": 2800,
+      "final_slot": 1
+    },
+    {
+      "name": "original_1_writes_2_2",
+      "initial_slot": 1,
+      "code": "0x60026000556002600055",
+      "gas_used": 5112,
+      "refund": 0,
+      "final_slot": 2
+    },
+    {
+      "name": "original_1_writes_1_0",
+      "initial_slot": 1,
+      "code": "0x60016000556000600055",
+      "gas_used": 5112,
+      "refund": 4800,
+      "final_slot": 0
+    },
+    {
+      "name": "original_1_writes_1_2",
+      "initial_slot": 1,
+      "code": "0x60016000556002600055",
+      "gas_used": 5112,
+      "refund": 0,
+      "final_slot": 2
+    },
+    {
+      "name": "original_1_writes_1_1",
+      "initial_slot": 1,
+      "code": "0x60016000556001600055",
+      "gas_used": 2312,
+      "refund": 0,
+      "final_slot": 1
+    },
+    {
+      "name": "original_0_writes_1_0_1",
+      "initial_slot": 0,
+      "code": "0x600160005560006000556001600055",
+      "gas_used": 42218,
+      "refund": 19900,
+      "final_slot": 1
+    },
+    {
+      "name": "original_1_writes_0_1_0",
+      "initial_slot": 1,
+      "code": "0x600060005560016000556000600055",
+      "gas_used": 8018,
+      "refund": 7600,
+      "final_slot": 0
+    }
+  ],
+  "mcopy": [
+    {
+      "name": "copy_full_word",
+      "pre": "0000000000000000000000000000000000000000000000000000000000000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "dst": 0,
+      "src": 32,
+      "length": 32,
+      "expected": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "gas_used": 45
+    },
+    {
+      "name": "copy_same_word",
+      "pre": "0101010101010101010101010101010101010101010101010101010101010101",
+      "dst": 0,
+      "src": 0,
+      "length": 32,
+      "expected": "0101010101010101010101010101010101010101010101010101010101010101",
+      "gas_used": 33
+    },
+    {
+      "name": "overlap_left",
+      "pre": "0001020304050607080000000000000000000000000000000000000000000000",
+      "dst": 0,
+      "src": 1,
+      "length": 8,
+      "expected": "0102030405060708080000000000000000000000000000000000000000000000",
+      "gas_used": 33
+    },
+    {
+      "name": "overlap_right",
+      "pre": "0001020304050607080000000000000000000000000000000000000000000000",
+      "dst": 1,
+      "src": 0,
+      "length": 8,
+      "expected": "0000010203040506070000000000000000000000000000000000000000000000",
+      "gas_used": 33
+    }
+  ]
+}

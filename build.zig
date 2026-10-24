@@ -208,6 +208,14 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "execution", .module = execution_mod }},
         }),
     });
+    const evm_fixture_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/execution/evm_fixtures.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "execution", .module = execution_mod }},
+        }),
+    });
     const bloom_filter_tests = b.addTest(.{ .root_module = bloom_filter_mod });
 
     // Shared library modules. Test roots import these by name
@@ -391,8 +399,11 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_bloom_filter_tests.step);
 
     const run_execution_fixture_tests = b.addRunArtifact(execution_fixture_tests);
+    const run_evm_fixture_tests = b.addRunArtifact(evm_fixture_tests);
     const execution_fixture_step = b.step("test-execution", "Run pinned execution fixture tests");
     execution_fixture_step.dependOn(&run_execution_fixture_tests.step);
+    execution_fixture_step.dependOn(&run_evm_fixture_tests.step);
+    test_step.dependOn(&run_evm_fixture_tests.step);
     test_step.dependOn(&run_tests_ssz.step);
     test_step.dependOn(&run_tests_merkle.step);
     test_step.dependOn(&run_fulu_tests.step);

@@ -4,7 +4,7 @@
 
 Adds an offline execution fixture test step for four transaction codec cases and explicitly reports the state and blockchain cases whose processors are not implemented.
 
-The separate `zig build test-execution` step runs a fixed, offline bundle. Transaction cases verify the fixture checksum and oracle fields, decode `txbytes` with the execution RLP codec, and require byte-for-byte re-encoding for valid cases. Invalid cases pass only when the codec returns the expected error. The harness does not claim to verify transaction hashes, senders, intrinsic gas, or execution state.
+The separate `zig build test-execution` step runs this fixed, offline transaction bundle and the later [EVM core fixture bundle](FULU-050-051-EVM-FIXTURES.md). Transaction cases verify the fixture checksum and oracle fields, decode `txbytes` with the execution RLP codec, and require byte-for-byte re-encoding for valid cases. Invalid cases pass only when the codec returns the expected error. This transaction harness does not claim to verify transaction hashes, senders, intrinsic gas, or execution state.
 
 ## Pinned inputs
 
