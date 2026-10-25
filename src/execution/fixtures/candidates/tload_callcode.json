@@ -1,0 +1,124 @@
+{
+  "tests/cancun/eip1153_tstore/test_tload_calls.py::test_tload_calls[fork_Cancun-state_test-call_type_CALLCODE]": {
+    "env": {
+      "currentCoinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+      "currentGasLimit": "0x07270e00",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentDifficulty": "0x00",
+      "currentBaseFee": "0x07",
+      "currentExcessBlobGas": "0x00"
+    },
+    "pre": {
+      "0x93190db2d4e970fb6cbdbc169f43d631573b22b9": {
+        "nonce": "0x01",
+        "balance": "0x0de0b6b3a7640000",
+        "code": "0x5b60005c600255601460005d60005c600355",
+        "storage": {
+          "0x02": "0xff",
+          "0x03": "0xff"
+        }
+      },
+      "0x93190db2d4e970fb6cbdbc169f43d631573b23b9": {
+        "nonce": "0x01",
+        "balance": "0x0de0b6b3a7640000",
+        "code": "0x5b600a60005d600060006020600060007393190db2d4e970fb6cbdbc169f43d631573b22b95af260015560005c600055",
+        "storage": {
+          "0x01": "0xff",
+          "0x00": "0xff"
+        }
+      },
+      "0x9a9e8198615fb890e8ea686a65dbd891aaa1346f": {
+        "nonce": "0x00",
+        "balance": "0x6124fee993bc0000",
+        "code": "0x",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "gasLimit": [
+        "0x4c4b40"
+      ],
+      "to": "0x93190db2d4e970fb6cbdbc169f43d631573b23b9",
+      "value": [
+        "0x00"
+      ],
+      "data": [
+        "0x"
+      ],
+      "sender": "0x9a9e8198615fb890e8ea686a65dbd891aaa1346f",
+      "secretKey": "0xa19e1ed84e3c3c5fcffff1da93190db2d4e970fb6cbdbc169f43d631573b22b9"
+    },
+    "post": {
+      "Cancun": [
+        {
+          "hash": "0x6a89779c6664acba5f0c5bc59be89c7aafba6f531e38555bb66419b349ce26d4",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+          "txbytes": "0xf860800a834c4b409493190db2d4e970fb6cbdbc169f43d631573b23b9808025a0d57349bb5a2944896f2c72b2cf399b502893e7a180f34c4b5bf633ef3fb5d0a7a02a089e09fdf72bcd5af4c0fe65f7db80ab42a77011dbd311194af3a2410558cb",
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "state": {
+            "0x93190db2d4e970fb6cbdbc169f43d631573b22b9": {
+              "nonce": "0x01",
+              "balance": "0x0de0b6b3a7640000",
+              "code": "0x5b60005c600255601460005d60005c600355",
+              "storage": {
+                "0x02": "0xff",
+                "0x03": "0xff"
+              }
+            },
+            "0x93190db2d4e970fb6cbdbc169f43d631573b23b9": {
+              "nonce": "0x01",
+              "balance": "0x0de0b6b3a7640000",
+              "code": "0x5b600a60005d600060006020600060007393190db2d4e970fb6cbdbc169f43d631573b22b95af260015560005c600055",
+              "storage": {
+                "0x01": "0x01",
+                "0x00": "0x14",
+                "0x02": "0x0a",
+                "0x03": "0x14"
+              }
+            },
+            "0x9a9e8198615fb890e8ea686a65dbd891aaa1346f": {
+              "nonce": "0x01",
+              "balance": "0x6124fee993b00b24",
+              "code": "0x",
+              "storage": {}
+            },
+            "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba": {
+              "nonce": "0x00",
+              "balance": "0x039642",
+              "code": "0x",
+              "storage": {}
+            }
+          }
+        }
+      ]
+    },
+    "config": {
+      "blobSchedule": {
+        "Cancun": {
+          "target": "0x03",
+          "max": "0x06",
+          "baseFeeUpdateFraction": "0x32f0ed"
+        }
+      },
+      "chainid": "0x01"
+    },
+    "_info": {
+      "hash": "0xa98ced43af523928c7c74dd7d2960d30d513f22396b9e8be6bb6b90f9a401f5a",
+      "comment": "`execution-specs` generated test",
+      "filling-transition-tool": "2.18.0rc6",
+      "description": "Ported .json vectors.\n\n    (04_tloadAfterCallFiller.yml) Loading a slot after a call to another\n    contract is 0.\n\n    (12_tloadDelegateCallFiller.yml) delegatecall reads transient storage in\n    the context of the current address",
+      "url": "https://github.com/ethereum/execution-specs/blob/tests-v5.4.0/tests/cancun/eip1153_tstore/test_tload_calls.py#L21",
+      "fixture-format": "state_test",
+      "reference-spec": "https://github.com/ethereum/EIPs/blob/master/EIPS/eip-1153.md",
+      "reference-spec-version": "1eb863b534a5a3e19e9c196ab2a7f3db4bb9da17"
+    }
+  }
+}
