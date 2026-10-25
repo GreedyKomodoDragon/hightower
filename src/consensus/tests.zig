@@ -28,6 +28,8 @@ test {
     _ = @import("transition.zig");
     _ = @import("lookahead.zig");
     _ = @import("execution_engine.zig");
+    _ = @import("operation_pool.zig");
+    _ = @import("proposer.zig");
     _ = @import("block.zig");
     _ = @import("block_operations_test.zig");
     _ = @import("pending_consolidations.zig");

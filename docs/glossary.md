@@ -150,3 +150,5 @@ Chain:      [Block 0] ───────────────────�
 | Deneb | The consensus upgrade that fixed voluntary-exit signing domains to the Capella version. |
 | Voluntary exit | A signed request by a validator to stop participating in consensus. |
 | BLS-to-execution change | A signed operation that replaces BLS withdrawal credentials with an execution-layer withdrawal address. |
+| Operation pool | A node's temporary collection of validated signed operations that a proposer may include in a block. |
+| Payload builder | An execution engine component that assembles a block's execution payload from a selected parent and proposer attributes. |

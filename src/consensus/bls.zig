@@ -15,6 +15,27 @@ pub const Error = error{
 
 const ETHEREUM_BLS_DST = "BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
 
+/// Derive a compressed public key from a caller-owned BLS secret key.
+pub fn publicKey(secret: *blst.SecretKey) ![48]u8 {
+    return (try blst.P1.from(secret)).compress();
+}
+
+/// Sign a consensus signing root without taking ownership of the secret key.
+pub fn sign(secret: *blst.SecretKey, message: [32]u8) [96]u8 {
+    return blst.P2.hash_to(&message, ETHEREUM_BLS_DST, null).sign_with(secret).compress();
+}
+
+/// Combine two valid signatures over the same message.
+pub fn aggregateSignatures(first: [96]u8, second: [96]u8) Error![96]u8 {
+    const initial = blst.P2_Affine.from(&first) catch return error.InvalidSignature;
+    if (!initial.in_group() or initial.is_inf()) return error.InvalidSignature;
+    var combined = initial.to_jacobian();
+    const other = blst.P2_Affine.from(&second) catch return error.InvalidSignature;
+    if (!other.in_group() or other.is_inf()) return error.InvalidSignature;
+    combined.aggregate(&other) catch return error.InvalidSignature;
+    return combined.compress();
+}
+
 /// Verifies the Ethereum consensus BLS signature scheme (public key in G1).
 pub fn verify(public_key: [48]u8, message: [32]u8, signature: [96]u8) Error!void {
     const key = blst.P1_Affine.from(&public_key) catch return error.InvalidPublicKey;

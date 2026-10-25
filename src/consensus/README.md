@@ -27,6 +27,23 @@ in the body encoding but must be empty. Execution payload withdrawals are
 compared with consensus-generated withdrawals before the payload is sent to the
 execution-engine interface.
 
+## Producing a block
+
+[`operation_pool.zig`](operation_pool.zig) owns validated operations. Admission
+uses the existing operation processors on a state copy; selection replays
+entries in block order against the proposed state and borrows selected values.
+Entries are sorted by SSZ root and capped at twice their block limit. Call
+`pool.accepted(block.body)` only after accepting the block, so a failed proposal
+does not consume operations.
+
+[`proposer.zig`](proposer.zig) clones the trusted parent state, advances to the
+requested slot, checks the caller's proposer key, requests an execution payload,
+and signs the resulting block. The engine's `forkchoiceUpdated` and `getPayload`
+callbacks supply a borrowed payload; `verify` still checks it during block
+processing. The returned `SignedBeaconBlock` owns its lists and must be released
+with `ssz.freeDecoded`. The caller supplies the sync aggregate, fee recipient,
+and graffiti. Legacy deposits are empty.
+
 ## Advancing slots and epochs
 
 [`transition.zig`](transition.zig) advances time one slot at a time. It records the state and latest block-header roots in history rings before moving past a slot. This happens whether or not a block was received for that slot. When the last slot of an epoch is processed, it calls [`epoch.processEpoch`](epoch.zig).
@@ -66,7 +83,7 @@ version at or after that epoch. Fixed-version operations instead call
 BLS-to-execution changes use the genesis version with the chain's validators
 root; voluntary exits use the Capella version with that chain root. The existing
 pending-deposit path uses the pinned minimal genesis version `0x00000001`.
-Exit and address-change operation handlers remain outside the supported path.
+Exit and address-change operation handlers are part of the supported block path.
 
 The domain tests contain known answers independently evaluated with Python
 `hashlib.sha256` from the two-field SSZ container formulas in the
