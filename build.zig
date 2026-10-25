@@ -390,6 +390,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "ssz", .module = ssz_mod },
                 .{ .name = "merkle", .module = merkle_mod },
                 .{ .name = "consensus_preset", .module = consensus_preset_mod },
+                .{ .name = "blob", .module = blob_mod },
             },
         }),
     });
