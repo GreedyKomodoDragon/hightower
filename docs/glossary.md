@@ -51,7 +51,13 @@ Chain:      [Block 0] ───────────────────�
 | Execution account | An address's nonce, balance, storage root, and code hash, encoded into the execution state trie. |
 | Ethereum Virtual Machine (EVM) | The execution engine that runs a contract's bytecode one instruction at a time. |
 | Opcode | A one-byte EVM instruction that operates on stack, memory, or state and consumes gas. |
+| Keccak-256 | Ethereum's 256-bit hash function; the EVM's SHA3 opcode uses it to hash memory bytes. |
+| SHA3 | The EVM instruction that hashes a chosen memory range with Keccak-256. |
+| MCOPY | The EVM instruction that copies bytes within a call frame's memory, including overlapping ranges. |
 | Call frame | One invocation of contract code, with its own stack, memory, gas balance, and return data. |
+| CALL | An EVM instruction that runs another account's code in that account's context. |
+| CALLCODE | An EVM instruction that runs another account's code in the current account's context. |
+| DELEGATECALL | An EVM instruction that runs another account's code in the current account's context while retaining the caller and value. |
 | Gas | The metered budget consumed by EVM operations; running out makes the current frame fail. |
 | EVM stack | A last-in, first-out list of up to 1,024 256-bit words used as instruction operands. |
 | EVM memory | Temporary byte-addressed data within a call frame, charged as it grows in 32-byte words. |

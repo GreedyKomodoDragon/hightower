@@ -1,6 +1,7 @@
 // The EVM executes one call frame in opcode order. Its 256-bit stack supplies
 // operands, memory expands in 32-byte words and is billed before access, and
 // persistent storage is billed against its transaction-original value.
+// SHA3 hashes a billed memory range with Ethereum Keccak-256.
 // A frame snapshot commits on STOP/RETURN and rolls back on REVERT or fault;
 // transient storage, logs, and warm accesses follow the same frame boundary. This core
 // accepts at most 1,024 stack words and frame depths 0..1,023.
@@ -10,6 +11,97 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const state = @import("../state.zig");
+
+/// Named EVM byte values used by dispatch and opcode-specific gas rules.
+const Op = struct {
+    const STOP: u8 = 0x00;
+    const ADD: u8 = 0x01;
+    const MUL: u8 = 0x02;
+    const SUB: u8 = 0x03;
+    const DIV: u8 = 0x04;
+    const SDIV: u8 = 0x05;
+    const MOD: u8 = 0x06;
+    const SMOD: u8 = 0x07;
+    const ADDMOD: u8 = 0x08;
+    const MULMOD: u8 = 0x09;
+    const EXP: u8 = 0x0a;
+    const SIGNEXTEND: u8 = 0x0b;
+    const LT: u8 = 0x10;
+    const GT: u8 = 0x11;
+    const SLT: u8 = 0x12;
+    const SGT: u8 = 0x13;
+    const EQ: u8 = 0x14;
+    const ISZERO: u8 = 0x15;
+    const AND: u8 = 0x16;
+    const OR: u8 = 0x17;
+    const XOR: u8 = 0x18;
+    const NOT: u8 = 0x19;
+    const BYTE: u8 = 0x1a;
+    const SHL: u8 = 0x1b;
+    const SHR: u8 = 0x1c;
+    const SAR: u8 = 0x1d;
+    const SHA3: u8 = 0x20;
+    const ADDRESS: u8 = 0x30;
+    const BALANCE: u8 = 0x31;
+    const ORIGIN: u8 = 0x32;
+    const CALLER: u8 = 0x33;
+    const CALLVALUE: u8 = 0x34;
+    const CALLDATALOAD: u8 = 0x35;
+    const CALLDATASIZE: u8 = 0x36;
+    const CALLDATACOPY: u8 = 0x37;
+    const CODESIZE: u8 = 0x38;
+    const CODECOPY: u8 = 0x39;
+    const GASPRICE: u8 = 0x3a;
+    const EXTCODESIZE: u8 = 0x3b;
+    const EXTCODECOPY: u8 = 0x3c;
+    const RETURNDATASIZE: u8 = 0x3d;
+    const RETURNDATACOPY: u8 = 0x3e;
+    const EXTCODEHASH: u8 = 0x3f;
+    const BLOCKHASH: u8 = 0x40;
+    const COINBASE: u8 = 0x41;
+    const TIMESTAMP: u8 = 0x42;
+    const NUMBER: u8 = 0x43;
+    const PREVRANDAO: u8 = 0x44;
+    const GASLIMIT: u8 = 0x45;
+    const CHAINID: u8 = 0x46;
+    const SELFBALANCE: u8 = 0x47;
+    const BASEFEE: u8 = 0x48;
+    const BLOBHASH: u8 = 0x49;
+    const BLOBBASEFEE: u8 = 0x4a;
+    const POP: u8 = 0x50;
+    const MLOAD: u8 = 0x51;
+    const MSTORE: u8 = 0x52;
+    const MSTORE8: u8 = 0x53;
+    const SLOAD: u8 = 0x54;
+    const SSTORE: u8 = 0x55;
+    const JUMP: u8 = 0x56;
+    const JUMPI: u8 = 0x57;
+    const PC: u8 = 0x58;
+    const MSIZE: u8 = 0x59;
+    const GAS: u8 = 0x5a;
+    const JUMPDEST: u8 = 0x5b;
+    const TLOAD: u8 = 0x5c;
+    const TSTORE: u8 = 0x5d;
+    const MCOPY: u8 = 0x5e;
+    const PUSH0: u8 = 0x5f;
+    const PUSH1: u8 = 0x60;
+    const PUSH32: u8 = 0x7f;
+    const DUP1: u8 = 0x80;
+    const DUP16: u8 = 0x8f;
+    const SWAP1: u8 = 0x90;
+    const SWAP16: u8 = 0x9f;
+    const LOG0: u8 = 0xa0;
+    const LOG4: u8 = 0xa4;
+    const CREATE: u8 = 0xf0;
+    const CALL: u8 = 0xf1;
+    const CALLCODE: u8 = 0xf2;
+    const RETURN: u8 = 0xf3;
+    const DELEGATECALL: u8 = 0xf4;
+    const CREATE2: u8 = 0xf5;
+    const STATICCALL: u8 = 0xfa;
+    const REVERT: u8 = 0xfd;
+    const SELFDESTRUCT: u8 = 0xff;
+};
 
 /// Test-only sink for opcodes fetched by the interpreter, including nested frames.
 pub const coverage = if (builtin.is_test) struct {
@@ -278,9 +370,9 @@ const Frame = struct {
         var i: usize = 0;
         while (i < self.input.code.len) {
             const op = self.input.code[i];
-            if (i == dest) return op == 0x5b;
+            if (i == dest) return op == Op.JUMPDEST;
             i += 1;
-            if (op >= 0x60 and op <= 0x7f) i += @as(usize, op - 0x5f);
+            if (op >= Op.PUSH1 and op <= Op.PUSH32) i += @as(usize, op - Op.PUSH0);
         }
         return false;
     }
@@ -324,42 +416,42 @@ const Frame = struct {
     fn contextOpcode(self: *Frame, op: u8) !void {
         const world = self.machine.world;
         switch (op) {
-            0x30 => {
+            Op.ADDRESS => {
                 try self.charge(2);
                 try self.push(addressWord(self.input.callee));
             },
-            0x31, 0x3b, 0x3c, 0x3f => {
+            Op.BALANCE, Op.EXTCODESIZE, Op.EXTCODECOPY, Op.EXTCODEHASH => {
                 const address = addressFromWord(try self.pop());
                 const warm = try self.machine.touchAccount(address);
                 try self.charge(if (warm) 100 else 2600);
                 switch (op) {
-                    0x31 => try self.push(world.getBalance(address)),
-                    0x3b => try self.push(world.getCode(address).len),
-                    0x3c => {
+                    Op.BALANCE => try self.push(world.getBalance(address)),
+                    Op.EXTCODESIZE => try self.push(world.getCode(address).len),
+                    Op.EXTCODECOPY => {
                         const dst = try self.pop();
                         const src = try self.pop();
                         const len = try self.pop();
                         try self.copyToMemory(dst, src, len, world.getCode(address), false);
                     },
-                    0x3f => {
+                    Op.EXTCODEHASH => {
                         const account = try world.getAccount(address);
                         try self.push(if (account) |a| std.mem.readInt(u256, &a.code_hash, .big) else 0);
                     },
                     else => unreachable,
                 }
             },
-            0x32, 0x3a, 0x40...0x46, 0x48...0x4a => {
+            Op.ORIGIN, Op.GASPRICE, Op.BLOCKHASH...Op.CHAINID, Op.BASEFEE...Op.BLOBBASEFEE => {
                 const env = self.machine.environment orelse return error.MissingContext;
                 switch (op) {
-                    0x32 => {
+                    Op.ORIGIN => {
                         try self.charge(2);
                         try self.push(addressWord(env.origin));
                     },
-                    0x3a => {
+                    Op.GASPRICE => {
                         try self.charge(2);
                         try self.push(env.gas_price);
                     },
-                    0x40 => {
+                    Op.BLOCKHASH => {
                         try self.charge(20);
                         const number = try self.pop();
                         const distance = if (number < env.number) @as(u256, env.number) - number else 0;
@@ -371,40 +463,40 @@ const Frame = struct {
                             try self.push(std.mem.readInt(u256, &hashes[@intCast(distance - 1)], .big));
                         }
                     },
-                    0x41 => {
+                    Op.COINBASE => {
                         try self.charge(2);
                         try self.push(addressWord(env.coinbase));
                     },
-                    0x42 => {
+                    Op.TIMESTAMP => {
                         try self.charge(2);
                         try self.push(env.timestamp);
                     },
-                    0x43 => {
+                    Op.NUMBER => {
                         try self.charge(2);
                         try self.push(env.number);
                     },
-                    0x44 => {
+                    Op.PREVRANDAO => {
                         try self.charge(2);
                         try self.push(env.prev_randao);
                     },
-                    0x45 => {
+                    Op.GASLIMIT => {
                         try self.charge(2);
                         try self.push(env.gas_limit);
                     },
-                    0x46 => {
+                    Op.CHAINID => {
                         try self.charge(2);
                         try self.push(env.chain_id);
                     },
-                    0x48 => {
+                    Op.BASEFEE => {
                         try self.charge(2);
                         try self.push(env.base_fee);
                     },
-                    0x49 => {
+                    Op.BLOBHASH => {
                         try self.charge(3);
                         const index = try self.pop();
                         try self.push(if (index < env.blob_hashes.len) std.mem.readInt(u256, &env.blob_hashes[@intCast(index)], .big) else 0);
                     },
-                    0x4a => {
+                    Op.BLOBBASEFEE => {
                         if (!env.blob_base_fee_supported) return error.UnsupportedOpcode;
                         try self.charge(2);
                         try self.push(env.blob_base_fee);
@@ -412,52 +504,52 @@ const Frame = struct {
                     else => unreachable,
                 }
             },
-            0x33 => {
+            Op.CALLER => {
                 try self.charge(2);
                 try self.push(addressWord(self.input.caller));
             },
-            0x34 => {
+            Op.CALLVALUE => {
                 try self.charge(2);
                 try self.push(self.input.value);
             },
-            0x35 => {
+            Op.CALLDATALOAD => {
                 try self.charge(3);
                 try self.push(sourceWord(self.input.data, try self.pop()));
             },
-            0x36 => {
+            Op.CALLDATASIZE => {
                 try self.charge(2);
                 try self.push(self.input.data.len);
             },
-            0x37 => {
+            Op.CALLDATACOPY => {
                 try self.charge(3);
                 const dst = try self.pop();
                 const src = try self.pop();
                 const len = try self.pop();
                 try self.copyToMemory(dst, src, len, self.input.data, false);
             },
-            0x38 => {
+            Op.CODESIZE => {
                 try self.charge(2);
                 try self.push(self.input.code.len);
             },
-            0x39 => {
+            Op.CODECOPY => {
                 try self.charge(3);
                 const dst = try self.pop();
                 const src = try self.pop();
                 const len = try self.pop();
                 try self.copyToMemory(dst, src, len, self.input.code, false);
             },
-            0x3d => {
+            Op.RETURNDATASIZE => {
                 try self.charge(2);
                 try self.push(self.return_data.items.len);
             },
-            0x3e => {
+            Op.RETURNDATACOPY => {
                 try self.charge(3);
                 const dst = try self.pop();
                 const src = try self.pop();
                 const len = try self.pop();
                 try self.copyToMemory(dst, src, len, self.return_data.items, true);
             },
-            0x47 => {
+            Op.SELFBALANCE => {
                 try self.charge(5);
                 try self.push(world.getBalance(self.input.callee));
             },
@@ -483,12 +575,12 @@ const Frame = struct {
     fn call(self: *Frame, op: u8) !void {
         const requested = try self.pop();
         const target = addressFromWord(try self.pop());
-        const value: u256 = if (op == 0xf1 or op == 0xf2) try self.pop() else if (op == 0xf4) self.input.value else 0;
+        const value: u256 = if (op == Op.CALL or op == Op.CALLCODE) try self.pop() else if (op == Op.DELEGATECALL) self.input.value else 0;
         const in_offset = try self.pop();
         const in_len = try self.pop();
         const out_offset = try self.pop();
         const out_len = try self.pop();
-        if (self.input.is_static and value != 0 and (op == 0xf1 or op == 0xf2)) return error.WriteProtection;
+        if (self.input.is_static and value != 0 and (op == Op.CALL or op == Op.CALLCODE)) return error.WriteProtection;
         const input_start = try self.expand(in_offset, in_len);
         const output_start = try self.expand(out_offset, out_len);
         const warm = try self.machine.touchAccount(target);
@@ -500,10 +592,10 @@ const Frame = struct {
             .fulu => 17,
         };
         if (target[19] >= 1 and target[19] <= precompile_limit and same(target, precompile)) return error.UnsupportedPrecompile;
-        const transfer = (op == 0xf1 or op == 0xf2) and value != 0;
-        const account = if (op == 0xf1 and value != 0) try self.machine.world.getAccount(target) else null;
+        const transfer = (op == Op.CALL or op == Op.CALLCODE) and value != 0;
+        const account = if (op == Op.CALL and value != 0) try self.machine.world.getAccount(target) else null;
         const is_empty = if (account) |a| a.nonce == 0 and a.balance == 0 and std.mem.eql(u8, &a.code_hash, &state.EMPTY_CODE_HASH) else true;
-        try self.charge((if (warm) @as(u64, 100) else 2600) + (if (transfer) @as(u64, 9000) else 0) + (if (op == 0xf1 and value != 0 and is_empty) @as(u64, 25000) else 0));
+        try self.charge((if (warm) @as(u64, 100) else 2600) + (if (transfer) @as(u64, 9000) else 0) + (if (op == Op.CALL and value != 0 and is_empty) @as(u64, 25000) else 0));
         self.return_data.clearRetainingCapacity();
         if (self.input.depth == 1023 or (transfer and self.machine.world.getBalance(self.input.callee) < value)) {
             try self.push(0);
@@ -516,20 +608,20 @@ const Frame = struct {
         const snap = try self.machine.world.snapshot();
         var snap_open = true;
         errdefer if (snap_open) self.machine.world.revert(snap) catch {};
-        const recipient = if (op == 0xf1 or op == 0xfa) target else self.input.callee;
-        if (op == 0xf1 and value != 0) {
+        const recipient = if (op == Op.CALL or op == Op.STATICCALL) target else self.input.callee;
+        if (op == Op.CALL and value != 0) {
             try self.machine.world.setBalance(self.input.callee, self.machine.world.getBalance(self.input.callee) - value);
             try self.machine.world.setBalance(target, self.machine.world.getBalance(target) + value);
         }
         var result = try self.machine.run(.{
             .code = self.machine.world.getCode(target),
             .gas = child_gas,
-            .caller = if (op == 0xf4) self.input.caller else self.input.callee,
+            .caller = if (op == Op.DELEGATECALL) self.input.caller else self.input.callee,
             .callee = recipient,
             .value = value,
             .data = self.memory.items[input_start..][0..@intCast(in_len)],
             .depth = self.input.depth + 1,
-            .is_static = self.input.is_static or op == 0xfa,
+            .is_static = self.input.is_static or op == Op.STATICCALL,
         });
         defer result.deinit(self.machine.allocator);
         if (result.status == .fault) {
@@ -563,12 +655,12 @@ const Frame = struct {
             }
             self.pc += 1;
             if (self.machine.environment) |env| {
-                if (env.fork == .london and (op == 0x49 or op == 0x4a or (op >= 0x5c and op <= 0x5f))) return error.InvalidOpcode;
+                if (env.fork == .london and (op == Op.BLOBHASH or op == Op.BLOBBASEFEE or (op >= Op.TLOAD and op <= Op.PUSH0))) return error.InvalidOpcode;
             }
-            if (op >= 0x60 and op <= 0x7f) {
+            if (op >= Op.PUSH1 and op <= Op.PUSH32) {
                 try self.charge(3);
                 var word: u256 = 0;
-                for (0..@as(usize, op - 0x5f)) |_| {
+                for (0..@as(usize, op - Op.PUSH0)) |_| {
                     word <<= 8;
                     if (self.pc < self.input.code.len) word |= self.input.code[self.pc];
                     self.pc += 1;
@@ -576,63 +668,76 @@ const Frame = struct {
                 try self.push(word);
                 continue;
             }
-            if (op >= 0x80 and op <= 0x8f) {
+            if (op >= Op.DUP1 and op <= Op.DUP16) {
                 try self.charge(3);
-                const n = @as(usize, op - 0x7f);
+                const n = @as(usize, op - Op.PUSH32);
                 if (self.sp < n) return error.StackUnderflow;
                 try self.push(self.stack[self.sp - n]);
                 continue;
             }
-            if (op >= 0x90 and op <= 0x9f) {
+            if (op >= Op.SWAP1 and op <= Op.SWAP16) {
                 try self.charge(3);
-                const n = @as(usize, op - 0x8f);
+                const n = @as(usize, op - Op.DUP16);
                 if (self.sp <= n) return error.StackUnderflow;
                 std.mem.swap(u256, &self.stack[self.sp - 1], &self.stack[self.sp - 1 - n]);
                 continue;
             }
             switch (op) {
-                0x00 => return self.output(0, 0, .success),
-                0x01...0x0b, 0x10...0x1d => try self.arithmetic(op),
-                0x30...0x4a => try self.contextOpcode(op),
-                0x50 => {
+                Op.STOP => return self.output(0, 0, .success),
+                Op.ADD...Op.SIGNEXTEND, Op.LT...Op.SAR => try self.arithmetic(op),
+                Op.SHA3 => {
+                    const offset = try self.pop();
+                    const length = try self.pop();
+                    if (length > std.math.maxInt(u64)) return error.OutOfGas;
+                    const words = (@as(u128, @intCast(length)) + 31) / 32;
+                    if (words > (std.math.maxInt(u64) - 30) / 6) return error.OutOfGas;
+                    try self.charge(@intCast(30 + 6 * words));
+                    const start = try self.expand(offset, length);
+                    const n: usize = @intCast(length);
+                    var digest: [32]u8 = undefined;
+                    std.crypto.hash.sha3.Keccak256.hash(self.memory.items[start..][0..n], &digest, .{});
+                    try self.push(std.mem.readInt(u256, &digest, .big));
+                },
+                Op.ADDRESS...Op.BLOBBASEFEE => try self.contextOpcode(op),
+                Op.POP => {
                     try self.charge(2);
                     _ = try self.pop();
                 },
-                0x51 => {
+                Op.MLOAD => {
                     try self.charge(3);
                     const offset = try self.pop();
                     const start = try self.expand(offset, 32);
                     try self.push(std.mem.readInt(u256, self.memory.items[start..][0..32], .big));
                 },
-                0x52 => {
+                Op.MSTORE => {
                     try self.charge(3);
                     const offset = try self.pop();
                     const value = try self.pop();
                     const start = try self.expand(offset, 32);
                     std.mem.writeInt(u256, self.memory.items[start..][0..32], value, .big);
                 },
-                0x53 => {
+                Op.MSTORE8 => {
                     try self.charge(3);
                     const offset = try self.pop();
                     const value = try self.pop();
                     const start = try self.expand(offset, 1);
                     self.memory.items[start] = @truncate(value);
                 },
-                0x54 => {
+                Op.SLOAD => {
                     const key = try self.pop();
                     const warm = try self.machine.touch(self.input.callee, key);
                     _ = try self.machine.originalValue(self.input.callee, key);
                     try self.charge(if (warm) 100 else 2100);
                     try self.push(self.machine.world.getStorage(self.input.callee, key));
                 },
-                0x55 => try self.sstore(),
-                0x56 => {
+                Op.SSTORE => try self.sstore(),
+                Op.JUMP => {
                     try self.charge(8);
                     const dest = try self.pop();
                     if (!self.jumpdest(dest)) return error.InvalidJump;
                     self.pc = @intCast(dest);
                 },
-                0x57 => {
+                Op.JUMPI => {
                     try self.charge(10);
                     const dest = try self.pop();
                     const cond = try self.pop();
@@ -641,32 +746,32 @@ const Frame = struct {
                         self.pc = @intCast(dest);
                     }
                 },
-                0x58 => {
+                Op.PC => {
                     try self.charge(2);
                     try self.push(self.pc - 1);
                 },
-                0x59 => {
+                Op.MSIZE => {
                     try self.charge(2);
                     try self.push(self.memory.items.len);
                 },
-                0x5a => {
+                Op.GAS => {
                     try self.charge(2);
                     try self.push(self.gas);
                 },
-                0x5b => try self.charge(1),
-                0x5c => {
+                Op.JUMPDEST => try self.charge(1),
+                Op.TLOAD => {
                     try self.charge(100);
                     const key = try self.pop();
                     try self.push(self.machine.transientGet(self.input.callee, key));
                 },
-                0x5d => {
+                Op.TSTORE => {
                     if (self.input.is_static) return error.WriteProtection;
                     try self.charge(100);
                     const key = try self.pop();
                     const value = try self.pop();
                     try self.machine.transientSet(self.input.callee, key, value);
                 },
-                0x5e => {
+                Op.MCOPY => {
                     const dst = try self.pop();
                     const src = try self.pop();
                     const len = try self.pop();
@@ -679,17 +784,17 @@ const Frame = struct {
                     const n: usize = @intCast(len);
                     if (d < s) std.mem.copyForwards(u8, self.memory.items[d..][0..n], self.memory.items[s..][0..n]) else std.mem.copyBackwards(u8, self.memory.items[d..][0..n], self.memory.items[s..][0..n]);
                 },
-                0x5f => {
+                Op.PUSH0 => {
                     try self.charge(2);
                     try self.push(0);
                 },
-                0x20, 0xf0, 0xf5, 0xff => return error.UnsupportedOpcode,
-                0xa0...0xa4 => try self.log(op - 0xa0),
-                0xf1, 0xf2, 0xf4, 0xfa => try self.call(op),
-                0xf3, 0xfd => {
+                Op.CREATE, Op.CREATE2, Op.SELFDESTRUCT => return error.UnsupportedOpcode,
+                Op.LOG0...Op.LOG4 => try self.log(op - Op.LOG0),
+                Op.CALL, Op.CALLCODE, Op.DELEGATECALL, Op.STATICCALL => try self.call(op),
+                Op.RETURN, Op.REVERT => {
                     const offset = try self.pop();
                     const length = try self.pop();
-                    return self.output(offset, length, if (op == 0xf3) .success else .revert);
+                    return self.output(offset, length, if (op == Op.RETURN) .success else .revert);
                 },
                 else => return error.InvalidOpcode,
             }
@@ -724,29 +829,29 @@ const Frame = struct {
     /// Evaluates arithmetic, comparison, bitwise, and shift opcodes on 256-bit words.
     fn arithmetic(self: *Frame, op: u8) !void {
         const cost: u64 = switch (op) {
-            0x02, 0x04...0x07, 0x0b => 5,
-            0x08, 0x09 => 8,
-            0x0a => 10,
-            0x01, 0x03, 0x10...0x1d => 3,
+            Op.MUL, Op.DIV...Op.SMOD, Op.SIGNEXTEND => 5,
+            Op.ADDMOD, Op.MULMOD => 8,
+            Op.EXP => 10,
+            Op.ADD, Op.SUB, Op.LT...Op.SAR => 3,
             else => return error.InvalidOpcode,
         };
         try self.charge(cost);
         const a = try self.pop();
-        const b: u256 = if (op == 0x15 or op == 0x19) 0 else try self.pop();
-        const c: u256 = if (op == 0x08 or op == 0x09) try self.pop() else 0;
+        const b: u256 = if (op == Op.ISZERO or op == Op.NOT) 0 else try self.pop();
+        const c: u256 = if (op == Op.ADDMOD or op == Op.MULMOD) try self.pop() else 0;
         const sa: i256 = @bitCast(a);
         const sb: i256 = @bitCast(b);
         const result: u256 = switch (op) {
-            0x01 => a +% b,
-            0x02 => a *% b,
-            0x03 => a -% b,
-            0x04 => if (b == 0) 0 else a / b,
-            0x05 => if (b == 0) 0 else if (sa == std.math.minInt(i256) and sb == -1) a else @bitCast(@divTrunc(sa, sb)),
-            0x06 => if (b == 0) 0 else a % b,
-            0x07 => if (b == 0 or b == std.math.maxInt(u256)) 0 else @bitCast(@rem(sa, sb)),
-            0x08 => if (c == 0) 0 else @intCast((@as(u512, a) + b) % c),
-            0x09 => if (c == 0) 0 else @intCast((@as(u512, a) * b) % c),
-            0x0a => blk: {
+            Op.ADD => a +% b,
+            Op.MUL => a *% b,
+            Op.SUB => a -% b,
+            Op.DIV => if (b == 0) 0 else a / b,
+            Op.SDIV => if (b == 0) 0 else if (sa == std.math.minInt(i256) and sb == -1) a else @bitCast(@divTrunc(sa, sb)),
+            Op.MOD => if (b == 0) 0 else a % b,
+            Op.SMOD => if (b == 0 or b == std.math.maxInt(u256)) 0 else @bitCast(@rem(sa, sb)),
+            Op.ADDMOD => if (c == 0) 0 else @intCast((@as(u512, a) + b) % c),
+            Op.MULMOD => if (c == 0) 0 else @intCast((@as(u512, a) * b) % c),
+            Op.EXP => blk: {
                 var base = a;
                 var exponent = b;
                 var value: u256 = 1;
@@ -756,29 +861,29 @@ const Frame = struct {
                 }
                 break :blk value;
             },
-            0x0b => blk: {
+            Op.SIGNEXTEND => blk: {
                 if (a >= 31) break :blk b;
                 const bit: u8 = @intCast(a * 8 + 7);
                 const mask: u256 = (@as(u256, 1) << @intCast(bit + 1)) - 1;
                 break :blk if (b & (@as(u256, 1) << @intCast(bit)) != 0) b | ~mask else b & mask;
             },
-            0x10 => @intFromBool(a < b),
-            0x11 => @intFromBool(a > b),
-            0x12 => @intFromBool(sa < sb),
-            0x13 => @intFromBool(sa > sb),
-            0x14 => @intFromBool(a == b),
-            0x15 => @intFromBool(a == 0),
-            0x16 => a & b,
-            0x17 => a | b,
-            0x18 => a ^ b,
-            0x19 => ~a,
-            0x1a => if (a >= 32) 0 else @as(u8, @truncate(b >> @intCast((31 - a) * 8))),
-            0x1b => if (a >= 256) 0 else b << @intCast(a),
-            0x1c => if (a >= 256) 0 else b >> @intCast(a),
-            0x1d => if (a >= 256) (if (sb < 0) std.math.maxInt(u256) else 0) else @bitCast(sb >> @intCast(a)),
+            Op.LT => @intFromBool(a < b),
+            Op.GT => @intFromBool(a > b),
+            Op.SLT => @intFromBool(sa < sb),
+            Op.SGT => @intFromBool(sa > sb),
+            Op.EQ => @intFromBool(a == b),
+            Op.ISZERO => @intFromBool(a == 0),
+            Op.AND => a & b,
+            Op.OR => a | b,
+            Op.XOR => a ^ b,
+            Op.NOT => ~a,
+            Op.BYTE => if (a >= 32) 0 else @as(u8, @truncate(b >> @intCast((31 - a) * 8))),
+            Op.SHL => if (a >= 256) 0 else b << @intCast(a),
+            Op.SHR => if (a >= 256) 0 else b >> @intCast(a),
+            Op.SAR => if (a >= 256) (if (sb < 0) std.math.maxInt(u256) else 0) else @bitCast(sb >> @intCast(a)),
             else => unreachable,
         };
-        if (op == 0x0a) {
+        if (op == Op.EXP) {
             var exponent = b;
             var bytes: u64 = 0;
             while (exponent != 0) : (exponent >>= 8) bytes += 1;

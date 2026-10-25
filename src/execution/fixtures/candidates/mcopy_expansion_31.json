@@ -1,0 +1,96 @@
+{
+  "tests/static/state_tests/Cancun/stEIP5656_MCOPY/MCOPY_memory_expansion_costFiller.yml::MCOPY_memory_expansion_cost[fork_Cancun-state_test-dst0_src31_size706]": {
+    "env": {
+      "currentCoinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+      "currentGasLimit": "0x0f4240",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x64903c57",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000020000",
+      "currentDifficulty": "0x00",
+      "currentBaseFee": "0x0a",
+      "currentExcessBlobGas": "0x00"
+    },
+    "pre": {
+      "0x3da1d2f880e78362dff68a0bd3414edb10172cd1": {
+        "nonce": "0x00",
+        "balance": "0x3b9aca00",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x134fec6eeb0bb1179e8893a54ddbdb6cc61abe87": {
+        "nonce": "0x01",
+        "balance": "0x00",
+        "code": "0x60015f5560116040356020355f356016565b595f55005b5e56",
+        "storage": {
+          "0x00": "0xfa11ed"
+        }
+      }
+    },
+    "transaction": {
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "gasLimit": [
+        "0x0186a0"
+      ],
+      "to": "0x134fec6eeb0bb1179e8893a54ddbdb6cc61abe87",
+      "value": [
+        "0x00"
+      ],
+      "data": [
+        "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001f00000000000000000000000000000000000000000000000000000000000002c2"
+      ],
+      "sender": "0x3da1d2f880e78362dff68a0bd3414edb10172cd1",
+      "secretKey": "0x469c8a1f0a197548378dba0d134fec6eeb0bb1179e8893a54ddbdb6cc61abe87"
+    },
+    "post": {
+      "Cancun": [
+        {
+          "hash": "0xd16851c66410a12e76a716cb223e4cb7f8f3ae7e8631beb45614db160408775c",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+          "txbytes": "0xf8c1800a830186a094134fec6eeb0bb1179e8893a54ddbdb6cc61abe8780b8600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001f00000000000000000000000000000000000000000000000000000000000002c226a09ab8d54dd75857feb5ea32e1f0a21488ff4e9092bb4e163f8835099702a535ada01fed2786dc02b2788253f3bae2048adea4cb42eb137f8da8a5dc27054158d3ea",
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "state": {
+            "0x3da1d2f880e78362dff68a0bd3414edb10172cd1": {
+              "nonce": "0x01",
+              "balance": "0x3b96b672",
+              "code": "0x",
+              "storage": {}
+            },
+            "0x134fec6eeb0bb1179e8893a54ddbdb6cc61abe87": {
+              "nonce": "0x01",
+              "balance": "0x00",
+              "code": "0x60015f5560116040356020355f356016565b595f55005b5e56",
+              "storage": {
+                "0x00": "0x0300"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "config": {
+      "blobSchedule": {
+        "Cancun": {
+          "target": "0x03",
+          "max": "0x06",
+          "baseFeeUpdateFraction": "0x32f0ed"
+        }
+      },
+      "chainid": "0x01"
+    },
+    "_info": {
+      "hash": "0xf5b3ef9253ca878d3ccfe4c9cdae6e3961dc02435237632897f003b35efc9ada",
+      "comment": "`execution-specs` generated test",
+      "filling-transition-tool": "2.18.0rc6",
+      "description": "No description available - add a docstring to the python test class or function.",
+      "url": "",
+      "fixture-format": "state_test",
+      "reference-spec": "https://github.com/ethereum/EIPs/blob/master/",
+      "reference-spec-version": ""
+    }
+  }
+}

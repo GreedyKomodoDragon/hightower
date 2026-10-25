@@ -32,7 +32,7 @@ const fixtures = [_]Fixture{
     .{ .name = "chainid_cancun_state_test_tx_type_0", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "adbab28513ccf33a4e0c2bc79b19ebf341f93a64d75238d95cb4f6c8b9ce55a6", .bytes = @embedFile("fixtures/chainid_cancun_state_test_tx_type_0.json") },
     .{ .name = "invalidTr", .format = "state", .fork = "Cancun", .expected = .invalid_transaction, .checksum = "2bce278411aaba2b37a18ee6ed04ae0925ece8e0326358edb0eba5b4157e2264", .bytes = @embedFile("fixtures/invalidTr.json") },
     .{ .name = "tload_after_store", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "22e07acc51344815b19410422cd26f3d65d3a23e15072f251476d68b4ffc3b25", .bytes = @embedFile("fixtures/tload_after_store.json") }, // fixtures/state_tests/cancun/eip1153_tstore/test_basic_tload_after_store.json
-    .{ .name = "mcopy_empty", .format = "state", .fork = "Cancun", .expected = .skip, .skip_reason = "case executes SHA3 (0x20), which is not implemented", .checksum = "b9621cb125c4dffbfd287ba7286a078649f425da1b77fe1fccac25d3b0f1f3e1", .bytes = @embedFile("fixtures/mcopy_empty.json") }, // fixtures/state_tests/cancun/eip5656_mcopy/test_mcopy_on_empty_memory.json
+    .{ .name = "mcopy_empty", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "b9621cb125c4dffbfd287ba7286a078649f425da1b77fe1fccac25d3b0f1f3e1", .bytes = @embedFile("fixtures/mcopy_empty.json") }, // fixtures/state_tests/cancun/eip5656_mcopy/test_mcopy_on_empty_memory.json
     .{ .name = "signed_shifts", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "2e973b7e3c785bd995ff664c34d2e60fec263f2d0cc76f00e100e308cc1252a7", .bytes = @embedFile("fixtures/signed_shifts.json") }, // fixtures/state_tests/static/state_tests/stShift/shiftSignedCombinations.json
     .{ .name = "arithmetic", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "a5ad23fca72bbfa862407044ba7f4166c956b8851fb61e114ed3668fd4fea6c8", .bytes = @embedFile("fixtures/arithmetic.json") }, // fixtures/state_tests/static/state_tests/VMTests/vmArithmeticTest/arith.json
     .{ .name = "mod", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "f3f0f69b8fbafc409a73888ded4b3d7495546d00af8b6fd209b1909e1c407a4e", .bytes = @embedFile("fixtures/mod.json") }, // fixtures/state_tests/static/state_tests/VMTests/vmArithmeticTest/mod.json
@@ -105,6 +105,19 @@ const fixtures = [_]Fixture{
     .{ .name = "swap5", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "58912d395de2035eb03d44a76822229566edd7d2f68a098770944f82ca299540", .bytes = @embedFile("fixtures/candidates/swap5.json") }, // fixtures/state_tests/frontier/opcodes/test_swap.json :: tests/frontier/opcodes/test_swap.py::test_swap[fork_Cancun-state_test-SWAP5]
     .{ .name = "swap6", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "72690c599ff963d794971e675c985a28cfe5812f06e816c1a5cbc239c2c88931", .bytes = @embedFile("fixtures/candidates/swap6.json") }, // fixtures/state_tests/frontier/opcodes/test_swap.json :: tests/frontier/opcodes/test_swap.py::test_swap[fork_Cancun-state_test-SWAP6]
     .{ .name = "swap7", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "7f909d8568249c51b5d115a418fafd606d3df52476bdcd3900409b100c3bbb52", .bytes = @embedFile("fixtures/candidates/swap7.json") }, // fixtures/state_tests/frontier/opcodes/test_swap.json :: tests/frontier/opcodes/test_swap.py::test_swap[fork_Cancun-state_test-SWAP7]
+    .{ .name = "sha3_dejavu", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "2f9ae5b0c25fa7853829df201b3b639b2dc3e4b7a01cd090c8bb6094343975e0", .bytes = @embedFile("fixtures/candidates/sha3_dejavu.json") }, // fixtures/state_tests/static/state_tests/stMemoryTest/sha3_dejavu.json :: tests/static/state_tests/stMemoryTest/sha3_dejavuFiller.json::sha3_dejavu[fork_Cancun-state_test-]
+    .{ .name = "sha3_nonconst_v0", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "e141ad267d8942363aca9a1b18ee9208728d3f354d31b17554673dd90afd712a", .bytes = @embedFile("fixtures/candidates/sha3_nonconst_v0.json") }, // fixtures/state_tests/static/state_tests/stArgsZeroOneBalance/sha3NonConst.json :: tests/static/state_tests/stArgsZeroOneBalance/sha3NonConstFiller.yml::sha3NonConst[fork_Cancun-state_test--v0]
+    .{ .name = "sha3_2016_32", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "08a7b165606387ea53e05543928336ebeda6f20c95328e2a92a26db07cebc393", .bytes = @embedFile("fixtures/candidates/sha3_2016_32.json") }, // fixtures/state_tests/static/state_tests/VMTests/vmTests/sha3.json :: tests/static/state_tests/VMTests/vmTests/sha3Filler.yml::sha3[fork_Cancun-state_test-sha3_2016_32]
+    .{ .name = "sha3_neg1_2", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "7a6cb8ec7a542f40d1b52fa1dc1a79b893bf0b7347161e4d33b1d6fed64f4c15", .bytes = @embedFile("fixtures/candidates/sha3_neg1_2.json") }, // fixtures/state_tests/static/state_tests/VMTests/vmTests/sha3.json :: tests/static/state_tests/VMTests/vmTests/sha3Filler.yml::sha3[fork_Cancun-state_test-sha3_neg1_2]
+    .{ .name = "sha3_nodata", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "23d857c5b0fb082e50ad941e51bf95bf78c8fad8594126794ac005627a907f60", .bytes = @embedFile("fixtures/candidates/sha3_nodata.json") }, // fixtures/state_tests/static/state_tests/VMTests/vmTests/sha3.json :: tests/static/state_tests/VMTests/vmTests/sha3Filler.yml::sha3[fork_Cancun-state_test-sha3_nodata]
+    .{ .name = "tload_transaction_begin", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "61d21de6394a0477ffba8864d995e5722e3d2f0ec029bc227903042ea94176ce", .bytes = @embedFile("fixtures/candidates/tload_transaction_begin.json") }, // fixtures/state_tests/cancun/eip1153_tstore/test_basic_tload_transaction_begin.json :: tests/cancun/eip1153_tstore/test_basic_tload.py::test_basic_tload_transaction_begin[fork_Cancun-state_test]
+    .{ .name = "tload_call", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "64860fb960416b0838a22486aaf49a279d2d158a7618a912b28c092b09c05606", .bytes = @embedFile("fixtures/candidates/tload_call.json") }, // fixtures/state_tests/cancun/eip1153_tstore/test_tload_calls.json :: tests/cancun/eip1153_tstore/test_tload_calls.py::test_tload_calls[fork_Cancun-state_test-call_type_CALL]
+    .{ .name = "tload_callcode", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "02fc3c5a26ecda1bbe20d5c4dbb59a4a382a185bafc36641b822272d29ab7710", .bytes = @embedFile("fixtures/candidates/tload_callcode.json") }, // fixtures/state_tests/cancun/eip1153_tstore/test_tload_calls.json :: tests/cancun/eip1153_tstore/test_tload_calls.py::test_tload_calls[fork_Cancun-state_test-call_type_CALLCODE]
+    .{ .name = "tload_delegatecall", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "33bda26e1c6b7d804a864ed657141e8e1654cf83af832380c4aa5f092d02ef67", .bytes = @embedFile("fixtures/candidates/tload_delegatecall.json") }, // fixtures/state_tests/cancun/eip1153_tstore/test_tload_calls.json :: tests/cancun/eip1153_tstore/test_tload_calls.py::test_tload_calls[fork_Cancun-state_test-call_type_DELEGATECALL]
+    .{ .name = "tstore_subcall_revert", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "1c0713897e5585cd520d5f819a6b11122d83c0536b4cca6a2ad21dec2bb0fd48", .bytes = @embedFile("fixtures/candidates/tstore_subcall_revert.json") }, // fixtures/state_tests/cancun/eip1153_tstore/test_subcall.json :: tests/cancun/eip1153_tstore/test_tstorage_execution_contexts.py::test_subcall[fork_Cancun-state_test-call_with_revert]
+    .{ .name = "mcopy_hash_forward", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "eacc91af51a97eb79479ea596b2ee9085ce3b6b8579902c68d2f01be7645f56a", .bytes = @embedFile("fixtures/candidates/mcopy_hash_forward.json") }, // fixtures/state_tests/static/state_tests/Cancun/stEIP5656_MCOPY/MCOPY_memory_hash.json :: tests/static/state_tests/Cancun/stEIP5656_MCOPY/MCOPY_memory_hashFiller.yml::MCOPY_memory_hash[fork_Cancun-state_test-memmove_forward]
+    .{ .name = "mcopy_hash_backward", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "05db27ba27a17a62e31f11fc7b8b7b87888a125b96ca3228371bb1c2ebafbb97", .bytes = @embedFile("fixtures/candidates/mcopy_hash_backward.json") }, // fixtures/state_tests/static/state_tests/Cancun/stEIP5656_MCOPY/MCOPY_memory_hash.json :: tests/static/state_tests/Cancun/stEIP5656_MCOPY/MCOPY_memory_hashFiller.yml::MCOPY_memory_hash[fork_Cancun-state_test-memmove_backward]
+    .{ .name = "mcopy_expansion_31", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "d2ed4ed404ddbf45a8853d36c83afc33f39cd769fc2e547ffa41a2388a837461", .bytes = @embedFile("fixtures/candidates/mcopy_expansion_31.json") }, // fixtures/state_tests/static/state_tests/Cancun/stEIP5656_MCOPY/MCOPY_memory_expansion_cost.json :: tests/static/state_tests/Cancun/stEIP5656_MCOPY/MCOPY_memory_expansion_costFiller.yml::MCOPY_memory_expansion_cost[fork_Cancun-state_test-dst0_src31_size706]
 };
 
 const Counts = struct { passed: usize = 0, skipped: usize = 0 };
@@ -242,10 +255,10 @@ test "pinned execution fixtures pass and unsupported processors are explicit" {
     execution.evm.coverage.opcodes = &seen;
     defer execution.evm.coverage.opcodes = null;
     const counts = try run(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 79), counts.passed);
-    try std.testing.expectEqual(@as(usize, 1), counts.skipped);
+    try std.testing.expectEqual(@as(usize, 93), counts.passed);
+    try std.testing.expectEqual(@as(usize, 0), counts.skipped);
     std.debug.print("execution fixtures: {d} passed, {d} skipped\n", .{ counts.passed, counts.skipped });
-    const core = [_]u8{ 0x00, 0xf3, 0xfd };
+    const core = [_]u8{ 0x00, 0x20, 0xf3, 0xfd };
     for (core) |op| try std.testing.expect(seen[op]);
     for (0x01..0x0c) |op| try std.testing.expect(seen[op]);
     for (0x10..0x1e) |op| try std.testing.expect(seen[op]);
@@ -274,6 +287,31 @@ test "rejects checksum mismatch, malformed JSON, missing expectation, and unknow
     fixture.fork = fixtures[0].fork;
     fixture.checksum = fixtures[0].checksum;
     try std.testing.expectError(error.UnknownFormat, runFixture(std.testing.allocator, fixture, fixtures[0].bytes));
+}
+
+test "mcopy_empty rejects changed state and logs oracles and named skips stay skips" {
+    const allocator = std.testing.allocator;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, fixtures[7].bytes, .{});
+    defer parsed.deinit();
+    const test_value = parsed.value.object.values()[0];
+    const post = try member(try member(test_value, "post"), "Cancun");
+    const expected = post.array.items[0];
+    const zero_hash = std.json.Value{ .string = "0x0000000000000000000000000000000000000000000000000000000000000000" };
+    const root = expected.object.getPtr("hash").?;
+    const original_root = root.*;
+    root.* = zero_hash;
+    try std.testing.expectError(error.StateRootMismatch, runStateFixture(allocator, parsed.value, fixtures[7]));
+    root.* = original_root;
+    const logs = expected.object.getPtr("logs").?;
+    logs.* = zero_hash;
+    try std.testing.expectError(error.LogsHashMismatch, runStateFixture(allocator, parsed.value, fixtures[7]));
+
+    var skipped = fixtures[7];
+    skipped.expected = .skip;
+    skipped.skip_reason = "unsupported execution";
+    try std.testing.expect(!try runFixture(allocator, skipped, fixtures[7].bytes));
+    skipped.skip_reason = null;
+    try std.testing.expectError(error.MissingExpectation, runFixture(allocator, skipped, fixtures[7].bytes));
 }
 
 test "blockchain fixture rejects malformed and mismatched oracles" {

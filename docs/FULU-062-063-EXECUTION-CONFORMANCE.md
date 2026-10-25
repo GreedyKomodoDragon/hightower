@@ -1,6 +1,6 @@
 # FULU-062/063 execution conformance
 
-The offline `zig build test-execution` suite pins selected fixtures from [execution-spec-tests v5.4.0](https://github.com/ethereum/execution-spec-tests/releases/tag/v5.4.0), commit `88e9fb8`. The [manifest](../src/execution/fixtures.zig) records each selected case's source archive path, SHA-256, fork, and expected outcome. `cNN` files contain one named upstream case each; their manifest comments give the exact upstream case key. All files are checked in, so tests make no network requests.
+The offline `zig build test-execution` suite pins selected fixtures from [execution-spec-tests v5.4.0](https://github.com/ethereum/execution-spec-tests/releases/tag/v5.4.0), commit `88e9fb8`. The `fixtures_stable.tar.gz` source archive has SHA-256 `92cf1b47ad12fb27163261fc3c1cea5df72439cab507983d06b56c94f8741909`. The [manifest](../src/execution/fixtures.zig) records each selected case's source archive path, SHA-256, fork, and expected outcome. `cNN` files contain one named upstream case each; their manifest comments give the exact upstream case key. All files are checked in, so tests make no network requests.
 
 ## Block acceptance and commitments
 
@@ -13,18 +13,18 @@ The valid fixture also drives a focused sequence: two malformed candidate header
 
 ## Executed opcode coverage
 
-The test-only collector records each opcode fetched by the EVM, including nested calls. The suite asserts that successfully executed upstream cases reach every FULU-050/051 opcode byte: `00`, `01–0b`, `10–1d`, `50–5e`, `5f–9f`, `a0–a4`, `f3`, and `fd`. PUSH1/PUSH32, DUP1/DUP16, and SWAP1/SWAP16 are included with all intermediate widths. The assertion fails if a selected case stops reaching any of these bytes.
+The test-only collector records each opcode fetched by the EVM, including nested calls. The suite asserts that successfully executed upstream cases reach every FULU-050/051 opcode byte, plus SHA3: `00`, `01–0b`, `10–1d`, `20`, `50–5e`, `5f–9f`, `a0–a4`, `f3`, and `fd`. PUSH1/PUSH32, DUP1/DUP16, and SWAP1/SWAP16 are included with all intermediate widths. The assertion fails if a selected case stops reaching any of these bytes.
 
 | Edge class | Pinned cases and oracle |
 | --- | --- |
 | Signed/unsigned arithmetic and shifts | `arithmetic`, `mod`, `smod`, `mulmod`, `signed_shifts`, `c06`, `c11`, `c12` compare complete post-state and logs hashes. |
 | Stack faults and limits | `c28–c36` exercise SWAP underflow; `stack_overflow` exercises the 1,024-word limit. |
-| Memory, jumps, and return behavior | `memory_oog`, `invalid_jump`, `c13`, `c21`, `c10`, `c23`, and the [EIP-5656 MCOPY examples](FULU-050-051-EVM-FIXTURES.md) check out-of-gas memory expansion, invalid jumps, copying, REVERT, and overlap. |
-| Storage and refunds | `c05`, `c07`, `tload_after_store`, and the [EIP-3529 SSTORE examples](FULU-050-051-EVM-FIXTURES.md) check warm/cold and original/current/dirty paths, capped refunds, and transient storage. |
+| Memory, jumps, and return behavior | `memory_oog`, `invalid_jump`, `c13`, `c21`, `c10`, `c23`, `mcopy_empty`, `sha3_dejavu`, `sha3_nonconst_v0`, `sha3_2016_32`, `sha3_neg1_2`, `sha3_nodata`, `mcopy_hash_forward`, `mcopy_hash_backward`, `mcopy_expansion_31`, and the [EIP-5656 MCOPY examples](FULU-050-051-EVM-FIXTURES.md) check SHA3 memory boundaries, out-of-gas expansion, invalid jumps, copying, REVERT, and overlap. |
+| Storage and refunds | `c05`, `c07`, `tload_after_store`, `tload_transaction_begin`, `tload_call`, `tload_callcode`, `tload_delegatecall`, `tstore_subcall_revert`, and the [EIP-3529 SSTORE examples](FULU-050-051-EVM-FIXTURES.md) check warm/cold and original/current/dirty paths, capped refunds, transient reads across call contexts, and reverted transient writes. |
 | Logs and call frames | `log1`, `log2`, `log4`, `c03`, `c24`, and `c25` compare full state and logs hashes. |
 
 The state processor uses each fixture's raw transaction bytes, explicit Cancun or London fork, selected transaction indexes, sender, complete post-state, state root, and logs hash. Blockchain cases use the production `applyBlock` transition. Mismatches abort the suite.
 
 ## Remaining gaps
 
-`mcopy_empty` is a named skip because that upstream case executes SHA3 (`0x20`), which this EVM does not implement. A v5.4.0 MCOPY out-of-gas case uses a type-1 access-list transaction, which the current state fixture processor does not compare. Deep recursive CALL coverage remains untested: the candidate from `stSystemOperationsTest/CallRecursiveBomb0_OOG_atMaxCallDepth.json` exhausted the host stack during screening. The selected suite does not claim conformance for unsupported precompiles, contract creation, future forks, or every combination of operand values.
+The suite now passes 93 pinned cases with no named skips; SHA3 and MCOPY cases compare the complete post-state, root, and logs oracle. A v5.4.0 MCOPY out-of-gas case uses a type-1 access-list transaction, which the current state fixture processor does not compare. Transient storage isolation between consecutive transactions remains untested by a selected upstream case. Deep recursive CALL coverage remains untested: the candidate from `stSystemOperationsTest/CallRecursiveBomb0_OOG_atMaxCallDepth.json` exhausted the host stack during screening. The selected suite does not claim conformance for unsupported precompiles, contract creation, future forks, or every combination of operand values.

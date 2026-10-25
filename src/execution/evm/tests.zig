@@ -19,6 +19,56 @@ test "PUSH ADD RETURN owns output and charges gas" {
     try std.testing.expectEqual(@as(u64, 76), result.gas_remaining);
 }
 
+test "SHA3 hashes empty and unaligned memory with Ethereum Keccak-256" {
+    const cases = [_]struct { code: []const u8, want: []const u8 }{
+        .{ .code = &.{ 0x5f, 0x5f, 0x20, 0x5f, 0x52, 0x60, 32, 0x5f, 0xf3 }, .want = "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470" },
+        .{ .code = &.{ 0x60, 'a', 0x5f, 0x53, 0x60, 'b', 0x60, 1, 0x53, 0x60, 'c', 0x60, 2, 0x53, 0x60, 3, 0x5f, 0x20, 0x5f, 0x52, 0x60, 32, 0x5f, 0xf3 }, .want = "4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45" },
+        .{ .code = &.{ 0x60, 'a', 0x60, 1, 0x53, 0x60, 'b', 0x60, 2, 0x53, 0x60, 'c', 0x60, 3, 0x53, 0x60, 3, 0x60, 1, 0x20, 0x5f, 0x52, 0x60, 32, 0x5f, 0xf3 }, .want = "4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45" },
+        .{ .code = &([_]u8{ 0x5f, 0x7f } ++ ([_]u8{0xff} ** 32) ++ [_]u8{ 0x20, 0x5f, 0x52, 0x60, 32, 0x5f, 0xf3 }), .want = "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470" },
+    };
+    var world = state.State.init(std.testing.allocator);
+    defer world.deinit();
+    var machine = Machine.init(std.testing.allocator, &world);
+    defer machine.deinit();
+    for (cases) |case| {
+        var result = try machine.run(.{ .code = case.code, .gas = 1000 });
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expect(result.status == .success);
+        try std.testing.expectEqual(@as(usize, 32), result.output.len);
+        try std.testing.expectEqualStrings(case.want, &std.fmt.bytesToHex(result.output[0..32].*, .lower));
+    }
+}
+
+test "SHA3 charges base, words, and memory expansion and faults predictably" {
+    const cases = [_]struct { code: []const u8, cost: u64 }{
+        .{ .code = &.{ 0x5f, 0x5f, 0x20 }, .cost = 2 + 2 + 30 },
+        .{ .code = &.{ 0x60, 1, 0x5f, 0x20 }, .cost = 3 + 2 + 30 + 6 + 3 },
+        .{ .code = &.{ 0x60, 33, 0x5f, 0x20 }, .cost = 3 + 2 + 30 + 12 + 6 },
+        .{ .code = &.{ 0x60, 2, 0x60, 31, 0x20 }, .cost = 3 + 3 + 30 + 6 + 6 },
+    };
+    var world = state.State.init(std.testing.allocator);
+    defer world.deinit();
+    var machine = Machine.init(std.testing.allocator, &world);
+    defer machine.deinit();
+    for (cases) |case| {
+        var exact = try machine.run(.{ .code = case.code, .gas = case.cost });
+        defer exact.deinit(std.testing.allocator);
+        try std.testing.expect(exact.status == .success);
+        try std.testing.expectEqual(@as(u64, 0), exact.gas_remaining);
+        var short = try machine.run(.{ .code = case.code, .gas = case.cost - 1 });
+        defer short.deinit(std.testing.allocator);
+        try std.testing.expectEqual(Fault.out_of_gas, short.status.fault);
+    }
+    for ([_][]const u8{ &.{0x20}, &.{ 0x5f, 0x20 } }) |code| {
+        var underflow = try machine.run(.{ .code = code, .gas = 100 });
+        defer underflow.deinit(std.testing.allocator);
+        try std.testing.expectEqual(Fault.stack_underflow, underflow.status.fault);
+    }
+    var overflow = try machine.run(.{ .code = &([_]u8{ 0x60, 1, 0x7f } ++ ([_]u8{0xff} ** 32) ++ [_]u8{0x20}), .gas = 100 });
+    defer overflow.deinit(std.testing.allocator);
+    try std.testing.expectEqual(Fault.memory_overflow, overflow.status.fault);
+}
+
 /// Runs one word-producing opcode with operands in EVM top-first order.
 fn testWord(op: u8, a: u256, b: u256, c: u256) !u256 {
     var code: [108]u8 = undefined;

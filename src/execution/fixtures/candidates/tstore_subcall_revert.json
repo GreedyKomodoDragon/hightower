@@ -1,0 +1,113 @@
+{
+  "tests/cancun/eip1153_tstore/test_tstorage_execution_contexts.py::test_subcall[fork_Cancun-state_test-call_with_revert]": {
+    "env": {
+      "currentCoinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+      "currentGasLimit": "0x07270e00",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentDifficulty": "0x00",
+      "currentBaseFee": "0x07",
+      "currentExcessBlobGas": "0x00"
+    },
+    "pre": {
+      "0x846bbb84fd2ddd4fd3726d4b67746a9a56ed3e4b": {
+        "nonce": "0x01",
+        "balance": "0x00",
+        "code": "0x6101a460005d6101a460015d600060006000600060006000355af160005560005c60015560015c60025500",
+        "storage": {}
+      },
+      "0x846bbb84fd2ddd4fd3726d4b67746a9a56ed3f4b": {
+        "nonce": "0x01",
+        "balance": "0x00",
+        "code": "0x604560015d60006000fd",
+        "storage": {}
+      },
+      "0xb4e452bb782535534714cb4c43c54a51405bec81": {
+        "nonce": "0x00",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "gasLimit": [
+        "0x0f4240"
+      ],
+      "to": "0x846bbb84fd2ddd4fd3726d4b67746a9a56ed3e4b",
+      "value": [
+        "0x00"
+      ],
+      "data": [
+        "0x000000000000000000000000846bbb84fd2ddd4fd3726d4b67746a9a56ed3f4b"
+      ],
+      "sender": "0xb4e452bb782535534714cb4c43c54a51405bec81",
+      "secretKey": "0xd7fbea71be962be1083e1659846bbb84fd2ddd4fd3726d4b67746a9a56ed3e4b"
+    },
+    "post": {
+      "Cancun": [
+        {
+          "hash": "0xcfc92e926cacc996a22a316864ae424d95dc2c35afb60360bccc469be5d6ad61",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+          "txbytes": "0xf880800a830f424094846bbb84fd2ddd4fd3726d4b67746a9a56ed3e4b80a0000000000000000000000000846bbb84fd2ddd4fd3726d4b67746a9a56ed3f4b25a0c440a77a4e33043ff64b374f936802379fc58f81353eea69233e25868f103986a0282496ee8ce0c004dee6c478b69674345ce9fa4d5aebb715631d1998ff19c8f7",
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "state": {
+            "0x846bbb84fd2ddd4fd3726d4b67746a9a56ed3e4b": {
+              "nonce": "0x01",
+              "balance": "0x00",
+              "code": "0x6101a460005d6101a460015d600060006000600060006000355af160005560005c60015560015c60025500",
+              "storage": {
+                "0x01": "0x01a4",
+                "0x02": "0x01a4"
+              }
+            },
+            "0x846bbb84fd2ddd4fd3726d4b67746a9a56ed3f4b": {
+              "nonce": "0x01",
+              "balance": "0x00",
+              "code": "0x604560015d60006000fd",
+              "storage": {}
+            },
+            "0xb4e452bb782535534714cb4c43c54a51405bec81": {
+              "nonce": "0x01",
+              "balance": "0x3635c9adc5de952d4c",
+              "code": "0x",
+              "storage": {}
+            },
+            "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba": {
+              "nonce": "0x00",
+              "balance": "0x033f36",
+              "code": "0x",
+              "storage": {}
+            }
+          }
+        }
+      ]
+    },
+    "config": {
+      "blobSchedule": {
+        "Cancun": {
+          "target": "0x03",
+          "max": "0x06",
+          "baseFeeUpdateFraction": "0x32f0ed"
+        }
+      },
+      "chainid": "0x01"
+    },
+    "_info": {
+      "hash": "0x98087f8cdc8e1fe1ee1f4cfa03fe68fbd6966fe4412907da7fcd8bf4420c1f10",
+      "comment": "`execution-specs` generated test",
+      "filling-transition-tool": "2.18.0rc6",
+      "description": "Test transient storage with a subcall using the following opcodes.\n\n    - `CALL`\n    - `CALLCODE`\n    - `DELEGATECALL`\n    - `STATICCALL`",
+      "url": "https://github.com/ethereum/execution-specs/blob/tests-v5.4.0/tests/cancun/eip1153_tstore/test_tstorage_execution_contexts.py#L359",
+      "fixture-format": "state_test",
+      "reference-spec": "https://github.com/ethereum/EIPs/blob/master/EIPS/eip-1153.md",
+      "reference-spec-version": "1eb863b534a5a3e19e9c196ab2a7f3db4bb9da17"
+    }
+  }
+}
