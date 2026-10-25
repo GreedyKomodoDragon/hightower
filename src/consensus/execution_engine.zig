@@ -46,7 +46,7 @@ pub const ExecutionEngine = struct {
         return self.verify_and_notify_new_payload(self.context, request);
     }
 
-    /// Start a payload build for the selected head and return its identifier.
+    /// Start a payload build for the parent execution block hash and return its identifier.
     pub fn forkchoiceUpdated(self: ExecutionEngine, head: fulu.Root, attributes: PayloadAttributes) anyerror!u64 {
         return self.forkchoice_updated(self.context, head, attributes);
     }

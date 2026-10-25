@@ -56,6 +56,8 @@ pub const Pool = struct {
     /// Verify and own an attestation, merging disjoint participants for the same data.
     pub fn addAttestation(self: *Pool, state: *const fulu.BeaconState, value: fulu.Attestation) !void {
         try validate(self.allocator, state, value, operations.processAttestation);
+        self.pruneExpiredAttestations(state.slot);
+        try pruneInvalid(self.allocator, fulu.Attestation, &self.attestations, state, 2 * preset.MAX_ATTESTATIONS_ELECTRA, operations.processAttestation);
         const incoming = try operations.getAttestingIndices(self.allocator, state, value);
         defer self.allocator.free(incoming);
         for (self.attestations.items) |entry| {
@@ -83,40 +85,58 @@ pub const Pool = struct {
     /// Verify and own proposer-slashing evidence against a state copy.
     pub fn addProposerSlashing(self: *Pool, state: *const fulu.BeaconState, value: fulu.ProposerSlashing) !void {
         try validate(self.allocator, state, value, operations.processProposerSlashing);
+        try pruneInvalid(self.allocator, fulu.ProposerSlashing, &self.proposer_slashings, state, 2 * preset.MAX_PROPOSER_SLASHINGS, operations.processProposerSlashing);
         try add(self.allocator, fulu.ProposerSlashing, &self.proposer_slashings, value, 2 * preset.MAX_PROPOSER_SLASHINGS);
     }
 
     /// Verify and own attester-slashing evidence against a state copy.
     pub fn addAttesterSlashing(self: *Pool, state: *const fulu.BeaconState, value: fulu.AttesterSlashing) !void {
         try validate(self.allocator, state, value, operations.processAttesterSlashing);
+        try pruneInvalid(self.allocator, fulu.AttesterSlashing, &self.attester_slashings, state, 2 * preset.MAX_ATTESTER_SLASHINGS_ELECTRA, operations.processAttesterSlashing);
         try add(self.allocator, fulu.AttesterSlashing, &self.attester_slashings, value, 2 * preset.MAX_ATTESTER_SLASHINGS_ELECTRA);
     }
 
     /// Verify and own a voluntary exit against a state copy.
     pub fn addVoluntaryExit(self: *Pool, state: *const fulu.BeaconState, value: fulu.SignedVoluntaryExit) !void {
         try validate(self.allocator, state, value, operations.processVoluntaryExit);
+        try pruneInvalid(self.allocator, fulu.SignedVoluntaryExit, &self.voluntary_exits, state, 2 * preset.MAX_VOLUNTARY_EXITS, operations.processVoluntaryExit);
         try add(self.allocator, fulu.SignedVoluntaryExit, &self.voluntary_exits, value, 2 * preset.MAX_VOLUNTARY_EXITS);
     }
 
     /// Verify and own a withdrawal-credential change against a state copy.
     pub fn addBlsChange(self: *Pool, state: *const fulu.BeaconState, value: fulu.SignedBLSToExecutionChange) !void {
         try validate(self.allocator, state, value, operations.processBLSToExecutionChange);
+        try pruneInvalid(self.allocator, fulu.SignedBLSToExecutionChange, &self.bls_changes, state, 2 * preset.MAX_BLS_TO_EXECUTION_CHANGES, operations.processBLSToExecutionChange);
         try add(self.allocator, fulu.SignedBLSToExecutionChange, &self.bls_changes, value, 2 * preset.MAX_BLS_TO_EXECUTION_CHANGES);
     }
 
-    /// Borrow valid operations in block order, allocating only the returned list slices.
+    /// Release votes that no future block at this slot can include.
+    fn pruneExpiredAttestations(self: *Pool, slot: fulu.Slot) void {
+        var i: usize = 0;
+        while (i < self.attestations.items.len) {
+            const vote_slot = self.attestations.items[i].value.data.slot;
+            if (vote_slot > slot or slot - vote_slot > helpers.SLOTS_PER_EPOCH) {
+                ssz.freeDecoded(self.allocator, fulu.Attestation, self.attestations.orderedRemove(i).value);
+            } else i += 1;
+        }
+    }
+
+    /// Borrow valid operations in block order; caller allocator holds only list slices.
     pub fn select(self: *const Pool, allocator: std.mem.Allocator, state: *const fulu.BeaconState) !Selection {
-        var working = try copyValue(allocator, fulu.BeaconState, state.*);
-        defer ssz.freeDecoded(allocator, fulu.BeaconState, working);
-        const proposer_slashings = try selectList(allocator, fulu.ProposerSlashing, self.proposer_slashings.items, &working, preset.MAX_PROPOSER_SLASHINGS, operations.processProposerSlashing);
+        // A caller may use an arena for the proposal. Keep trial states in
+        // independent arenas so each candidate's state is released promptly.
+        var scratch = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer scratch.deinit();
+        var working = try copyValue(scratch.allocator(), fulu.BeaconState, state.*);
+        const proposer_slashings = try selectList(allocator, fulu.ProposerSlashing, self.proposer_slashings.items, &scratch, &working, preset.MAX_PROPOSER_SLASHINGS, operations.processProposerSlashing);
         errdefer allocator.free(proposer_slashings);
-        const attester_slashings = try selectList(allocator, fulu.AttesterSlashing, self.attester_slashings.items, &working, preset.MAX_ATTESTER_SLASHINGS_ELECTRA, operations.processAttesterSlashing);
+        const attester_slashings = try selectList(allocator, fulu.AttesterSlashing, self.attester_slashings.items, &scratch, &working, preset.MAX_ATTESTER_SLASHINGS_ELECTRA, operations.processAttesterSlashing);
         errdefer allocator.free(attester_slashings);
-        const attestations = try selectList(allocator, fulu.Attestation, self.attestations.items, &working, preset.MAX_ATTESTATIONS_ELECTRA, operations.processAttestation);
+        const attestations = try selectList(allocator, fulu.Attestation, self.attestations.items, &scratch, &working, preset.MAX_ATTESTATIONS_ELECTRA, operations.processAttestation);
         errdefer allocator.free(attestations);
-        const voluntary_exits = try selectList(allocator, fulu.SignedVoluntaryExit, self.voluntary_exits.items, &working, preset.MAX_VOLUNTARY_EXITS, operations.processVoluntaryExit);
+        const voluntary_exits = try selectList(allocator, fulu.SignedVoluntaryExit, self.voluntary_exits.items, &scratch, &working, preset.MAX_VOLUNTARY_EXITS, operations.processVoluntaryExit);
         errdefer allocator.free(voluntary_exits);
-        const bls_changes = try selectList(allocator, fulu.SignedBLSToExecutionChange, self.bls_changes.items, &working, preset.MAX_BLS_TO_EXECUTION_CHANGES, operations.processBLSToExecutionChange);
+        const bls_changes = try selectList(allocator, fulu.SignedBLSToExecutionChange, self.bls_changes.items, &scratch, &working, preset.MAX_BLS_TO_EXECUTION_CHANGES, operations.processBLSToExecutionChange);
         return .{
             .proposer_slashings = proposer_slashings,
             .attester_slashings = attester_slashings,
@@ -172,6 +192,20 @@ fn add(allocator: std.mem.Allocator, comptime T: type, list: *std.ArrayList(Entr
     std.mem.sort(Entry(T), list.items, {}, lessThan(T));
 }
 
+/// At capacity, discard entries that no longer validate against current state.
+fn pruneInvalid(allocator: std.mem.Allocator, comptime T: type, list: *std.ArrayList(Entry(T)), state: *const fulu.BeaconState, limit: usize, process: anytype) !void {
+    if (list.items.len < limit) return;
+    var i: usize = 0;
+    while (i < list.items.len) {
+        validate(allocator, state, list.items[i].value, process) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            ssz.freeDecoded(allocator, T, list.orderedRemove(i).value);
+            continue;
+        };
+        i += 1;
+    }
+}
+
 /// Run an existing operation processor without changing caller state.
 fn validate(allocator: std.mem.Allocator, state: *const fulu.BeaconState, value: anytype, process: anytype) !void {
     var copy = try copyValue(allocator, fulu.BeaconState, state.*);
@@ -180,21 +214,26 @@ fn validate(allocator: std.mem.Allocator, state: *const fulu.BeaconState, value:
 }
 
 /// Replay each candidate on a trial state, retaining valid entries up to limit.
-fn selectList(allocator: std.mem.Allocator, comptime T: type, entries: []const Entry(T), state: *fulu.BeaconState, limit: usize, process: anytype) ![]T {
+fn selectList(allocator: std.mem.Allocator, comptime T: type, entries: []const Entry(T), scratch: *std.heap.ArenaAllocator, state: *fulu.BeaconState, limit: usize, process: anytype) ![]T {
     var chosen = std.ArrayList(T).empty;
     errdefer chosen.deinit(allocator);
     for (entries) |entry| {
         if (chosen.items.len == limit) break;
-        var trial = try copyValue(allocator, fulu.BeaconState, state.*);
-        if (process(allocator, &trial, entry.value)) |_| {
+        var trial_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        var trial = copyValue(trial_arena.allocator(), fulu.BeaconState, state.*) catch |err| {
+            trial_arena.deinit();
+            return err;
+        };
+        if (process(trial_arena.allocator(), &trial, entry.value)) |_| {
             chosen.append(allocator, entry.value) catch |err| {
-                ssz.freeDecoded(allocator, fulu.BeaconState, trial);
+                trial_arena.deinit();
                 return err;
             };
-            ssz.freeDecoded(allocator, fulu.BeaconState, state.*);
+            scratch.deinit();
+            scratch.* = trial_arena;
             state.* = trial;
         } else |err| {
-            ssz.freeDecoded(allocator, fulu.BeaconState, trial);
+            trial_arena.deinit();
             if (err == error.OutOfMemory) return err;
         }
     }
@@ -338,6 +377,76 @@ test "pool bound rejects an extra distinct entry" {
     try std.testing.expectError(error.PoolFull, add(allocator, fulu.SignedVoluntaryExit, &entries, second, 1));
 }
 
+test "expired attestations free a full pool for a fresh vote" {
+    const allocator = std.testing.allocator;
+    const fixtures = @import("fixture_runner.zig");
+    var state = try fixtures.decodeState(allocator, @embedFile("fixtures/fulu_block_operations/attestation_valid/pre.ssz_snappy"));
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
+    const bytes = try fixtures.decode(allocator, @embedFile("fixtures/fulu_block_operations/attestation_valid/attestation.ssz_snappy"));
+    defer allocator.free(bytes);
+    var reader: std.Io.Reader = .fixed(bytes);
+    const old_vote = try ssz.deserialize(allocator, fulu.Attestation, &reader);
+    defer ssz.freeDecoded(allocator, fulu.Attestation, old_vote);
+    const new_slot = @max(state.slot + 1, old_vote.data.slot + helpers.SLOTS_PER_EPOCH + 2);
+    try @import("transition.zig").processSlots(allocator, &state, new_slot, @import("epoch.zig").processEpoch);
+
+    var fresh = old_vote;
+    fresh.data.slot = new_slot - 1;
+    fresh.data.target.epoch = helpers.computeEpochAtSlot(fresh.data.slot);
+    fresh.committee_bits.data = [_]bool{false} ** preset.MAX_COMMITTEES_PER_SLOT;
+    var validator_index: ?usize = null;
+    for (0..preset.MAX_COMMITTEES_PER_SLOT) |committee_index| {
+        const committee = try helpers.getBeaconCommittee(allocator, &state, fresh.data.slot, committee_index);
+        defer allocator.free(committee);
+        if (committee.len == 0) continue;
+        fresh.committee_bits.data[committee_index] = true;
+        fresh.aggregation_bits.data = try allocator.alloc(bool, committee.len);
+        @memset(@constCast(fresh.aggregation_bits.data), false);
+        @constCast(fresh.aggregation_bits.data)[0] = true;
+        validator_index = @intCast(committee[0]);
+        break;
+    }
+    if (validator_index == null) return error.FixtureNoCommittee;
+    defer allocator.free(fresh.aggregation_bits.data);
+    var key = blst.SecretKey{};
+    const seed = [_]u8{0x71} ** 32;
+    key.keygen(&seed, null);
+    defer key.deinit();
+    @constCast(state.validators.data)[validator_index.?].pubkey = try bls.publicKey(&key);
+    const root = try merkle.HashTreeRoot(allocator, fresh.data);
+    const domain = domains.getDomain(state, helpers.DOMAIN_BEACON_ATTESTER, fresh.data.target.epoch);
+    fresh.signature = bls.sign(&key, domains.computeSigningRoot(root, domain));
+
+    var pool = Pool.init(allocator);
+    defer pool.deinit();
+    for (0..2 * preset.MAX_ATTESTATIONS_ELECTRA) |i| {
+        const stale = try copyValue(allocator, fulu.Attestation, old_vote);
+        try pool.attestations.append(allocator, .{ .root = [_]u8{@intCast(i)} ** 32, .value = stale });
+    }
+    try pool.addAttestation(&state, fresh);
+    try std.testing.expectEqual(@as(usize, 1), pool.attestations.items.len);
+    try std.testing.expectEqual(fresh.data.slot, pool.attestations.items[0].value.data.slot);
+}
+
+test "selection scratch does not consume the caller's small arena" {
+    const allocator = std.testing.allocator;
+    const fixtures = @import("fixture_runner.zig");
+    const state = try fixtures.decodeState(allocator, @embedFile("fixtures/fulu_block_operations/attestation_valid/pre.ssz_snappy"));
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
+    const bytes = try fixtures.decode(allocator, @embedFile("fixtures/fulu_block_operations/attestation_valid/attestation.ssz_snappy"));
+    defer allocator.free(bytes);
+    var reader: std.Io.Reader = .fixed(bytes);
+    const vote = try ssz.deserialize(allocator, fulu.Attestation, &reader);
+    defer ssz.freeDecoded(allocator, fulu.Attestation, vote);
+    var pool = Pool.init(allocator);
+    defer pool.deinit();
+    try pool.addAttestation(&state, vote);
+    var buffer: [512]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&buffer);
+    const selected = try pool.select(fixed.allocator(), &state);
+    try std.testing.expectEqual(@as(usize, 1), selected.attestations.len);
+}
+
 test "pool aggregates disjoint votes and rejects a conflicting vote" {
     const allocator = std.testing.allocator;
     const fixtures = @import("fixture_runner.zig");
@@ -397,9 +506,10 @@ test "selection applies each Fulu operation body limit" {
         .value = .{ .message = .{ .epoch = 0, .validator_index = i }, .signature = [_]u8{0} ** 96 },
     };
     inline for (.{ preset.MAX_PROPOSER_SLASHINGS, preset.MAX_ATTESTER_SLASHINGS_ELECTRA, preset.MAX_ATTESTATIONS_ELECTRA, preset.MAX_VOLUNTARY_EXITS, preset.MAX_BLS_TO_EXECUTION_CHANGES }) |limit| {
-        var working = try copyValue(allocator, fulu.BeaconState, state);
-        defer ssz.freeDecoded(allocator, fulu.BeaconState, working);
-        const chosen = try selectList(allocator, fulu.SignedVoluntaryExit, &entries, &working, limit, acceptForLimitTest);
+        var scratch = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer scratch.deinit();
+        var working = try copyValue(scratch.allocator(), fulu.BeaconState, state);
+        const chosen = try selectList(allocator, fulu.SignedVoluntaryExit, &entries, &scratch, &working, limit, acceptForLimitTest);
         defer allocator.free(chosen);
         try std.testing.expectEqual(@as(usize, limit), chosen.len);
     }

@@ -34,7 +34,10 @@ uses the existing operation processors on a state copy; selection replays
 entries in block order against the proposed state and borrows selected values.
 Entries are sorted by SSZ root and capped at twice their block limit. Call
 `pool.accepted(block.body)` only after accepting the block, so a failed proposal
-does not consume operations.
+does not consume operations. Expired attestations are removed on admission;
+when another operation list is full, entries are revalidated against the
+current state before rejecting a new operation. Selection uses independent
+scratch storage, releasing each trial state before the next candidate.
 
 [`proposer.zig`](proposer.zig) clones the trusted parent state, advances to the
 requested slot, checks the caller's proposer key, requests an execution payload,
@@ -42,7 +45,8 @@ and signs the resulting block. The engine's `forkchoiceUpdated` and `getPayload`
 callbacks supply a borrowed payload; `verify` still checks it during block
 processing. The returned `SignedBeaconBlock` owns its lists and must be released
 with `ssz.freeDecoded`. The caller supplies the sync aggregate, fee recipient,
-and graffiti. Legacy deposits are empty.
+and graffiti. The builder head is the parent execution block hash; its separate
+attributes include the parent beacon block root. Legacy deposits are empty.
 
 ## Advancing slots and epochs
 

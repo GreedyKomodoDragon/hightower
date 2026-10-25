@@ -57,7 +57,7 @@ pub fn propose(
         .withdrawals = withdrawals,
         .parent_beacon_block_root = parent_root,
     };
-    const payload_id = try engine.forkchoiceUpdated(parent_root, attrs);
+    const payload_id = try engine.forkchoiceUpdated(state.latest_execution_payload_header.block_hash, attrs);
     const built = try engine.getPayload(payload_id);
     if (!std.mem.eql(u8, &built.payload.fee_recipient, &fee_recipient)) return error.InvalidFeeRecipient;
     if (built.payload.withdrawals.data.len != withdrawals.len) return error.InvalidWithdrawals;
@@ -173,6 +173,8 @@ fn checkProducedBlock(compressed: []const u8, cross_epoch: bool) !void {
     try std.testing.expectEqual(@as(usize, 1), signed.message.body.execution_requests.deposits.data.len);
     try std.testing.expectEqual(deposit, signed.message.body.execution_requests.deposits.data[0]);
     try std.testing.expectEqual(payload.timestamp, test_engine.requested_timestamp.?);
+    try std.testing.expectEqual(parent.latest_execution_payload_header.block_hash, test_engine.head.?);
+    try std.testing.expect(!std.mem.eql(u8, &test_engine.head.?, &signed.message.parent_root));
     try std.testing.expectEqual(payload.fee_recipient, test_engine.requested_fee_recipient.?);
     try std.testing.expectEqual(payload.withdrawals.data.len, test_engine.requested_withdrawal_count.?);
     var replay = try pool_api.copyValue(allocator, fulu.BeaconState, parent);
