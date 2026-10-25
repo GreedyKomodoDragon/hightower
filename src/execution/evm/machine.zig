@@ -181,6 +181,9 @@ pub const Machine = struct {
         self.environment = environment;
         _ = try self.touchAccount(sender);
         _ = try self.touchAccount(recipient);
+        if (environment.fork == .fulu) if (state.delegationTarget(self.world.getCode(recipient))) |target| {
+            _ = try self.touchAccount(target);
+        };
         _ = try self.touchAccount(environment.coinbase);
         const precompile_count: usize = switch (environment.fork) {
             .london => 9,
@@ -270,7 +273,7 @@ pub const Machine = struct {
         self.logs.shrinkRetainingCapacity(count);
     }
     /// Warms an account and reports whether it was already warm.
-    fn touchAccount(self: *Machine, address: state.Address) !bool {
+    pub fn touchAccount(self: *Machine, address: state.Address) !bool {
         for (self.warm_accounts.items) |warm| if (same(warm, address)) return true;
         try self.warm_accounts.append(self.allocator, address);
         return false;
@@ -613,8 +616,13 @@ const Frame = struct {
             try self.machine.world.setBalance(self.input.callee, self.machine.world.getBalance(self.input.callee) - value);
             try self.machine.world.setBalance(target, self.machine.world.getBalance(target) + value);
         }
+        const designation = state.delegationTarget(self.machine.world.getCode(target));
+        if (designation) |address| {
+            const target_warm = try self.machine.touchAccount(address);
+            try self.charge(if (target_warm) 100 else 2600);
+        }
         var result = try self.machine.run(.{
-            .code = self.machine.world.getCode(target),
+            .code = self.machine.world.getExecutionCode(target),
             .gas = child_gas,
             .caller = if (op == Op.DELEGATECALL) self.input.caller else self.input.callee,
             .callee = recipient,

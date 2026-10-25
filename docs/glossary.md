@@ -46,7 +46,14 @@ Chain:      [Block 0] ───────────────────�
 | Typed transaction envelope | A transaction whose first byte selects its format, followed by that format's RLP payload. |
 | Access list | Addresses and storage slots a transaction declares it may access. |
 | Blob transaction | A transaction that refers to data blobs by their versioned hashes. |
+| KZG commitment | A short cryptographic commitment to a blob that can be checked against a proof without putting the blob in an execution block. |
+| Versioned hash | A 32-byte identifier made from a blob's KZG commitment; its first byte identifies the hash version. |
+| Blob proof | A KZG proof that a whole blob matches its commitment. |
+| Cell proof | A KZG proof that one erasure-coded part of a blob matches its commitment; Fulu network wrappers carry 128 proofs per blob. |
 | Authorization list | Signed permissions carried by a set-code transaction to delegate account behavior. |
+| Delegation indicator | The 23-byte code marker that points an account at another address's executable code under EIP-7702. |
+| Transaction pool | The node's bounded collection of signed transactions awaiting possible block inclusion. |
+| JSON-RPC | The HTTP request and response format used by applications to call execution methods such as `eth_getBalance`. |
 | Execution receipt | The status, gas tally, bloom, and logs produced by a transaction. |
 | Execution account | An address's nonce, balance, storage root, and code hash, encoded into the execution state trie. |
 | Ethereum Virtual Machine (EVM) | The execution engine that runs a contract's bytecode one instruction at a time. |

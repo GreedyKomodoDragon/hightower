@@ -33,7 +33,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "build_options", .module = preset_options_mod }},
     });
-    const blst = b.dependency("blst", .{}).module("blst");
+    const blst_dep = b.dependency("blst", .{});
+    const blst = blst_dep.module("blst");
+    const ckzg_dep = b.dependency("ckzg", .{});
+    const ckzg_blst_dep = ckzg_dep.builder.dependency("blst", .{});
+    const ckzg_mod = b.createModule(.{ .root_source_file = ckzg_dep.path("bindings/zig/src/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    ckzg_mod.addIncludePath(ckzg_dep.path("src"));
+    ckzg_mod.addIncludePath(ckzg_blst_dep.path("bindings"));
+    const blob_mod = b.createModule(.{ .root_source_file = b.path("src/blob.zig"), .target = target, .optimize = optimize });
     // It's also possible to define more custom flags to toggle optional features
     // of this build script using `b.option()`. All defined flags (including
     // target and optimize options) will be listed when running `zig build --help`
@@ -59,6 +66,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
     mod.addImport("consensus_preset", consensus_preset_mod);
+    mod.addImport("blob", blob_mod);
 
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
@@ -180,7 +188,26 @@ pub fn build(b: *std.Build) void {
             .{ .name = "bloom_filter", .module = bloom_filter_mod },
         },
     });
+    execution_mod.addImport("blob", blob_mod);
+    execution_mod.addImport("ckzg", ckzg_mod);
+    execution_mod.addImport("blst", blst);
+    execution_mod.addIncludePath(ckzg_dep.path("src"));
+    execution_mod.addIncludePath(ckzg_blst_dep.path("bindings"));
+    execution_mod.addCSourceFiles(.{ .root = ckzg_dep.path("."), .files = &.{"src/ckzg.c"}, .flags = &.{ "-O2", "-D__BLST_PORTABLE__" } });
+    execution_mod.link_libc = true;
     mod.addImport("execution", execution_mod);
+    const rpc_test_server = b.addExecutable(.{
+        .name = "hightower-rpc-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/execution/test_server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "execution", .module = execution_mod }},
+        }),
+    });
+    const rpc_server_step = b.step("build-rpc-test-server", "Build the execution RPC test fixture server");
+    const install_rpc_test_server = b.addInstallArtifact(rpc_test_server, .{});
+    rpc_server_step.dependOn(&install_rpc_test_server.step);
     const execution_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/execution/tests.zig"),
@@ -189,6 +216,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "execution", .module = execution_mod },
                 .{ .name = "rlp", .module = rlp_mod },
+                .{ .name = "ckzg", .module = ckzg_mod },
             },
         }),
     });
@@ -283,6 +311,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "consensus_preset", .module = consensus_preset_mod },
         },
     });
+    consensus_mod.addImport("blob", blob_mod);
     mod.addImport("consensus", consensus_mod);
     const api_mod = b.addModule("hightower_api", .{
         .root_source_file = b.path("src/api/root.zig"),

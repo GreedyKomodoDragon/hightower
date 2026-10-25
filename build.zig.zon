@@ -32,6 +32,10 @@
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
     .dependencies = .{
+        .ckzg = .{
+            .url = "https://github.com/ethereum/c-kzg-4844/archive/refs/tags/v2.1.8.tar.gz",
+            .hash = "ckzg_4844-0.0.0-I7LPWMw0EQBnqYagHE3VRwTrTAYpH0u6ZBPtfAeJsuDa",
+        },
         .blst = .{
             .url = "https://github.com/supranational/blst/archive/refs/tags/v0.3.17.tar.gz",
             .hash = "blst-0.3.17-pWUN_nxeLgAMRveed9s7nBMqCLdWMTjX_WNto9K4Oozb",

@@ -1,0 +1,11 @@
+# Fulu execution integration decisions
+
+The execution transition accepts the five EIP-2718 envelopes. Blob transactions pay blob gas at the block's blob base fee, expose their versioned hashes to `BLOBHASH`, and count toward the block blob gas limit. EIP-7702 authorizations are processed after the sender nonce advances and before the call frame; their code changes survive a reverted call frame. Contract creation and precompiles remain separate execution work.
+
+`c-kzg-4844` is pinned to v2.1.8 in `build.zig.zon`. The trusted setup at `src/execution/trusted_setup.txt` is from that release and has SHA-256 `d39b9f2d047cc9dca2de58f264b6a09448ccd34db967881a6713eacacf0f26b7`. A deployment passes this file's path to `execution.kzg.loadTrustedSetup`. The KZG wrapper verifies the commitments, versioned hashes, and either one blob proof or 128 Fulu cell proofs per blob before returning the canonical signed type-3 payload. The pool retains both the canonical payload and the network sidecar.
+
+The pool validates future nonces by opening a state snapshot, substituting the candidate nonce, and running the transition's admission checks. It retains gaps and selects only executable prefixes by effective tip. Replacement requires at least a 10% bump in both execution fee caps and, for blob transactions, the blob fee cap. It evicts by effective tip, then descending nonce and hash. Defaults are 4,096 entries and 64 MiB of owned encoded bytes.
+
+The JSON-RPC index keeps canonical block headers, transactions, receipts, withdrawals, and post-state snapshots in memory. It supports one append-only chain, with no persistence or reorganization handling. The server handles one connection at a time. Requests are limited to 1 MiB, batches to 20 calls, and log searches to 1,000 blocks and 10,000 results. `eth_call` clones historical state; `eth_estimateGas` probes that path by binary search. The loopback fixture server and `tests/execution-rpc` exercise an actual HTTP connection with ethers 6.15.0.
+
+The execution block context accepts the Fulu maximum blobs per block from its caller; the default is 21. Consensus validates the epoch-specific commitment count against its blob schedule before asking the execution engine to verify a payload.

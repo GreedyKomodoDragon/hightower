@@ -15,6 +15,12 @@ const trie = @import("trie.zig");
 pub const Address = [20]u8;
 pub const Hash = [32]u8;
 
+/// Returns the one-hop code target of a valid EIP-7702 designation.
+pub fn delegationTarget(code: []const u8) ?Address {
+    if (code.len != 23 or !std.mem.eql(u8, code[0..3], &.{ 0xef, 0x01, 0x00 })) return null;
+    return code[3..23].*;
+}
+
 /// Keccak-256 of the empty byte string, used by accounts with no code.
 pub const EMPTY_CODE_HASH: Hash = .{
     0xc5, 0xd2, 0x46, 0x01, 0x86, 0xf7, 0x23, 0x3c,
@@ -80,6 +86,20 @@ pub const State = struct {
         self.* = undefined;
     }
 
+    /// Copies committed account, code, and storage values for a canonical block snapshot.
+    pub fn clone(self: *const State, allocator: std.mem.Allocator) !State {
+        var copy = State.init(allocator);
+        errdefer copy.deinit();
+        for (self.accounts.items) |entry| {
+            try copy.createAccount(entry.address);
+            try copy.setNonce(entry.address, entry.nonce);
+            try copy.setBalance(entry.address, entry.balance);
+            _ = try copy.setCode(entry.address, self.getCode(entry.address));
+            for (entry.storage.items) |slot| try copy.setStorage(entry.address, slot.slot, slot.value);
+        }
+        return copy;
+    }
+
     /// Creates an explicit empty account; creating an existing account is a no-op.
     pub fn createAccount(self: *State, address: Address) !void {
         if (self.findAccount(address) != null) return;
@@ -136,6 +156,13 @@ pub const State = struct {
             if (std.mem.eql(u8, &code.hash, &account.code_hash)) return code.bytes;
         }
         return &.{};
+    }
+
+    /// Resolves one EIP-7702 delegation for execution while preserving the account's own code hash.
+    pub fn getExecutionCode(self: *const State, address: Address) []const u8 {
+        const code = self.getCode(address);
+        const target = delegationTarget(code) orelse return code;
+        return self.getCode(target);
     }
 
     /// Stores code by Keccak hash, updates the account, and returns the code hash.

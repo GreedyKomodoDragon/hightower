@@ -16,6 +16,7 @@
 // Processing mutates the allocator-owned state as it goes, so callers must
 // discard it on any error.
 const std = @import("std");
+const blob = @import("blob");
 const fulu = @import("fulu");
 const merkle = @import("merkle");
 const bls = @import("bls.zig");
@@ -83,8 +84,7 @@ fn processExecutionPayload(allocator: std.mem.Allocator, state: *fulu.BeaconStat
     const versioned_hashes = try allocator.alloc(fulu.Root, body.blob_kzg_commitments.data.len);
     defer allocator.free(versioned_hashes);
     for (body.blob_kzg_commitments.data, versioned_hashes) |commitment, *hash| {
-        std.crypto.hash.sha2.Sha256.hash(&commitment, hash, .{});
-        hash[0] = 1;
+        hash.* = blob.versionedHash(commitment);
     }
     const status = try engine.verify(.{
         .payload = &body.execution_payload,

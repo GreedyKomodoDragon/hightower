@@ -11,12 +11,17 @@
 const std = @import("std");
 const rlp = @import("rlp");
 const tx_crypto = @import("crypto.zig");
+pub const crypto = tx_crypto;
 const encoding = rlp.encoding;
 const decode = rlp.decode;
 pub const bloom_filter = @import("bloom_filter");
 pub const state = @import("state.zig");
 pub const evm = @import("evm.zig");
 pub const transition = @import("transition.zig");
+pub const kzg = @import("kzg.zig");
+pub const pool = @import("pool.zig");
+pub const chain = @import("chain.zig");
+pub const rpc = @import("rpc.zig");
 pub const trie = @import("trie.zig");
 
 /// Ethereum execution address, always 20 bytes on the wire.
