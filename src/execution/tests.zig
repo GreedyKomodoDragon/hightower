@@ -3,6 +3,283 @@
 // even one field position changes the transaction or block hash.
 const std = @import("std");
 const execution = @import("execution");
+test {
+    _ = execution.pool;
+    _ = execution.chain;
+    _ = execution.rpc;
+}
+
+test "pinned c-kzg zero-blob vector accepts its proof and rejects another" {
+    var settings = try execution.kzg.loadTrustedSetup("src/execution/trusted_setup.txt");
+    defer settings.deinit();
+    const ckzg = @import("ckzg");
+    const blob: ckzg.Blob = .{ .bytes = .{0} ** ckzg.BYTES_PER_BLOB };
+    const commitment: ckzg.Bytes48 = .{ .bytes = .{0xc0} ++ (.{0} ** 47) };
+    const correct: ckzg.Bytes48 = commitment;
+    var incorrect: ckzg.Bytes48 = undefined;
+    _ = try std.fmt.hexToBytes(&incorrect.bytes, "97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb");
+    try std.testing.expect(try settings.verifyBlobKzgProof(&blob, &commitment, &correct));
+    try std.testing.expect(!(try settings.verifyBlobKzgProof(&blob, &commitment, &incorrect)));
+}
+
+test "blob and Fulu cell wrappers verify and retain canonical transaction bytes" {
+    const a = std.testing.allocator;
+    const ckzg = @import("ckzg");
+    var settings = try execution.kzg.loadTrustedSetup("src/execution/trusted_setup.txt");
+    defer settings.deinit();
+    const blob: ckzg.Blob = .{ .bytes = .{0} ** ckzg.BYTES_PER_BLOB };
+    const commitment: [48]u8 = .{0xc0} ++ (.{0} ** 47);
+    const proof: [48]u8 = commitment;
+    var hash: execution.Hash = undefined;
+    std.crypto.hash.sha2.Sha256.hash(&commitment, &hash, .{});
+    hash[0] = 1;
+    const tx: execution.Blob = .{
+        .chain_id = 1,
+        .nonce = 0,
+        .max_priority_fee_per_gas = 1,
+        .max_fee_per_gas = 2,
+        .gas_limit = 100_000,
+        .to = .{0x22} ** 20,
+        .value = 0,
+        .data = &.{},
+        .access_list = &.{},
+        .max_fee_per_blob_gas = 1,
+        .blob_versioned_hashes = &.{hash},
+        .y_parity = 0,
+        .r = 1,
+        .s = 1,
+    };
+    const canonical = try execution.encode(a, execution.Transaction{ .blob = tx });
+    defer a.free(canonical);
+    const blobs = [1][ckzg.BYTES_PER_BLOB]u8{blob.bytes};
+    const commitments = [1][48]u8{commitment};
+    const proofs = [1][48]u8{proof};
+    const wrapper = try execution.encode(a, .{ tx, blobs, commitments, proofs });
+    defer a.free(wrapper);
+    const raw = try a.alloc(u8, wrapper.len + 1);
+    defer a.free(raw);
+    raw[0] = 3;
+    @memcpy(raw[1..], wrapper);
+    const recovered = try execution.kzg.canonicalTransaction(a, &settings, raw);
+    defer a.free(recovered);
+    try std.testing.expectEqualSlices(u8, canonical, recovered);
+    raw[raw.len - 1] ^= 1;
+    try std.testing.expectError(error.InvalidBlobProof, execution.kzg.canonicalTransaction(a, &settings, raw));
+    raw[raw.len - 1] ^= 1;
+    var cells: [ckzg.CELLS_PER_EXT_BLOB]ckzg.Cell = undefined;
+    var cell_proofs: [ckzg.CELLS_PER_EXT_BLOB]ckzg.KzgProof = undefined;
+    try settings.computeCellsAndKzgProofs(&cells, &cell_proofs, &blob);
+    var cell_bytes: [ckzg.CELLS_PER_EXT_BLOB][48]u8 = undefined;
+    for (cell_proofs, 0..) |item, i| cell_bytes[i] = item.bytes;
+    const cell_wrapper = try execution.encode(a, .{ tx, @as(u8, 1), blobs, commitments, cell_bytes });
+    defer a.free(cell_wrapper);
+    const cell_raw = try a.alloc(u8, cell_wrapper.len + 1);
+    defer a.free(cell_raw);
+    cell_raw[0] = 3;
+    @memcpy(cell_raw[1..], cell_wrapper);
+    const cell_recovered = try execution.kzg.canonicalTransaction(a, &settings, cell_raw);
+    defer a.free(cell_recovered);
+    try std.testing.expectEqualSlices(u8, canonical, cell_recovered);
+}
+
+test "execution JSON-RPC dispatches chain and block methods with bounded input" {
+    const a = std.testing.allocator;
+    var world = execution.state.State.init(a);
+    defer world.deinit();
+    const zero_hash = [_]u8{0} ** 32;
+    const header: execution.Header = .{
+        .parent_hash = zero_hash,
+        .ommers_hash = zero_hash,
+        .fee_recipient = .{0} ** 20,
+        .state_root = try world.stateRoot(),
+        .transactions_root = zero_hash,
+        .receipts_root = zero_hash,
+        .logs_bloom = .{0} ** 256,
+        .difficulty = 0,
+        .number = 0,
+        .gas_limit = 30_000_000,
+        .gas_used = 0,
+        .timestamp = 0,
+        .extra_data = &.{},
+        .prev_randao = zero_hash,
+        .nonce = .{0} ** 8,
+        .base_fee_per_gas = 1,
+        .withdrawals_root = zero_hash,
+        .blob_gas_used = 0,
+        .excess_blob_gas = 0,
+        .parent_beacon_block_root = zero_hash,
+        .requests_hash = zero_hash,
+    };
+    var chain = try execution.chain.Chain.init(a, 1, .fulu, header, &world);
+    defer chain.deinit();
+    var pool = execution.pool.Pool.init(a, .{});
+    defer pool.deinit();
+    var server: execution.rpc.Server = .{ .chain = &chain, .pool = &pool, .world = &world };
+    const response = try server.dispatch(a, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_chainId\",\"params\":[]}");
+    defer a.free(response);
+    try std.testing.expect(std.mem.indexOf(u8, response, "\"result\":\"0x1\"") != null);
+    const invalid = try server.dispatch(a, "[{},{}]");
+    defer a.free(invalid);
+    try std.testing.expect(std.mem.indexOf(u8, invalid, "-32600") != null);
+    const requests = [_][]const u8{
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"eth_blockNumber\",\"params\":[]}",
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"eth_getBlockByNumber\",\"params\":[\"latest\",false]}",
+        "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"eth_getBalance\",\"params\":[\"0x0000000000000000000000000000000000000000\",\"latest\"]}",
+        "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"eth_call\",\"params\":[{\"to\":\"0x0000000000000000000000000000000000000000\"},\"latest\"]}",
+        "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"eth_estimateGas\",\"params\":[{\"to\":\"0x0000000000000000000000000000000000000000\"},\"latest\"]}",
+        "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"eth_getTransactionReceipt\",\"params\":[\"0x0000000000000000000000000000000000000000000000000000000000000000\"]}",
+        "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"eth_getLogs\",\"params\":[{}]}",
+        "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"eth_sendRawTransaction\",\"params\":[\"0x\"]}",
+    };
+    for (requests) |request| {
+        const reply = try server.dispatch(a, request);
+        defer a.free(reply);
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, reply, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value.object.contains("result") or parsed.value.object.contains("error"));
+    }
+    const serve_fn: *const fn (*execution.rpc.Server, std.mem.Allocator, std.Io, std.Io.net.Stream) anyerror!void = execution.rpc.Server.serveConnection;
+    _ = serve_fn;
+}
+
+test "pool accepts five envelopes, preserves nonce gaps, selects prefixes, and enforces replacement" {
+    const a = std.testing.allocator;
+    var world = execution.state.State.init(a);
+    defer world.deinit();
+    const sender: execution.Address = .{ 0x7e, 0x5f, 0x45, 0x52, 0x09, 0x1a, 0x69, 0x12, 0x5d, 0x5d, 0xfc, 0xb7, 0xb8, 0xc2, 0x65, 0x90, 0x29, 0x39, 0x5b, 0xdf };
+    try world.setBalance(sender, 1_000_000_000_000);
+    const context: execution.transition.Context = .{ .fork = .fulu, .chain_id = 1, .coinbase = .{0x33} ** 20, .number = 1, .timestamp = 1, .gas_limit = 1_000_000, .base_fee = 1, .blob_base_fee = 1 };
+    var settings = try execution.kzg.loadTrustedSetup("src/execution/trusted_setup.txt");
+    defer settings.deinit();
+    var pool = execution.pool.Pool.init(a, .{ .max_entries = 8, .max_bytes = 2 * 1024 * 1024 });
+    defer pool.deinit();
+    const commitment: [48]u8 = .{0xc0} ++ (.{0} ** 47);
+    var versioned_hash: execution.Hash = undefined;
+    std.crypto.hash.sha2.Sha256.hash(&commitment, &versioned_hash, .{});
+    versioned_hash[0] = 1;
+    const auth = execution.Authorization{ .chain_id = 1, .address = .{0x44} ** 20, .nonce = 0, .y_parity = 0, .r = 1, .s = 1 };
+    for (0..5) |n| {
+        var tx: execution.Transaction = switch (n) {
+            0 => .{ .legacy = .{ .nonce = 0, .gas_price = 100, .gas_limit = 100_000, .to = .{0x22} ** 20, .value = 0, .data = &.{}, .v = 27, .r = 1, .s = 1 } },
+            1 => .{ .access_list = .{ .chain_id = 1, .nonce = 1, .gas_price = 100, .gas_limit = 100_000, .to = .{0x22} ** 20, .value = 0, .data = &.{}, .access_list = &.{}, .y_parity = 0, .r = 1, .s = 1 } },
+            2 => .{ .dynamic_fee = .{ .chain_id = 1, .nonce = 2, .max_priority_fee_per_gas = 10, .max_fee_per_gas = 100, .gas_limit = 100_000, .to = .{0x22} ** 20, .value = 0, .data = &.{}, .access_list = &.{}, .y_parity = 0, .r = 1, .s = 1 } },
+            3 => .{ .blob = .{ .chain_id = 1, .nonce = 3, .max_priority_fee_per_gas = 10, .max_fee_per_gas = 100, .gas_limit = 100_000, .to = .{0x22} ** 20, .value = 0, .data = &.{}, .access_list = &.{}, .max_fee_per_blob_gas = 10, .blob_versioned_hashes = &.{versioned_hash}, .y_parity = 0, .r = 1, .s = 1 } },
+            4 => .{ .set_code = .{ .chain_id = 1, .nonce = 4, .max_priority_fee_per_gas = 10, .max_fee_per_gas = 100, .gas_limit = 100_000, .destination = .{0x22} ** 20, .value = 0, .data = &.{}, .access_list = &.{}, .authorization_list = &.{auth}, .y_parity = 0, .r = 1, .s = 1 } },
+            else => unreachable,
+        };
+        try expectSyntheticSender(a, &tx);
+        const raw = if (tx == .blob) blk: {
+            const blob = [_][131_072]u8{.{0} ** 131_072};
+            const commitments = [_][48]u8{commitment};
+            const proofs = [_][48]u8{commitment};
+            const payload = try execution.encode(a, .{ tx.blob, blob, commitments, proofs });
+            defer a.free(payload);
+            const network = try a.alloc(u8, payload.len + 1);
+            network[0] = 3;
+            @memcpy(network[1..], payload);
+            break :blk network;
+        } else try execution.encode(a, tx);
+        defer a.free(raw);
+        _ = try pool.admit(&world, context, &settings, raw);
+    }
+    try testing.expectEqual(@as(usize, 5), pool.entries.items.len);
+    const original = try world.stateRoot();
+    const bounded = try pool.select(a, &world, context, 150_000);
+    defer a.free(bounded);
+    try testing.expectEqual(@as(usize, 3), bounded.len);
+    try testing.expectEqualSlices(u8, &original, &(try world.stateRoot()));
+    const selected = try pool.select(a, &world, context, 1_000_000);
+    defer a.free(selected);
+    try testing.expectEqual(@as(usize, 5), selected.len);
+    try testing.expectEqualSlices(u8, &original, &(try world.stateRoot()));
+    var gap = execution.Transaction{ .dynamic_fee = .{ .chain_id = 1, .nonce = 6, .max_priority_fee_per_gas = 10, .max_fee_per_gas = 100, .gas_limit = 100_000, .to = .{0x22} ** 20, .value = 0, .data = &.{}, .access_list = &.{}, .y_parity = 0, .r = 1, .s = 1 } };
+    try expectSyntheticSender(a, &gap);
+    const gap_raw = try execution.encode(a, gap);
+    defer a.free(gap_raw);
+    _ = try pool.admit(&world, context, &settings, gap_raw);
+    const selected_gap = try pool.select(a, &world, context, 1_000_000);
+    defer a.free(selected_gap);
+    try testing.expectEqual(@as(usize, 5), selected_gap.len);
+    gap.dynamic_fee.max_fee_per_gas = 109;
+    gap.dynamic_fee.max_priority_fee_per_gas = 11;
+    try expectSyntheticSender(a, &gap);
+    const underpriced = try execution.encode(a, gap);
+    defer a.free(underpriced);
+    try testing.expectError(error.ReplacementUnderpriced, pool.admit(&world, context, &settings, underpriced));
+    gap.dynamic_fee.max_fee_per_gas = 110;
+    try expectSyntheticSender(a, &gap);
+    const replacement = try execution.encode(a, gap);
+    defer a.free(replacement);
+    _ = try pool.admit(&world, context, &settings, replacement);
+}
+
+/// Builds a signed dynamic-fee transaction at one nonce for pool bound tests.
+fn pendingDynamic(a: std.mem.Allocator, nonce: u64) ![]u8 {
+    var tx = execution.Transaction{ .dynamic_fee = .{ .chain_id = 1, .nonce = nonce, .max_priority_fee_per_gas = 10, .max_fee_per_gas = 100, .gas_limit = 100_000, .to = .{0x22} ** 20, .value = 0, .data = &.{}, .access_list = &.{}, .y_parity = 0, .r = 1, .s = 1 } };
+    try expectSyntheticSender(a, &tx);
+    return execution.encode(a, tx);
+}
+
+test "pool evicts by count and bytes and prunes mined nonces" {
+    const a = testing.allocator;
+    var world = execution.state.State.init(a);
+    defer world.deinit();
+    const sender: execution.Address = .{ 0x7e, 0x5f, 0x45, 0x52, 0x09, 0x1a, 0x69, 0x12, 0x5d, 0x5d, 0xfc, 0xb7, 0xb8, 0xc2, 0x65, 0x90, 0x29, 0x39, 0x5b, 0xdf };
+    try world.setBalance(sender, 1_000_000_000);
+    const context: execution.transition.Context = .{ .fork = .fulu, .chain_id = 1, .coinbase = .{0x33} ** 20, .number = 1, .timestamp = 1, .gas_limit = 1_000_000, .base_fee = 1, .blob_base_fee = 1 };
+    const raws = [_][]u8{ try pendingDynamic(a, 0), try pendingDynamic(a, 1), try pendingDynamic(a, 2) };
+    defer for (raws) |raw| a.free(raw);
+    for ([_]execution.pool.Limits{ .{ .max_entries = 2, .max_bytes = 1024 }, .{ .max_entries = 10, .max_bytes = raws[0].len + raws[1].len } }) |limits| {
+        var pool = execution.pool.Pool.init(a, limits);
+        defer pool.deinit();
+        for (raws[0..2]) |raw| _ = try pool.admit(&world, context, null, raw);
+        try testing.expectError(error.PoolFull, pool.admit(&world, context, null, raws[2]));
+        try testing.expectEqual(@as(usize, 2), pool.entries.items.len);
+        try testing.expectEqual(@as(u64, 0), pool.entries.items[0].admission.nonce);
+        try testing.expectEqual(@as(u64, 1), pool.entries.items[1].admission.nonce);
+        try world.setNonce(sender, 1);
+        pool.prune(&world);
+        try testing.expectEqual(@as(usize, 1), pool.entries.items.len);
+        try testing.expectError(error.InvalidNonce, pool.admit(&world, context, null, raws[0]));
+        try world.setNonce(sender, 0);
+    }
+}
+
+test "pool keeps the accepted transaction when a larger replacement loses eviction" {
+    const a = testing.allocator;
+    var world = execution.state.State.init(a);
+    defer world.deinit();
+    const sender: execution.Address = .{ 0x7e, 0x5f, 0x45, 0x52, 0x09, 0x1a, 0x69, 0x12, 0x5d, 0x5d, 0xfc, 0xb7, 0xb8, 0xc2, 0x65, 0x90, 0x29, 0x39, 0x5b, 0xdf };
+    try world.setBalance(sender, 1_000_000_000);
+    const context: execution.transition.Context = .{ .fork = .fulu, .chain_id = 1, .coinbase = .{0x33} ** 20, .number = 1, .timestamp = 1, .gas_limit = 1_000_000, .base_fee = 1, .blob_base_fee = 1 };
+    var low = execution.Transaction{ .dynamic_fee = .{ .chain_id = 1, .nonce = 0, .max_priority_fee_per_gas = 10, .max_fee_per_gas = 100, .gas_limit = 100_000, .to = .{0x22} ** 20, .value = 0, .data = &.{}, .access_list = &.{}, .y_parity = 0, .r = 1, .s = 1 } };
+    try expectSyntheticSender(a, &low);
+    const old_raw = try execution.encode(a, low);
+    defer a.free(old_raw);
+    var high = low;
+    high.dynamic_fee.nonce = 1;
+    high.dynamic_fee.max_priority_fee_per_gas = 100;
+    high.dynamic_fee.max_fee_per_gas = 1000;
+    try expectSyntheticSender(a, &high);
+    const high_raw = try execution.encode(a, high);
+    defer a.free(high_raw);
+    var pool = execution.pool.Pool.init(a, .{ .max_entries = 3, .max_bytes = old_raw.len + high_raw.len });
+    defer pool.deinit();
+    const old_hash = try pool.admit(&world, context, null, old_raw);
+    const high_hash = try pool.admit(&world, context, null, high_raw);
+    var replacement = low;
+    replacement.dynamic_fee.max_priority_fee_per_gas = 11;
+    replacement.dynamic_fee.max_fee_per_gas = 110;
+    replacement.dynamic_fee.data = &([_]u8{1} ** 64);
+    try expectSyntheticSender(a, &replacement);
+    const replacement_raw = try execution.encode(a, replacement);
+    defer a.free(replacement_raw);
+    try testing.expectError(error.PoolFull, pool.admit(&world, context, null, replacement_raw));
+    try testing.expectEqual(@as(usize, 2), pool.entries.items.len);
+    try testing.expectEqual(old_raw.len + high_raw.len, pool.byte_count);
+    try testing.expectEqualSlices(u8, old_raw, pool.get(old_hash).?.raw);
+    try testing.expectEqualSlices(u8, high_raw, pool.get(high_hash).?.raw);
+}
 const rlp = @import("rlp");
 const testing = std.testing;
 
@@ -103,9 +380,147 @@ fn expectSyntheticSender(allocator: std.mem.Allocator, transaction: *execution.T
             .set_code => |*tx| tx.y_parity = @intCast(parity),
         }
         const address = try execution.recoverSender(allocator, transaction.*, 1);
-        if (std.mem.eql(u8, &address, &expected)) recovered = true;
+        if (std.mem.eql(u8, &address, &expected)) {
+            recovered = true;
+            break;
+        }
     }
     try testing.expect(recovered);
+}
+
+/// Signs one EIP-7702 authorization using the synthetic test key.
+fn signedAuthorization(a: std.mem.Allocator, target: execution.Address, nonce: u64) !execution.Authorization {
+    var auth: execution.Authorization = .{ .chain_id = 1, .address = target, .nonce = nonce, .y_parity = 0, .r = 0, .s = 0 };
+    const encoded = try execution.encode(a, .{ auth.chain_id, auth.address, auth.nonce });
+    defer a.free(encoded);
+    const message = try a.alloc(u8, encoded.len + 1);
+    defer a.free(message);
+    message[0] = 5;
+    @memcpy(message[1..], encoded);
+    var hash: execution.Hash = undefined;
+    std.crypto.hash.sha3.Keccak256.hash(message, &hash, .{});
+    const Scheme = std.crypto.sign.ecdsa.Ecdsa(std.crypto.ecc.Secp256k1, std.crypto.hash.sha3.Keccak256);
+    var secret = [_]u8{0} ** 32;
+    secret[31] = 1;
+    const pair = try Scheme.KeyPair.fromSecretKey(.{ .bytes = secret });
+    const signature = try pair.signPrehashed(hash, null);
+    auth.r = std.mem.readInt(u256, &signature.r, .big);
+    auth.s = std.mem.readInt(u256, &signature.s, .big);
+    const order = std.crypto.ecc.Secp256k1.scalar.field_order;
+    if (auth.s > order / 2) auth.s = order - auth.s;
+    const sender: execution.Address = .{ 0x7e, 0x5f, 0x45, 0x52, 0x09, 0x1a, 0x69, 0x12, 0x5d, 0x5d, 0xfc, 0xb7, 0xb8, 0xc2, 0x65, 0x90, 0x29, 0x39, 0x5b, 0xdf };
+    for (0..2) |parity| {
+        const recovered = try execution.crypto.recoverAddress(hash, auth.r, auth.s, @intCast(parity));
+        if (std.mem.eql(u8, &recovered, &sender)) {
+            auth.y_parity = @intCast(parity);
+            return auth;
+        }
+    }
+    return error.SenderMismatch;
+}
+
+test "blob fees and BLOBHASH execute, while bad fees and signatures roll back" {
+    const a = testing.allocator;
+    var world = execution.state.State.init(a);
+    defer world.deinit();
+    const sender: execution.Address = .{ 0x7e, 0x5f, 0x45, 0x52, 0x09, 0x1a, 0x69, 0x12, 0x5d, 0x5d, 0xfc, 0xb7, 0xb8, 0xc2, 0x65, 0x90, 0x29, 0x39, 0x5b, 0xdf };
+    const recipient: execution.Address = .{0x22} ** 20;
+    try world.setBalance(sender, 1_000_000_000);
+    _ = try world.setCode(recipient, &.{ 0x60, 0, 0x49, 0x60, 0, 0x52, 0x60, 32, 0x60, 0, 0xf3 });
+    const commitment: [48]u8 = .{0xc0} ++ (.{0} ** 47);
+    var versioned_hash: execution.Hash = undefined;
+    std.crypto.hash.sha2.Sha256.hash(&commitment, &versioned_hash, .{});
+    versioned_hash[0] = 1;
+    var tx = execution.Transaction{ .blob = .{ .chain_id = 1, .nonce = 0, .max_priority_fee_per_gas = 10, .max_fee_per_gas = 100, .gas_limit = 100_000, .to = recipient, .value = 0, .data = &.{}, .access_list = &.{}, .max_fee_per_blob_gas = 1, .blob_versioned_hashes = &.{versioned_hash}, .y_parity = 0, .r = 1, .s = 1 } };
+    try expectSyntheticSender(a, &tx);
+    const raw = try execution.encode(a, tx);
+    defer a.free(raw);
+    const context: execution.transition.Context = .{ .fork = .fulu, .chain_id = 1, .coinbase = .{0x33} ** 20, .number = 1, .timestamp = 1, .gas_limit = 1_000_000, .base_fee = 1, .blob_base_fee = 1 };
+    const root = try world.stateRoot();
+    var block_world = try world.clone(a);
+    defer block_world.deinit();
+    var parent = std.mem.zeroes(execution.Header);
+    parent.gas_limit = context.gas_limit;
+    parent.base_fee_per_gas = 1;
+    var header = std.mem.zeroes(execution.Header);
+    header.parent_hash = try execution.transition.headerHash(a, .fulu, parent);
+    header.number = 1;
+    header.timestamp = 1;
+    header.gas_limit = context.gas_limit;
+    header.base_fee_per_gas = 1;
+    header.blob_gas_used = 131_072;
+    try testing.expectError(error.InvalidVersionedHashes, execution.transition.applyBlock(a, &block_world, .{ .fork = .fulu, .parent_fork = .fulu, .chain_id = 1 }, parent, header, &.{raw}, &.{}));
+    try testing.expectEqualSlices(u8, &root, &(try block_world.stateRoot()));
+    var high_fee = context;
+    high_fee.blob_base_fee = 2;
+    try testing.expectError(error.InvalidBlobFee, execution.transition.applyTransaction(a, &world, high_fee, raw, context.gas_limit, 0));
+    try testing.expectEqualSlices(u8, &root, &(try world.stateRoot()));
+    var bad = tx;
+    bad.blob.r = 0;
+    const bad_raw = try execution.encode(a, bad);
+    defer a.free(bad_raw);
+    try testing.expectError(error.InvalidSignature, execution.transition.applyTransaction(a, &world, context, bad_raw, context.gas_limit, 0));
+    try testing.expectEqualSlices(u8, &root, &(try world.stateRoot()));
+    var outcome = try execution.transition.applyTransaction(a, &world, context, raw, context.gas_limit, 0);
+    defer outcome.deinit();
+    try testing.expect(outcome.receipt == .blob);
+    try testing.expectEqualSlices(u8, &versioned_hash, outcome.output);
+    try testing.expectEqual(@as(u256, 1_000_000_000 - @as(u256, outcome.gas_used) * 11 - 131_072), world.getBalance(sender));
+}
+
+test "set-code authorization persists through delegated execution" {
+    const a = testing.allocator;
+    var world = execution.state.State.init(a);
+    defer world.deinit();
+    const sender: execution.Address = .{ 0x7e, 0x5f, 0x45, 0x52, 0x09, 0x1a, 0x69, 0x12, 0x5d, 0x5d, 0xfc, 0xb7, 0xb8, 0xc2, 0x65, 0x90, 0x29, 0x39, 0x5b, 0xdf };
+    const target: execution.Address = .{0x44} ** 20;
+    try world.setBalance(sender, 1_000_000_000);
+    _ = try world.setCode(target, &.{ 0x60, 0x2a, 0x60, 0, 0x52, 0x60, 32, 0x60, 0, 0xf3 });
+    const auth = try signedAuthorization(a, target, 1);
+    var tx = execution.Transaction{ .set_code = .{ .chain_id = 1, .nonce = 0, .max_priority_fee_per_gas = 1, .max_fee_per_gas = 2, .gas_limit = 100_000, .destination = sender, .value = 0, .data = &.{}, .access_list = &.{}, .authorization_list = &.{auth}, .y_parity = 0, .r = 1, .s = 1 } };
+    try expectSyntheticSender(a, &tx);
+    const raw = try execution.encode(a, tx);
+    defer a.free(raw);
+    const context: execution.transition.Context = .{ .fork = .fulu, .chain_id = 1, .coinbase = .{0x33} ** 20, .number = 1, .timestamp = 1, .gas_limit = 1_000_000, .base_fee = 1, .blob_base_fee = 1 };
+    const original = try world.stateRoot();
+    var too_little_gas = tx;
+    too_little_gas.set_code.gas_limit = 45_999;
+    try expectSyntheticSender(a, &too_little_gas);
+    const low_gas_raw = try execution.encode(a, too_little_gas);
+    defer a.free(low_gas_raw);
+    try testing.expectError(error.IntrinsicGasTooLow, execution.transition.applyTransaction(a, &world, context, low_gas_raw, context.gas_limit, 0));
+    try testing.expectEqualSlices(u8, &original, &(try world.stateRoot()));
+    var invalid_auth = tx;
+    var invalid_tuple = auth;
+    invalid_tuple.r = 0;
+    invalid_auth.set_code.authorization_list = &.{invalid_tuple};
+    try expectSyntheticSender(a, &invalid_auth);
+    const invalid_raw = try execution.encode(a, invalid_auth);
+    defer a.free(invalid_raw);
+    var ignored_world = try world.clone(a);
+    defer ignored_world.deinit();
+    var ignored = try execution.transition.applyTransaction(a, &ignored_world, context, invalid_raw, context.gas_limit, 0);
+    defer ignored.deinit();
+    try testing.expectEqual(@as(usize, 0), ignored_world.getCode(sender).len);
+    try testing.expectEqual(@as(u64, 1), ignored_world.getNonce(sender));
+    var outcome = try execution.transition.applyTransaction(a, &world, context, raw, context.gas_limit, 0);
+    defer outcome.deinit();
+    try testing.expect(outcome.receipt == .set_code);
+    try testing.expectEqual(@as(u64, 2), world.getNonce(sender));
+    try testing.expectEqual(@as(usize, 23), world.getCode(sender).len);
+    try testing.expectEqual(@as(u8, 0x2a), outcome.output[31]);
+    _ = try world.setCode(target, &.{ 0x60, 0, 0x60, 0, 0xfd });
+    const second_auth = try signedAuthorization(a, target, 3);
+    tx.set_code.nonce = 2;
+    tx.set_code.authorization_list = &.{second_auth};
+    try expectSyntheticSender(a, &tx);
+    const reverting = try execution.encode(a, tx);
+    defer a.free(reverting);
+    var reverted = try execution.transition.applyTransaction(a, &world, context, reverting, context.gas_limit, 0);
+    defer reverted.deinit();
+    try testing.expectEqual(@as(u8, 0), reverted.receipt.set_code.status);
+    try testing.expectEqual(@as(u64, 4), world.getNonce(sender));
+    try testing.expectEqual(@as(usize, 23), world.getCode(sender).len);
 }
 
 test "sender recovery matches pinned legacy and typed transaction fixtures" {

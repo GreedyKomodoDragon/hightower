@@ -655,6 +655,23 @@ test "EIP-150 caps forwarded gas and precompile calls fail explicitly" {
     try std.testing.expectEqual(Fault.unsupported_precompile, bls.status.fault);
 }
 
+test "delegated CALL charges target access before forwarding gas" {
+    var world = state.State.init(std.testing.allocator);
+    defer world.deinit();
+    const delegated: state.Address = .{0} ** 19 ++ .{0x21};
+    const target: state.Address = .{0} ** 19 ++ .{0x22};
+    _ = try world.setCode(delegated, &([_]u8{ 0xef, 0x01, 0x00 } ++ target));
+    _ = try world.setCode(target, &.{ 0x5a, 0x5f, 0x52, 0x60, 32, 0x5f, 0xf3 });
+    var machine = Machine.init(std.testing.allocator, &world);
+    defer machine.deinit();
+    const code = [_]u8{ 0x60, 32, 0x5f, 0x5f, 0x5f, 0x60, 0x21, 0x62, 0xff, 0xff, 0xff, 0xfa, 0x50, 0x60, 32, 0x5f, 0xf3 };
+    var result = try machine.run(.{ .code = &code, .gas = 10_000 });
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expect(result.status == .success);
+    try std.testing.expectEqual(@as(usize, 32), result.output.len);
+    try std.testing.expect(std.mem.readInt(u256, result.output[0..32], .big) > 0);
+}
+
 test "value CALL supplies the 2300 gas stipend when requested gas is zero" {
     var world = state.State.init(std.testing.allocator);
     defer world.deinit();

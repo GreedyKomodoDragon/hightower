@@ -5,9 +5,8 @@
 //
 // parent header -> transaction 0 -> ... -> withdrawal 0 -> roots -> commit
 // A block snapshot rolls back all earlier transactions if a later check fails.
-// Supported forks: London, Cancun, and Prague-shaped Fulu. Blob and set-code
-// transactions, contract creation, and precompiles require capabilities not yet
-// provided by this EVM.
+// Supported forks: London, Cancun, and Prague-shaped Fulu. Contract creation
+// and precompiles are tracked separately.
 const std = @import("std");
 const execution = @import("execution.zig");
 const state = execution.state;
@@ -34,6 +33,8 @@ pub const BlockContext = struct {
     parent_fork: Fork,
     chain_id: u256,
     older_hashes: []const execution.Hash = &.{},
+    max_blobs_per_block: u64 = 21,
+    expected_blob_hashes: []const execution.Hash = &.{},
 };
 
 /// Owns a receipt's logs and return bytes until deinit.
@@ -73,16 +74,19 @@ const TxFields = struct {
     access_list: []const execution.Access,
     max_fee: u256,
     priority_fee: u256,
+    blob_hashes: []const execution.Hash = &.{},
+    blob_fee_cap: ?u256 = null,
+    authorizations: []const execution.Authorization = &.{},
 };
 
-/// Selects executable transaction fields and rejects envelopes without execution support.
-fn fields(tx: execution.Transaction, fork: Fork) !TxFields {
+/// Selects fields common to all transaction envelopes and checks fork availability.
+pub fn fields(tx: execution.Transaction, fork: Fork) !TxFields {
     return switch (tx) {
         .legacy => |v| .{ .nonce = v.nonce, .gas_limit = v.gas_limit, .to = v.to, .value = v.value, .data = v.data, .access_list = &.{}, .max_fee = v.gas_price, .priority_fee = v.gas_price },
         .access_list => |v| .{ .nonce = v.nonce, .gas_limit = v.gas_limit, .to = v.to, .value = v.value, .data = v.data, .access_list = v.access_list, .max_fee = v.gas_price, .priority_fee = v.gas_price },
         .dynamic_fee => |v| .{ .nonce = v.nonce, .gas_limit = v.gas_limit, .to = v.to, .value = v.value, .data = v.data, .access_list = v.access_list, .max_fee = v.max_fee_per_gas, .priority_fee = v.max_priority_fee_per_gas },
-        .blob => if (fork == .london) error.UnsupportedTransactionType else error.UnsupportedBlobTransaction,
-        .set_code => if (fork != .fulu) error.UnsupportedTransactionType else error.UnsupportedSetCodeTransaction,
+        .blob => |v| if (fork == .london) error.UnsupportedTransactionType else .{ .nonce = v.nonce, .gas_limit = v.gas_limit, .to = v.to, .value = v.value, .data = v.data, .access_list = v.access_list, .max_fee = v.max_fee_per_gas, .priority_fee = v.max_priority_fee_per_gas, .blob_hashes = v.blob_versioned_hashes, .blob_fee_cap = v.max_fee_per_blob_gas },
+        .set_code => |v| if (fork != .fulu) error.UnsupportedTransactionType else .{ .nonce = v.nonce, .gas_limit = v.gas_limit, .to = v.destination, .value = v.value, .data = v.data, .access_list = v.access_list, .max_fee = v.max_fee_per_gas, .priority_fee = v.max_priority_fee_per_gas, .authorizations = v.authorization_list },
     };
 }
 
@@ -98,6 +102,7 @@ fn intrinsicGas(tx: TxFields, fork: Fork) !u64 {
         gas = try std.math.add(u64, gas, 2400);
         gas = try std.math.add(u64, gas, try std.math.mul(u64, @intCast(entry.storage_keys.len), 1900));
     }
+    gas = try std.math.add(u64, gas, try std.math.mul(u64, @intCast(tx.authorizations.len), 25_000));
     if (fork == .fulu) gas = @max(gas, try std.math.add(u64, 21_000, try std.math.mul(u64, tokens, 10)));
     return gas;
 }
@@ -116,7 +121,32 @@ const ValidatedTx = struct {
     intrinsic_gas: u64,
     max_cost: u256,
     effective_price: u256,
+    blob_gas: u64,
 };
+
+/// Metadata needed to order and price a transaction before it enters a block.
+pub const Admission = struct {
+    sender: execution.Address,
+    nonce: u64,
+    gas_limit: u64,
+    max_fee: u256,
+    priority_fee: u256,
+    blob_fee_cap: ?u256,
+};
+
+/// Reuses transition validation for a future nonce without changing canonical state.
+pub fn validatePending(allocator: std.mem.Allocator, world: *state.State, context: Context, raw: []const u8) !Admission {
+    var decoded = try execution.parse(execution.Transaction, allocator, raw);
+    defer decoded.deinit();
+    const f = try fields(decoded.value, context.fork);
+    const sender = try execution.recoverSender(allocator, decoded.value, context.chain_id);
+    if (f.nonce < world.getNonce(sender)) return error.InvalidNonce;
+    const snap = try world.snapshot();
+    defer world.revert(snap) catch {};
+    try world.setNonce(sender, f.nonce);
+    _ = try validateTransaction(allocator, world, context, decoded.value, context.gas_limit);
+    return .{ .sender = sender, .nonce = f.nonce, .gas_limit = f.gas_limit, .max_fee = f.max_fee, .priority_fee = f.priority_fee, .blob_fee_cap = f.blob_fee_cap };
+}
 
 const FrameOutcome = struct {
     success: bool,
@@ -135,10 +165,24 @@ fn validateTransaction(allocator: std.mem.Allocator, world: *state.State, contex
     const intrinsic = intrinsicGas(f, context.fork) catch return error.IntrinsicGasOverflow;
     if (f.gas_limit < intrinsic) return error.IntrinsicGasTooLow;
     if (f.priority_fee > f.max_fee or f.max_fee < context.base_fee) return error.InvalidFee;
-    const max_cost = std.math.mul(u256, f.max_fee, f.gas_limit) catch return error.InsufficientBalance;
+    if (f.blob_fee_cap != null) {
+        if (f.blob_hashes.len == 0 or f.blob_hashes.len > 6) return error.InvalidBlobCount;
+        for (f.blob_hashes) |hash| if (hash[0] != 1) return error.InvalidBlobVersion;
+        if (f.blob_fee_cap.? < (context.blob_base_fee orelse return error.UnsupportedBlobTransaction)) return error.InvalidBlobFee;
+    }
+    if (switch (tx) {
+        .set_code => true,
+        else => false,
+    } and f.authorizations.len == 0) return error.EmptyAuthorizationList;
+    const blob_gas = std.math.mul(u64, @intCast(f.blob_hashes.len), 131_072) catch return error.InvalidBlobCount;
+    const gas_cost = std.math.mul(u256, f.max_fee, f.gas_limit) catch return error.InsufficientBalance;
+    const blob_cost = std.math.mul(u256, f.blob_fee_cap orelse 0, blob_gas) catch return error.InsufficientBalance;
+    const max_cost = std.math.add(u256, gas_cost, blob_cost) catch return error.InsufficientBalance;
     const upfront = std.math.add(u256, max_cost, f.value) catch return error.InsufficientBalance;
     if (world.getBalance(sender) < upfront) return error.InsufficientBalance;
     if (f.nonce == std.math.maxInt(u64)) return error.InvalidNonce;
+    const sender_code = world.getCode(sender);
+    if (sender_code.len != 0 and (context.fork != .fulu or state.delegationTarget(sender_code) == null)) return error.InvalidSenderCode;
     const recipient = f.to orelse return error.UnsupportedContractCreation;
     const precompile_limit: u8 = switch (context.fork) {
         .london => 9,
@@ -146,11 +190,47 @@ fn validateTransaction(allocator: std.mem.Allocator, world: *state.State, contex
         .fulu => 17,
     };
     if (recipient[19] != 0 and recipient[19] <= precompile_limit and std.mem.allEqual(u8, recipient[0..19], 0)) return error.UnsupportedExecution;
-    return .{ .fields = f, .sender = sender, .recipient = recipient, .intrinsic_gas = intrinsic, .max_cost = max_cost, .effective_price = @min(f.max_fee, std.math.add(u256, context.base_fee, f.priority_fee) catch std.math.maxInt(u256)) };
+    return .{ .fields = f, .sender = sender, .recipient = recipient, .intrinsic_gas = intrinsic, .max_cost = max_cost, .effective_price = @min(f.max_fee, std.math.add(u256, context.base_fee, f.priority_fee) catch std.math.maxInt(u256)), .blob_gas = blob_gas };
+}
+
+const AuthorizationEffects = struct { refund: u64, warmed: []const execution.Address };
+
+/// Applies valid EIP-7702 tuples in order after the sender nonce has advanced.
+fn applyAuthorizations(allocator: std.mem.Allocator, world: *state.State, chain_id: u256, authorizations: []const execution.Authorization) !AuthorizationEffects {
+    var refund: u64 = 0;
+    var warmed: std.ArrayList(execution.Address) = .empty;
+    for (authorizations) |auth| {
+        if ((auth.chain_id != 0 and auth.chain_id != chain_id) or auth.nonce == std.math.maxInt(u64)) continue;
+        const encoded = try execution.encode(allocator, .{ auth.chain_id, auth.address, auth.nonce });
+        defer allocator.free(encoded);
+        const message = try allocator.alloc(u8, encoded.len + 1);
+        defer allocator.free(message);
+        message[0] = 5;
+        @memcpy(message[1..], encoded);
+        var hash: execution.Hash = undefined;
+        std.crypto.hash.sha3.Keccak256.hash(message, &hash, .{});
+        const authority = execution.crypto.recoverAddress(hash, auth.r, auth.s, auth.y_parity) catch continue;
+        try warmed.append(allocator, authority);
+        const code = world.getCode(authority);
+        if ((code.len != 0 and state.delegationTarget(code) == null) or world.getNonce(authority) != auth.nonce) continue;
+        if (try world.getAccount(authority)) |account| {
+            if (account.nonce != 0 or account.balance != 0 or !std.mem.eql(u8, &account.code_hash, &state.EMPTY_CODE_HASH) or !std.mem.eql(u8, &account.storage_root, &state.EMPTY_STORAGE_ROOT))
+                refund = std.math.add(u64, refund, 12_500) catch return error.GasOverflow;
+        }
+        if (std.mem.allEqual(u8, &auth.address, 0)) {
+            _ = try world.setCode(authority, &.{});
+        } else {
+            var designation: [23]u8 = .{ 0xef, 0x01, 0x00 } ++ ([_]u8{0} ** 20);
+            @memcpy(designation[3..], &auth.address);
+            _ = try world.setCode(authority, &designation);
+        }
+        try world.setNonce(authority, auth.nonce + 1);
+    }
+    return .{ .refund = refund, .warmed = try warmed.toOwnedSlice(allocator) };
 }
 
 /// Executes the value transfer and EVM frame, copying logs before the machine is released.
-fn executeFrame(allocator: std.mem.Allocator, owner: std.mem.Allocator, world: *state.State, context: Context, tx: ValidatedTx) !FrameOutcome {
+fn executeFrame(allocator: std.mem.Allocator, owner: std.mem.Allocator, world: *state.State, context: Context, tx: ValidatedTx, effects: AuthorizationEffects) !FrameOutcome {
     const frame = try world.snapshot();
     var frame_open = true;
     errdefer if (frame_open) world.revert(frame) catch {};
@@ -166,8 +246,10 @@ fn executeFrame(allocator: std.mem.Allocator, owner: std.mem.Allocator, world: *
         for (item.storage_keys, 0..) |key, j| keys[j] = std.mem.readInt(u256, &key, .big);
         access[i] = .{ .address = item.address, .storage_keys = keys };
     }
-    try machine.configure(.{ .fork = context.fork, .origin = tx.sender, .gas_price = tx.effective_price, .coinbase = context.coinbase, .timestamp = context.timestamp, .number = context.number, .prev_randao = if (context.fork == .london) context.difficulty else std.mem.readInt(u256, &context.prev_randao, .big), .gas_limit = context.gas_limit, .chain_id = context.chain_id, .base_fee = context.base_fee, .blob_base_fee = context.blob_base_fee orelse 0, .blob_base_fee_supported = context.blob_base_fee != null, .block_hashes = context.block_hashes }, tx.sender, tx.recipient, access);
-    var result = try machine.run(.{ .code = world.getCode(tx.recipient), .gas = tx.fields.gas_limit - tx.intrinsic_gas, .caller = tx.sender, .callee = tx.recipient, .value = tx.fields.value, .data = tx.fields.data });
+    try machine.configure(.{ .fork = context.fork, .origin = tx.sender, .gas_price = tx.effective_price, .coinbase = context.coinbase, .timestamp = context.timestamp, .number = context.number, .prev_randao = if (context.fork == .london) context.difficulty else std.mem.readInt(u256, &context.prev_randao, .big), .gas_limit = context.gas_limit, .chain_id = context.chain_id, .base_fee = context.base_fee, .blob_base_fee = context.blob_base_fee orelse 0, .blob_base_fee_supported = context.blob_base_fee != null, .blob_hashes = tx.fields.blob_hashes, .block_hashes = context.block_hashes }, tx.sender, tx.recipient, access);
+    machine.refund += effects.refund;
+    for (effects.warmed) |address| _ = try machine.touchAccount(address);
+    var result = try machine.run(.{ .code = world.getExecutionCode(tx.recipient), .gas = tx.fields.gas_limit - tx.intrinsic_gas, .caller = tx.sender, .callee = tx.recipient, .value = tx.fields.value, .data = tx.fields.data });
     defer result.deinit(allocator);
     if (result.status == .fault and (result.status.fault == .unsupported_precompile or result.status.fault == .unsupported_opcode or result.status.fault == .missing_context)) return error.UnsupportedExecution;
     const success = result.status == .success;
@@ -180,12 +262,14 @@ fn executeFrame(allocator: std.mem.Allocator, owner: std.mem.Allocator, world: *
     const spent = tx.fields.gas_limit - result.gas_remaining;
     const logs = try owner.alloc(execution.Log, if (success) machine.emittedLogs().len else 0);
     for (logs, machine.emittedLogs()) |*dest, source| dest.* = .{ .address = source.address, .topics = try owner.dupe(execution.Hash, source.topics[0..source.topic_count]), .data = try owner.dupe(u8, source.data) };
-    return .{ .success = success, .gas_remaining = result.gas_remaining, .refund = if (success) machine.cappedRefund(spent) else 0, .logs = logs, .output = try owner.dupe(u8, result.output) };
+    return .{ .success = success, .gas_remaining = result.gas_remaining, .refund = machine.cappedRefund(spent), .logs = logs, .output = try owner.dupe(u8, result.output) };
 }
 
 /// Refunds unused gas to the sender and pays only the priority fee to coinbase.
 fn settleFees(world: *state.State, context: Context, tx: ValidatedTx, gas_used: u64) !void {
-    const actual_cost = std.math.mul(u256, tx.effective_price, gas_used) catch return error.BalanceOverflow;
+    const execution_cost = std.math.mul(u256, tx.effective_price, gas_used) catch return error.BalanceOverflow;
+    const blob_cost = std.math.mul(u256, context.blob_base_fee orelse 0, tx.blob_gas) catch return error.BalanceOverflow;
+    const actual_cost = std.math.add(u256, execution_cost, blob_cost) catch return error.BalanceOverflow;
     try world.setBalance(tx.sender, std.math.add(u256, world.getBalance(tx.sender), tx.max_cost - actual_cost) catch return error.BalanceOverflow);
     const tip = std.math.mul(u256, tx.effective_price - context.base_fee, gas_used) catch return error.BalanceOverflow;
     try world.setBalance(context.coinbase, std.math.add(u256, world.getBalance(context.coinbase), tip) catch return error.BalanceOverflow);
@@ -203,7 +287,8 @@ pub fn applyTransaction(allocator: std.mem.Allocator, world: *state.State, conte
     errdefer if (open) world.revert(snap) catch {};
     try world.setBalance(tx.sender, world.getBalance(tx.sender) - tx.max_cost);
     try world.setNonce(tx.sender, tx.fields.nonce + 1);
-    const frame = try executeFrame(allocator, arena.allocator(), world, context, tx);
+    const effects = try applyAuthorizations(arena.allocator(), world, context.chain_id, tx.fields.authorizations);
+    const frame = try executeFrame(allocator, arena.allocator(), world, context, tx, effects);
     const spent = tx.fields.gas_limit - frame.gas_remaining;
     const floor = if (context.fork == .fulu) try calldataFloor(tx.fields.data) else 0;
     const gas_used = @max(spent - frame.refund, floor);
@@ -213,7 +298,8 @@ pub fn applyTransaction(allocator: std.mem.Allocator, world: *state.State, conte
         .legacy => .{ .legacy = payload },
         .access_list => .{ .access_list = payload },
         .dynamic_fee => .{ .dynamic_fee = payload },
-        else => unreachable,
+        .blob => .{ .blob = payload },
+        .set_code => .{ .set_code = payload },
     };
     try world.commit(snap);
     open = false;
@@ -278,7 +364,9 @@ fn validateBlockHeader(allocator: std.mem.Allocator, block: BlockContext, parent
         const target: u64 = if (block.fork == .cancun) 393_216 else 786_432;
         const prior: u64 = if (block.parent_fork == .london) 0 else std.math.add(u64, parent.excess_blob_gas, parent.blob_gas_used) catch return error.InvalidExcessBlobGas;
         if (header.excess_blob_gas != prior -| target) return error.InvalidExcessBlobGas;
-        if (header.blob_gas_used != 0) return error.UnsupportedBlobTransaction;
+        const max_blobs: u64 = if (block.fork == .cancun) 6 else block.max_blobs_per_block;
+        const max_blob_gas = std.math.mul(u64, max_blobs, 131_072) catch return error.InvalidBlobGasUsed;
+        if (header.blob_gas_used > max_blob_gas or header.blob_gas_used % 131_072 != 0) return error.InvalidBlobGasUsed;
     }
     return parent_hash;
 }
@@ -349,6 +437,22 @@ pub fn applyBlock(allocator: std.mem.Allocator, world: *state.State, block: Bloc
     errdefer if (open) world.revert(snapshot) catch {};
     const context: Context = .{ .fork = block.fork, .chain_id = block.chain_id, .coinbase = header.fee_recipient, .number = header.number, .timestamp = header.timestamp, .gas_limit = header.gas_limit, .base_fee = header.base_fee_per_gas, .prev_randao = header.prev_randao, .difficulty = header.difficulty, .blob_base_fee = if (block.fork == .london) null else try blobBaseFee(block.fork, header.excess_blob_gas), .block_hashes = block_hashes };
     const gas_used = try applyBlockTransactions(arena.allocator(), world, context, transactions, receipts);
+    var blob_gas_used: u64 = 0;
+    var blob_index: usize = 0;
+    for (transactions) |raw| {
+        var decoded = try execution.parse(execution.Transaction, arena.allocator(), raw);
+        defer decoded.deinit();
+        if (decoded.value == .blob) {
+            const hashes = decoded.value.blob.blob_versioned_hashes;
+            blob_gas_used = std.math.add(u64, blob_gas_used, @as(u64, @intCast(hashes.len)) * 131_072) catch return error.InvalidBlobGasUsed;
+            for (hashes) |hash| {
+                if (blob_index >= block.expected_blob_hashes.len or !std.mem.eql(u8, &hash, &block.expected_blob_hashes[blob_index])) return error.InvalidVersionedHashes;
+                blob_index += 1;
+            }
+        }
+    }
+    if (blob_index != block.expected_blob_hashes.len) return error.InvalidVersionedHashes;
+    if (blob_gas_used != header.blob_gas_used) return error.InvalidBlobGasUsed;
     if (gas_used != header.gas_used) return error.InvalidGasUsed;
     try applyBlockCredits(world, block.fork, header.fee_recipient, withdrawals);
     const result = try blockResult(&arena, world, block.fork, transactions, withdrawals, receipts, gas_used);
