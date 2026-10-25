@@ -444,6 +444,11 @@ const ExpectedWithdrawals = struct {
     processed_partials: usize,
 };
 
+/// Calculate the payload withdrawals for a pre-block state; caller frees the slice.
+pub fn expectedWithdrawals(allocator: std.mem.Allocator, state: *const fulu.BeaconState) ![]fulu.Withdrawal {
+    return (try getExpectedWithdrawals(allocator, state)).items;
+}
+
 fn getExpectedWithdrawals(allocator: std.mem.Allocator, state: *const fulu.BeaconState) !ExpectedWithdrawals {
     var withdrawals = std.ArrayList(fulu.Withdrawal).empty;
     errdefer withdrawals.deinit(allocator);

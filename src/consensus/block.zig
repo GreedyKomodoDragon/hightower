@@ -41,7 +41,15 @@ pub fn stateTransition(allocator: std.mem.Allocator, state: *fulu.BeaconState, s
     if (!std.mem.eql(u8, &state_root, &block.state_root)) return error.InvalidStateRoot;
 }
 
-fn processBlock(allocator: std.mem.Allocator, state: *fulu.BeaconState, block: fulu.BeaconBlock, engine: engine_api.ExecutionEngine) !void {
+/// Apply a block before comparing its declared state root; proposer uses this path.
+pub fn processBlock(allocator: std.mem.Allocator, state: *fulu.BeaconState, block: fulu.BeaconBlock, engine: engine_api.ExecutionEngine) !void {
+    try processBlockPrefix(allocator, state, block, engine);
+    try operations.processOperations(allocator, state, block.body);
+    try processSyncAggregate(state, block.body.sync_aggregate);
+}
+
+/// Apply the ordered block work before operations, for proposer selection.
+pub fn processBlockPrefix(allocator: std.mem.Allocator, state: *fulu.BeaconState, block: fulu.BeaconBlock, engine: engine_api.ExecutionEngine) !void {
     try processBlockHeader(allocator, state, block);
     try operations.processWithdrawals(allocator, state, block.body.execution_payload);
     try processExecutionPayload(allocator, state, block.body, engine);
@@ -49,8 +57,6 @@ fn processBlock(allocator: std.mem.Allocator, state: *fulu.BeaconState, block: f
     try processEth1Data(allocator, state, block.body.eth1_data);
     const deposit_limit = @min(state.eth1_data.deposit_count, state.deposit_requests_start_index);
     if (state.eth1_deposit_index < deposit_limit) return error.DepositsRequired;
-    try operations.processOperations(allocator, state, block.body);
-    try processSyncAggregate(state, block.body.sync_aggregate);
 }
 
 pub fn processBlockHeader(allocator: std.mem.Allocator, state: *fulu.BeaconState, block: fulu.BeaconBlock) !void {
