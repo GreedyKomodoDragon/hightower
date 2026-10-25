@@ -1,0 +1,100 @@
+{
+  "tests/shanghai/eip3855_push0/test_push0.py::test_push0_contracts[fork_Cancun-state_test-before_jumpdest]": {
+    "env": {
+      "currentCoinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+      "currentGasLimit": "0x07270e00",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentDifficulty": "0x00",
+      "currentBaseFee": "0x07",
+      "currentExcessBlobGas": "0x00"
+    },
+    "pre": {
+      "0x653f67f2946751ac7050b0e17a296871adc672c4": {
+        "nonce": "0x00",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x98b7923d83da42a5c676cdc12f4a776d1f7b3301": {
+        "nonce": "0x01",
+        "balance": "0x00",
+        "code": "0x6004565f5b60015f5500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "gasLimit": [
+        "0x0186a0"
+      ],
+      "to": "0x98b7923d83da42a5c676cdc12f4a776d1f7b3301",
+      "value": [
+        "0x00"
+      ],
+      "data": [
+        "0x"
+      ],
+      "sender": "0x653f67f2946751ac7050b0e17a296871adc672c4",
+      "secretKey": "0x97b4aa71bbcd4e5d2537896d98b7923d83da42a5c676cdc12f4a776d1f7b3301"
+    },
+    "post": {
+      "Cancun": [
+        {
+          "hash": "0x2031018a1ebb4c7c5af89b289e5c5212a88dfbea9325d29ed1f45810ac5ee72b",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+          "txbytes": "0xf860800a830186a09498b7923d83da42a5c676cdc12f4a776d1f7b3301808026a0eff35455f42f705b07890f2e66a9bf49f431f6fdd0e5bc770894082bf0160440a03eefaa70d5d6af8367b68e43dacc5b177235cd2964599379c3a22509c5734e31",
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "state": {
+            "0x653f67f2946751ac7050b0e17a296871adc672c4": {
+              "nonce": "0x01",
+              "balance": "0x3635c9adc5de996bbe",
+              "code": "0x",
+              "storage": {}
+            },
+            "0x98b7923d83da42a5c676cdc12f4a776d1f7b3301": {
+              "nonce": "0x01",
+              "balance": "0x00",
+              "code": "0x6004565f5b60015f5500",
+              "storage": {
+                "0x00": "0x01"
+              }
+            },
+            "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba": {
+              "nonce": "0x00",
+              "balance": "0x01f947",
+              "code": "0x",
+              "storage": {}
+            }
+          }
+        }
+      ]
+    },
+    "config": {
+      "blobSchedule": {
+        "Cancun": {
+          "target": "0x03",
+          "max": "0x06",
+          "baseFeeUpdateFraction": "0x32f0ed"
+        }
+      },
+      "chainid": "0x01"
+    },
+    "_info": {
+      "hash": "0x847bbb053ccc446b5813d5aacb64fdcbe5ca3e55ba45616ab6a5e0cc213cca51",
+      "comment": "`execution-specs` generated test",
+      "filling-transition-tool": "2.18.0rc6",
+      "description": "Tests PUSH0 within various deployed contracts.",
+      "url": "https://github.com/ethereum/execution-specs/blob/tests-v5.4.0/tests/shanghai/eip3855_push0/test_push0.py#L30",
+      "fixture-format": "state_test",
+      "reference-spec": "https://github.com/ethereum/EIPs/blob/master/EIPS/eip-3855.md",
+      "reference-spec-version": "6f85bd73336de4aacfad7ac3bb3a7e1ba2d68f51"
+    }
+  }
+}

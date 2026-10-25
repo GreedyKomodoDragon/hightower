@@ -1,0 +1,98 @@
+{
+  "tests/frontier/opcodes/test_push.py::test_push[fork_Cancun-state_test-PUSH5]": {
+    "env": {
+      "currentCoinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+      "currentGasLimit": "0x07270e00",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentDifficulty": "0x00",
+      "currentBaseFee": "0x07",
+      "currentExcessBlobGas": "0x00"
+    },
+    "pre": {
+      "0x242943898af1e7e7ad4b7a03830713c8e1fba425": {
+        "nonce": "0x01",
+        "balance": "0x00",
+        "code": "0x644574686572600055",
+        "storage": {}
+      },
+      "0xb8958aa7ff0d929b5a5385827dac2f70f0d16317": {
+        "nonce": "0x00",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "gasLimit": [
+        "0x07a120"
+      ],
+      "to": "0x242943898af1e7e7ad4b7a03830713c8e1fba425",
+      "value": [
+        "0x00"
+      ],
+      "data": [
+        "0x"
+      ],
+      "sender": "0xb8958aa7ff0d929b5a5385827dac2f70f0d16317",
+      "secretKey": "0x3eb3b7197cde3dd630b1f835242943898af1e7e7ad4b7a03830713c8e1fba425"
+    },
+    "post": {
+      "Cancun": [
+        {
+          "hash": "0x895cf47167570c0e3c92257efbbb3c7dc750763fbe9ee9b77ace74042e61abec",
+          "logs": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+          "txbytes": "0xf860800a8307a12094242943898af1e7e7ad4b7a03830713c8e1fba425808026a03fb446e17c6bd10eb67b0d9b589aacc49842654e496f9276d9b66857dc75c581a03de49d708e4583aa35f96fbfec5b0916c586d6d3e446850ae9e073b3c4345e13",
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "state": {
+            "0x242943898af1e7e7ad4b7a03830713c8e1fba425": {
+              "nonce": "0x01",
+              "balance": "0x00",
+              "code": "0x644574686572600055",
+              "storage": {
+                "0x00": "0x4574686572"
+              }
+            },
+            "0xb8958aa7ff0d929b5a5385827dac2f70f0d16317": {
+              "nonce": "0x01",
+              "balance": "0x3635c9adc5de996c2c",
+              "code": "0x",
+              "storage": {}
+            },
+            "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba": {
+              "nonce": "0x00",
+              "balance": "0x01f926",
+              "code": "0x",
+              "storage": {}
+            }
+          }
+        }
+      ]
+    },
+    "config": {
+      "blobSchedule": {
+        "Cancun": {
+          "target": "0x03",
+          "max": "0x06",
+          "baseFeeUpdateFraction": "0x32f0ed"
+        }
+      },
+      "chainid": "0x01"
+    },
+    "_info": {
+      "hash": "0xd233deb658162b282392bc084a3a51408fa67428c74aa9f9bd8e1645e1dacd19",
+      "comment": "`execution-specs` generated test",
+      "filling-transition-tool": "2.18.0rc6",
+      "description": "The set of `PUSH*` opcodes pushes data onto the stack.\n\n    In this test, we ensure that the set of `PUSH*` opcodes writes a portion of\n    an excerpt from the Ethereum yellow paper to storage.",
+      "url": "https://github.com/ethereum/execution-specs/blob/tests-v5.4.0/tests/frontier/opcodes/test_push.py#L35",
+      "fixture-format": "state_test"
+    }
+  }
+}
