@@ -1,6 +1,7 @@
 // The EVM executes one call frame in opcode order. Its 256-bit stack supplies
 // operands, memory expands in 32-byte words and is billed before access, and
 // persistent storage is billed against its transaction-original value.
+// SHA3 hashes a billed memory range with Ethereum Keccak-256.
 // A frame snapshot commits on STOP/RETURN and rolls back on REVERT or fault;
 // transient storage, logs, and warm accesses follow the same frame boundary. This core
 // accepts at most 1,024 stack words and frame depths 0..1,023.
@@ -593,6 +594,19 @@ const Frame = struct {
             switch (op) {
                 0x00 => return self.output(0, 0, .success),
                 0x01...0x0b, 0x10...0x1d => try self.arithmetic(op),
+                0x20 => {
+                    const offset = try self.pop();
+                    const length = try self.pop();
+                    if (length > std.math.maxInt(u64)) return error.OutOfGas;
+                    const words = (@as(u128, @intCast(length)) + 31) / 32;
+                    if (words > (std.math.maxInt(u64) - 30) / 6) return error.OutOfGas;
+                    try self.charge(@intCast(30 + 6 * words));
+                    const start = try self.expand(offset, length);
+                    const n: usize = @intCast(length);
+                    var digest: [32]u8 = undefined;
+                    std.crypto.hash.sha3.Keccak256.hash(self.memory.items[start..][0..n], &digest, .{});
+                    try self.push(std.mem.readInt(u256, &digest, .big));
+                },
                 0x30...0x4a => try self.contextOpcode(op),
                 0x50 => {
                     try self.charge(2);
@@ -683,7 +697,7 @@ const Frame = struct {
                     try self.charge(2);
                     try self.push(0);
                 },
-                0x20, 0xf0, 0xf5, 0xff => return error.UnsupportedOpcode,
+                0xf0, 0xf5, 0xff => return error.UnsupportedOpcode,
                 0xa0...0xa4 => try self.log(op - 0xa0),
                 0xf1, 0xf2, 0xf4, 0xfa => try self.call(op),
                 0xf3, 0xfd => {

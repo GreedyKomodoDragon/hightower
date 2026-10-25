@@ -32,7 +32,7 @@ const fixtures = [_]Fixture{
     .{ .name = "chainid_cancun_state_test_tx_type_0", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "adbab28513ccf33a4e0c2bc79b19ebf341f93a64d75238d95cb4f6c8b9ce55a6", .bytes = @embedFile("fixtures/chainid_cancun_state_test_tx_type_0.json") },
     .{ .name = "invalidTr", .format = "state", .fork = "Cancun", .expected = .invalid_transaction, .checksum = "2bce278411aaba2b37a18ee6ed04ae0925ece8e0326358edb0eba5b4157e2264", .bytes = @embedFile("fixtures/invalidTr.json") },
     .{ .name = "tload_after_store", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "22e07acc51344815b19410422cd26f3d65d3a23e15072f251476d68b4ffc3b25", .bytes = @embedFile("fixtures/tload_after_store.json") }, // fixtures/state_tests/cancun/eip1153_tstore/test_basic_tload_after_store.json
-    .{ .name = "mcopy_empty", .format = "state", .fork = "Cancun", .expected = .skip, .skip_reason = "case executes SHA3 (0x20), which is not implemented", .checksum = "b9621cb125c4dffbfd287ba7286a078649f425da1b77fe1fccac25d3b0f1f3e1", .bytes = @embedFile("fixtures/mcopy_empty.json") }, // fixtures/state_tests/cancun/eip5656_mcopy/test_mcopy_on_empty_memory.json
+    .{ .name = "mcopy_empty", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "b9621cb125c4dffbfd287ba7286a078649f425da1b77fe1fccac25d3b0f1f3e1", .bytes = @embedFile("fixtures/mcopy_empty.json") }, // fixtures/state_tests/cancun/eip5656_mcopy/test_mcopy_on_empty_memory.json
     .{ .name = "signed_shifts", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "2e973b7e3c785bd995ff664c34d2e60fec263f2d0cc76f00e100e308cc1252a7", .bytes = @embedFile("fixtures/signed_shifts.json") }, // fixtures/state_tests/static/state_tests/stShift/shiftSignedCombinations.json
     .{ .name = "arithmetic", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "a5ad23fca72bbfa862407044ba7f4166c956b8851fb61e114ed3668fd4fea6c8", .bytes = @embedFile("fixtures/arithmetic.json") }, // fixtures/state_tests/static/state_tests/VMTests/vmArithmeticTest/arith.json
     .{ .name = "mod", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "f3f0f69b8fbafc409a73888ded4b3d7495546d00af8b6fd209b1909e1c407a4e", .bytes = @embedFile("fixtures/mod.json") }, // fixtures/state_tests/static/state_tests/VMTests/vmArithmeticTest/mod.json
@@ -242,10 +242,10 @@ test "pinned execution fixtures pass and unsupported processors are explicit" {
     execution.evm.coverage.opcodes = &seen;
     defer execution.evm.coverage.opcodes = null;
     const counts = try run(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 79), counts.passed);
-    try std.testing.expectEqual(@as(usize, 1), counts.skipped);
+    try std.testing.expectEqual(@as(usize, 80), counts.passed);
+    try std.testing.expectEqual(@as(usize, 0), counts.skipped);
     std.debug.print("execution fixtures: {d} passed, {d} skipped\n", .{ counts.passed, counts.skipped });
-    const core = [_]u8{ 0x00, 0xf3, 0xfd };
+    const core = [_]u8{ 0x00, 0x20, 0xf3, 0xfd };
     for (core) |op| try std.testing.expect(seen[op]);
     for (0x01..0x0c) |op| try std.testing.expect(seen[op]);
     for (0x10..0x1e) |op| try std.testing.expect(seen[op]);
@@ -274,6 +274,31 @@ test "rejects checksum mismatch, malformed JSON, missing expectation, and unknow
     fixture.fork = fixtures[0].fork;
     fixture.checksum = fixtures[0].checksum;
     try std.testing.expectError(error.UnknownFormat, runFixture(std.testing.allocator, fixture, fixtures[0].bytes));
+}
+
+test "mcopy_empty rejects changed state and logs oracles and named skips stay skips" {
+    const allocator = std.testing.allocator;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, fixtures[7].bytes, .{});
+    defer parsed.deinit();
+    const test_value = parsed.value.object.values()[0];
+    const post = try member(try member(test_value, "post"), "Cancun");
+    const expected = post.array.items[0];
+    const zero_hash = std.json.Value{ .string = "0x0000000000000000000000000000000000000000000000000000000000000000" };
+    const root = expected.object.getPtr("hash").?;
+    const original_root = root.*;
+    root.* = zero_hash;
+    try std.testing.expectError(error.StateRootMismatch, runStateFixture(allocator, parsed.value, fixtures[7]));
+    root.* = original_root;
+    const logs = expected.object.getPtr("logs").?;
+    logs.* = zero_hash;
+    try std.testing.expectError(error.LogsHashMismatch, runStateFixture(allocator, parsed.value, fixtures[7]));
+
+    var skipped = fixtures[7];
+    skipped.expected = .skip;
+    skipped.skip_reason = "unsupported execution";
+    try std.testing.expect(!try runFixture(allocator, skipped, fixtures[7].bytes));
+    skipped.skip_reason = null;
+    try std.testing.expectError(error.MissingExpectation, runFixture(allocator, skipped, fixtures[7].bytes));
 }
 
 test "blockchain fixture rejects malformed and mismatched oracles" {

@@ -51,6 +51,7 @@ Chain:      [Block 0] ───────────────────�
 | Execution account | An address's nonce, balance, storage root, and code hash, encoded into the execution state trie. |
 | Ethereum Virtual Machine (EVM) | The execution engine that runs a contract's bytecode one instruction at a time. |
 | Opcode | A one-byte EVM instruction that operates on stack, memory, or state and consumes gas. |
+| Keccak-256 | Ethereum's 256-bit hash function; the EVM's SHA3 opcode uses it to hash memory bytes. |
 | Call frame | One invocation of contract code, with its own stack, memory, gas balance, and return data. |
 | Gas | The metered budget consumed by EVM operations; running out makes the current frame fail. |
 | EVM stack | A last-in, first-out list of up to 1,024 256-bit words used as instruction operands. |
