@@ -604,6 +604,10 @@ const Frame = struct {
             try self.push(0);
             return;
         }
+        if (state.delegationTarget(self.machine.world.getCode(target))) |address| {
+            const target_warm = try self.machine.touchAccount(address);
+            try self.charge(if (target_warm) 100 else 2600);
+        }
         const capped = self.gas - self.gas / 64;
         const forwarded: u64 = @intCast(@min(requested, capped));
         const child_gas = forwarded + (if (transfer) @as(u64, 2300) else 0);
@@ -615,11 +619,6 @@ const Frame = struct {
         if (op == Op.CALL and value != 0) {
             try self.machine.world.setBalance(self.input.callee, self.machine.world.getBalance(self.input.callee) - value);
             try self.machine.world.setBalance(target, self.machine.world.getBalance(target) + value);
-        }
-        const designation = state.delegationTarget(self.machine.world.getCode(target));
-        if (designation) |address| {
-            const target_warm = try self.machine.touchAccount(address);
-            try self.charge(if (target_warm) 100 else 2600);
         }
         var result = try self.machine.run(.{
             .code = self.machine.world.getExecutionCode(target),

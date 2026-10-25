@@ -13,7 +13,7 @@ const transition = @import("transition.zig");
 const ckzg = @import("ckzg");
 
 const Value = std.json.Value;
-const max_body = 1024 * 1024;
+const max_body = 8 * 1024 * 1024;
 const max_batch = 20;
 const max_log_blocks = 1000;
 const max_log_results = 10_000;
@@ -46,7 +46,7 @@ pub const Server = struct {
         return allocator.dupe(u8, encoded);
     }
 
-    /// Serves one HTTP POST with a strict 1 MiB body limit.
+    /// Serves one HTTP POST with a limit that fits six hex-encoded blob sidecars.
     pub fn serveConnection(self: *Server, allocator: std.mem.Allocator, io: std.Io, stream: std.Io.net.Stream) !void {
         defer stream.close(io);
         var read_buffer: [8192]u8 = undefined;

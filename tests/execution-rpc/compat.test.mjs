@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { JsonRpcProvider, Wallet } from 'ethers';
+import { createHash } from 'node:crypto';
+import { decodeRlp, encodeRlp, JsonRpcProvider, Wallet } from 'ethers';
 
 // The fixture server is started separately with `zig-out/bin/hightower-rpc-test`.
 const provider = new JsonRpcProvider('http://127.0.0.1:18545/', { chainId: 1, name: 'hightower' }, { staticNetwork: true });
@@ -48,10 +49,17 @@ assert.equal((await rpc('eth_getLogs', [{ fromBlock: '0x0', toBlock: '0x1000' }]
 assert.equal((await rpc('eth_noSuchMethod')).error.code, -32601);
 const malformed = await fetch('http://127.0.0.1:18545/', { method: 'POST', body: '{' });
 assert.equal((await malformed.json()).error.code, -32700);
-const oversized = await fetch('http://127.0.0.1:18545/', { method: 'POST', body: 'x'.repeat(1_048_577) });
+const oversized = await fetch('http://127.0.0.1:18545/', { method: 'POST', body: 'x'.repeat(8 * 1_048_576 + 1) });
 assert.equal(oversized.status, 413);
 const batch = await fetch('http://127.0.0.1:18545/', { method: 'POST', body: JSON.stringify(Array.from({ length: 21 }, (_, id) => ({ jsonrpc: '2.0', id, method: 'eth_chainId' }))) });
 assert.equal((await batch.json()).error.code, -32600);
+
+const commitment = `0xc0${'00'.repeat(47)}`;
+const versionedHash = `0x01${createHash('sha256').update(Buffer.from(commitment.slice(2), 'hex')).digest('hex').slice(2)}`;
+const sixBlobSigned = await wallet.signTransaction({ type: 3, chainId: 1, nonce: 2, gasLimit: 100_000, maxPriorityFeePerGas: 1, maxFeePerGas: 2, maxFeePerBlobGas: 1, blobVersionedHashes: Array(6).fill(versionedHash), to: recipient, value: 0 });
+const sixBlobRaw = `0x03${encodeRlp([decodeRlp(`0x${sixBlobSigned.slice(4)}`), Array(6).fill(`0x${'00'.repeat(131_072)}`), Array(6).fill(commitment), Array(6).fill(commitment)]).slice(2)}`;
+assert.equal(sixBlobRaw.length > 1_048_576, true);
+assert.equal((await rpc('eth_sendRawTransaction', [sixBlobRaw])).result.length, 66);
 
 const raw = await wallet.signTransaction({ type: 2, chainId: 1, nonce: 1, gasLimit: 21_000, maxPriorityFeePerGas: 1, maxFeePerGas: 2, to: recipient, value: 0 });
 assert.equal((await provider.send('eth_sendRawTransaction', [raw])).length, 66);

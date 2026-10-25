@@ -63,9 +63,23 @@ pub const Pool = struct {
         if (self.findHash(hash) != null) return error.AlreadyKnown;
         const entry: Entry = .{ .raw = raw, .sidecar = sidecar, .hash = hash, .admission = admission };
         if (entry.bytes() > self.limits.max_bytes or self.limits.max_entries == 0) return error.TransactionTooLarge;
-        if (self.findNonce(admission.sender, admission.nonce)) |index| {
+        const replacing = self.findNonce(admission.sender, admission.nonce);
+        if (replacing) |index| {
             const old = self.entries.items[index];
             if (!replacementAllowed(old.admission, admission)) return error.ReplacementUnderpriced;
+        }
+        var better_count: usize = 0;
+        var better_bytes: usize = 0;
+        for (self.entries.items, 0..) |existing, index| {
+            if (replacing != null and index == replacing.?) continue;
+            if (worse(entry, existing, context.base_fee)) {
+                better_count += 1;
+                better_bytes += existing.bytes();
+            }
+        }
+        if (better_count >= self.limits.max_entries or better_bytes > self.limits.max_bytes - entry.bytes()) return error.PoolFull;
+        if (replacing) |index| {
+            const old = self.entries.items[index];
             self.byte_count -= old.bytes();
             self.freeEntry(old);
             self.entries.items[index] = entry;

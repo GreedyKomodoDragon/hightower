@@ -244,6 +244,42 @@ test "pool evicts by count and bytes and prunes mined nonces" {
         try world.setNonce(sender, 0);
     }
 }
+
+test "pool keeps the accepted transaction when a larger replacement loses eviction" {
+    const a = testing.allocator;
+    var world = execution.state.State.init(a);
+    defer world.deinit();
+    const sender: execution.Address = .{ 0x7e, 0x5f, 0x45, 0x52, 0x09, 0x1a, 0x69, 0x12, 0x5d, 0x5d, 0xfc, 0xb7, 0xb8, 0xc2, 0x65, 0x90, 0x29, 0x39, 0x5b, 0xdf };
+    try world.setBalance(sender, 1_000_000_000);
+    const context: execution.transition.Context = .{ .fork = .fulu, .chain_id = 1, .coinbase = .{0x33} ** 20, .number = 1, .timestamp = 1, .gas_limit = 1_000_000, .base_fee = 1, .blob_base_fee = 1 };
+    var low = execution.Transaction{ .dynamic_fee = .{ .chain_id = 1, .nonce = 0, .max_priority_fee_per_gas = 10, .max_fee_per_gas = 100, .gas_limit = 100_000, .to = .{0x22} ** 20, .value = 0, .data = &.{}, .access_list = &.{}, .y_parity = 0, .r = 1, .s = 1 } };
+    try expectSyntheticSender(a, &low);
+    const old_raw = try execution.encode(a, low);
+    defer a.free(old_raw);
+    var high = low;
+    high.dynamic_fee.nonce = 1;
+    high.dynamic_fee.max_priority_fee_per_gas = 100;
+    high.dynamic_fee.max_fee_per_gas = 1000;
+    try expectSyntheticSender(a, &high);
+    const high_raw = try execution.encode(a, high);
+    defer a.free(high_raw);
+    var pool = execution.pool.Pool.init(a, .{ .max_entries = 3, .max_bytes = old_raw.len + high_raw.len });
+    defer pool.deinit();
+    const old_hash = try pool.admit(&world, context, null, old_raw);
+    const high_hash = try pool.admit(&world, context, null, high_raw);
+    var replacement = low;
+    replacement.dynamic_fee.max_priority_fee_per_gas = 11;
+    replacement.dynamic_fee.max_fee_per_gas = 110;
+    replacement.dynamic_fee.data = &([_]u8{1} ** 64);
+    try expectSyntheticSender(a, &replacement);
+    const replacement_raw = try execution.encode(a, replacement);
+    defer a.free(replacement_raw);
+    try testing.expectError(error.PoolFull, pool.admit(&world, context, null, replacement_raw));
+    try testing.expectEqual(@as(usize, 2), pool.entries.items.len);
+    try testing.expectEqual(old_raw.len + high_raw.len, pool.byte_count);
+    try testing.expectEqualSlices(u8, old_raw, pool.get(old_hash).?.raw);
+    try testing.expectEqualSlices(u8, high_raw, pool.get(high_hash).?.raw);
+}
 const rlp = @import("rlp");
 const testing = std.testing;
 
