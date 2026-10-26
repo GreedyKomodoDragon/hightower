@@ -11,8 +11,8 @@ const api = @import("api");
 const fixtures = consensus.fixtureRunner;
 
 /// Treat fixture execution payloads as valid after consensus checks them.
-fn validPayload(_: *anyopaque, _: consensus.NewPayloadRequest) anyerror!consensus.PayloadStatus {
-    return .valid;
+fn validPayload(_: *anyopaque, _: consensus.NewPayloadRequest) anyerror!consensus.PayloadVerdict {
+    return .{ .status = .valid };
 }
 
 /// Mark pinned fixture block data available for import.

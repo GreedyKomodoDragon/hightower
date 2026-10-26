@@ -98,10 +98,10 @@ fn processExecutionPayload(allocator: std.mem.Allocator, state: *fulu.BeaconStat
         .parent_beacon_block_root = state.latest_block_header.parent_root,
         .execution_requests = &body.execution_requests,
     });
-    switch (status) {
+    switch (status.status) {
         .valid => {},
-        .invalid => return error.InvalidExecutionPayload,
-        .syncing => return error.ExecutionPayloadUnverified,
+        .invalid, .invalid_block_hash => return error.InvalidExecutionPayload,
+        .syncing, .accepted => return error.ExecutionPayloadUnverified,
     }
     const transactions_root = try merkle.HashTreeRoot(allocator, payload.transactions);
     const withdrawals_root = try merkle.HashTreeRoot(allocator, payload.withdrawals);
@@ -246,17 +246,17 @@ test "blob commitment validation follows scheduled epoch limits" {
     try validateBlobCommitmentLimit(20, 21, &schedule);
 }
 
-test "execution engine invalid and syncing results reject the block" {
+test "execution engine non-valid results reject the block" {
     const fixtures = @import("fixture_runner.zig");
     const allocator = std.testing.allocator;
     const case = fixtures.find("empty_block_transition").?;
     const signed = try fixtures.decodeBlock(allocator, case.input.?);
     defer @import("ssz").freeDecoded(allocator, fulu.SignedBeaconBlock, signed);
-    for ([_]engine_api.PayloadStatus{ .invalid, .syncing }) |status| {
+    for ([_]engine_api.PayloadStatus{ .invalid, .invalid_block_hash, .syncing, .accepted }) |status| {
         var state = try fixtures.decodeState(allocator, case.pre.?);
         defer @import("ssz").freeDecoded(allocator, fulu.BeaconState, state);
         var fake_engine: engine_api.TestEngine = .{ .status = status };
-        const expected_error = if (status == .invalid) error.InvalidExecutionPayload else error.ExecutionPayloadUnverified;
+        const expected_error = if (status == .invalid or status == .invalid_block_hash) error.InvalidExecutionPayload else error.ExecutionPayloadUnverified;
         try std.testing.expectError(expected_error, stateTransition(allocator, &state, signed, fake_engine.interface()));
     }
 }

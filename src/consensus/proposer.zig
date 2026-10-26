@@ -30,6 +30,7 @@ pub fn propose(
     key: *blst.SecretKey,
     pool: *const pool_api.Pool,
     engine: engine_api.ExecutionEngine,
+    forkchoice: engine_api.ForkchoiceState,
     sync_aggregate: fulu.SyncAggregate,
     fee_recipient: fulu.ExecutionAddress,
     graffiti: fulu.Bytes32,
@@ -57,8 +58,14 @@ pub fn propose(
         .withdrawals = withdrawals,
         .parent_beacon_block_root = parent_root,
     };
-    const payload_id = try engine.forkchoiceUpdated(state.latest_execution_payload_header.block_hash, attrs);
-    const built = try engine.getPayload(payload_id);
+    if (!std.mem.eql(u8, &forkchoice.head_block_hash, &state.latest_execution_payload_header.block_hash)) return error.InvalidExecutionHead;
+    const choice = try engine.forkchoiceUpdated(forkchoice, attrs);
+    switch (choice.verdict.status) {
+        .valid => {},
+        .invalid, .invalid_block_hash => return error.InvalidExecutionPayload,
+        .syncing, .accepted => return error.ExecutionPayloadUnverified,
+    }
+    const built = try engine.getPayload(choice.payload_id orelse return error.MissingPayloadId);
     if (!std.mem.eql(u8, &built.payload.fee_recipient, &fee_recipient)) return error.InvalidFeeRecipient;
     if (built.payload.withdrawals.data.len != withdrawals.len) return error.InvalidWithdrawals;
     for (built.payload.withdrawals.data, withdrawals) |actual, expected| if (!std.meta.eql(actual, expected)) return error.InvalidWithdrawals;
@@ -115,7 +122,9 @@ test "wrong proposer key leaves trusted state and pool untouched" {
     var pool = pool_api.Pool.init(allocator);
     defer pool.deinit();
     var test_engine: engine_api.TestEngine = .{ .status = .valid };
-    try std.testing.expectError(error.WrongProposerKey, propose(allocator, &state, fixture_block.message.slot, &key, &pool, test_engine.interface(), fixture_block.message.body.sync_aggregate, [_]u8{0} ** 20, [_]u8{0} ** 32));
+    const head = state.latest_execution_payload_header.block_hash;
+    const choice: engine_api.ForkchoiceState = .{ .head_block_hash = head, .safe_block_hash = head, .finalized_block_hash = head };
+    try std.testing.expectError(error.WrongProposerKey, propose(allocator, &state, fixture_block.message.slot, &key, &pool, test_engine.interface(), choice, fixture_block.message.body.sync_aggregate, [_]u8{0} ** 20, [_]u8{0} ** 32));
     try std.testing.expectEqual(before, try merkle.HashTreeRoot(allocator, state));
     try std.testing.expectEqual(@as(usize, 0), pool.attestations.items.len);
 }
@@ -163,9 +172,11 @@ fn checkProducedBlock(compressed: []const u8, cross_epoch: bool) !void {
     const requests: fulu.ExecutionRequests = .{ .deposits = .{ .data = &.{deposit} }, .withdrawals = .{ .data = &.{} }, .consolidations = .{ .data = &.{} } };
     const commitments = [_]fulu.KZGCommitment{[_]u8{0x43} ** 48};
     var test_engine: engine_api.TestEngine = .{ .status = .valid, .built = .{ .payload = payload, .commitments = &commitments, .requests = requests } };
+    const head = parent.latest_execution_payload_header.block_hash;
+    const choice: engine_api.ForkchoiceState = .{ .head_block_hash = head, .safe_block_hash = head, .finalized_block_hash = head };
     var pool = pool_api.Pool.init(allocator);
     defer pool.deinit();
-    const signed = try propose(allocator, &parent, slot, &key, &pool, test_engine.interface(), sync, payload.fee_recipient, [_]u8{0x7a} ** 32);
+    const signed = try propose(allocator, &parent, slot, &key, &pool, test_engine.interface(), choice, sync, payload.fee_recipient, [_]u8{0x7a} ** 32);
     defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, signed);
     try std.testing.expectEqual(before, try merkle.HashTreeRoot(allocator, parent));
     try std.testing.expectEqualSlices(fulu.Withdrawal, payload.withdrawals.data, signed.message.body.execution_payload.withdrawals.data);
@@ -180,11 +191,11 @@ fn checkProducedBlock(compressed: []const u8, cross_epoch: bool) !void {
     var replay = try pool_api.copyValue(allocator, fulu.BeaconState, parent);
     defer ssz.freeDecoded(allocator, fulu.BeaconState, replay);
     try block_processing.stateTransition(allocator, &replay, signed, test_engine.interface());
-    const again = try propose(allocator, &parent, slot, &key, &pool, test_engine.interface(), sync, payload.fee_recipient, [_]u8{0x7a} ** 32);
+    const again = try propose(allocator, &parent, slot, &key, &pool, test_engine.interface(), choice, sync, payload.fee_recipient, [_]u8{0x7a} ** 32);
     defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, again);
     try std.testing.expectEqual(try merkle.HashTreeRoot(allocator, signed.message), try merkle.HashTreeRoot(allocator, again.message));
     test_engine.status = .invalid;
-    try std.testing.expectError(error.InvalidExecutionPayload, propose(allocator, &parent, slot, &key, &pool, test_engine.interface(), sync, payload.fee_recipient, [_]u8{0x7a} ** 32));
+    try std.testing.expectError(error.InvalidExecutionPayload, propose(allocator, &parent, slot, &key, &pool, test_engine.interface(), choice, sync, payload.fee_recipient, [_]u8{0x7a} ** 32));
     try std.testing.expectEqual(before, try merkle.HashTreeRoot(allocator, parent));
 }
 
