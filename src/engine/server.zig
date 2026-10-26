@@ -2,7 +2,8 @@
 // choice commits them. Validation runs on a clone of the parent post-state;
 // the canonical chain changes only after a valid forkchoice update. A local
 // builder derives a fork-appropriate payload from the selected parent, pool,
-// and supplied withdrawals. In-memory stages are bounded to 32 direct children.
+// and supplied withdrawals. In-memory stages are bounded to 32 direct children;
+// deployed Prague request queues remain unsupported and are never validated.
 //
 // parent snapshot -> validate payload -> staged hash -> forkchoice -> canonical
 const std = @import("std");
@@ -16,6 +17,13 @@ const client = @import("engine_client");
 
 const Value = wire.Value;
 const max_body = 32 * 1024 * 1024;
+const withdrawal_requests_address: execution.Address = .{ 0x00, 0x00, 0x09, 0x61, 0xef, 0x48, 0x0e, 0xb5, 0x5e, 0x80, 0xd1, 0x9a, 0xd8, 0x35, 0x79, 0xa6, 0x4c, 0x00, 0x70, 0x02 };
+const consolidation_requests_address: execution.Address = .{ 0x00, 0x00, 0xbb, 0xdd, 0xc7, 0xce, 0x48, 0x86, 0x42, 0xfb, 0x57, 0x9f, 0x8b, 0x00, 0xf3, 0xa5, 0x90, 0x00, 0x72, 0x51 };
+
+/// Detects Prague request queues whose end-of-block calls are not implemented.
+fn hasRequestQueues(world: *const execution.state.State, fork: execution.transition.Fork) bool {
+    return @intFromEnum(fork) >= @intFromEnum(execution.transition.Fork.prague) and (world.getCode(withdrawal_requests_address).len != 0 or world.getCode(consolidation_requests_address).len != 0);
+}
 
 /// Maps the configured execution fork to its Engine API method generations.
 fn methodVersions(fork: execution.transition.Fork) !@TypeOf(client.versions(.osaka)) {
@@ -262,6 +270,8 @@ pub const Server = struct {
         if (self.chain.byHash(payload.block_hash) != null) return status(a, "VALID", payload.block_hash);
         const parent = self.chain.latest();
         if (!std.mem.eql(u8, &payload.parent_hash, &parent.hash)) return status(a, "SYNCING", null);
+        // shortcut: request queues need end-of-block system calls; return SYNCING while they are unsupported.
+        if (hasRequestQueues(&parent.world, self.chain.fork)) return status(a, "SYNCING", null);
         // shortcut: request-producing execution needs the system-contract transition; return SYNCING until it is implemented.
         if (request_lists) |lists| if (lists.deposits.data.len != 0 or lists.withdrawals.data.len != 0 or lists.consolidations.data.len != 0) return status(a, "SYNCING", null);
         const txs = try a.alloc([]const u8, payload.transactions.data.len);
@@ -335,6 +345,7 @@ pub const Server = struct {
 
     /// Prepares a payload build from a validated parent without changing canonical state.
     fn startBuild(self: *Server, a: std.mem.Allocator, value: Value, parent_header: execution.Header, parent_hash: execution.Hash, parent_world: *const execution.state.State) !Build {
+        if (hasRequestQueues(parent_world, self.chain.fork)) return error.UnsupportedRequestQueues;
         const timestamp = try wire.quantity(u64, try wire.field(value, "timestamp"));
         if (timestamp <= parent_header.timestamp) return error.InvalidParams;
         var arena = std.heap.ArenaAllocator.init(self.allocator);
@@ -365,7 +376,9 @@ pub const Server = struct {
         if (staged_parent) block_hashes[1] = self.chain.latest().hash;
         @memcpy(block_hashes[1 + @as(usize, @intFromBool(staged_parent)) ..], older_hashes[0 .. hash_count - 1 - @as(usize, @intFromBool(staged_parent))]);
         const context: execution.transition.Context = .{ .fork = self.chain.fork, .chain_id = self.chain.chain_id, .coinbase = fee_recipient, .number = number, .timestamp = timestamp, .gas_limit = parent_header.gas_limit, .base_fee = base_fee, .prev_randao = prev_randao, .blob_base_fee = if (active.forkchoice >= 3) try execution.transition.blobBaseFee(self.chain.fork, excess_blob_gas) else null, .block_hashes = block_hashes };
-        const selected = try self.pool.select(a, &trial, context, parent_header.gas_limit);
+        const root = if (active.forkchoice >= 3) try wire.fixed(32, try wire.field(value, "parentBeaconBlockRoot")) else [_]u8{0} ** 32;
+        try execution.transition.applySystemTransitions(a, &trial, context, parent_hash, root);
+        const selected = try self.pool.select(a, &trial, context, parent_header.gas_limit, maxBlobs(self.chain.fork));
         const Tx = std.meta.Child(@FieldType(@FieldType(fulu.ExecutionPayload, "transactions"), "data"));
         const transactions = try owner.alloc(Tx, selected.len);
         var blobs: std.ArrayList([]const u8) = .empty;
@@ -415,7 +428,6 @@ pub const Server = struct {
             .blob_gas_used = try std.math.mul(u64, @intCast(blobs.items.len), 131_072),
             .excess_blob_gas = excess_blob_gas,
         };
-        const root = if (active.forkchoice >= 3) try wire.fixed(32, try wire.field(value, "parentBeaconBlockRoot")) else [_]u8{0} ** 32;
         const header = try payloadHeader(a, p, root, try emptyRequestsHash());
         p.block_hash = try execution.transition.headerHash(a, self.chain.fork, header);
         return .{ .arena = arena, .payload = p, .id = self.next_id, .blobs = try blobs.toOwnedSlice(owner), .commitments = try commitments.toOwnedSlice(owner), .blob_proofs = try blob_proofs.toOwnedSlice(owner), .cell_proofs = try cell_proofs.toOwnedSlice(owner) };
@@ -598,6 +610,9 @@ fn checkBuiltFork(fork: execution.transition.Fork) !void {
     const a = std.testing.allocator;
     var world = execution.state.State.init(a);
     defer world.deinit();
+    const system_setter = [_]u8{ 0x5f, 0x35, 0x5f, 0x55, 0x00 };
+    if (@intFromEnum(fork) >= @intFromEnum(execution.transition.Fork.cancun)) _ = try world.setCode(.{ 0x00, 0x0f, 0x3d, 0xf6, 0xd7, 0x32, 0x80, 0x7e, 0xf1, 0x31, 0x9f, 0xb7, 0xb8, 0xbb, 0x85, 0x22, 0xd0, 0xbe, 0xac, 0x02 }, &system_setter);
+    if (@intFromEnum(fork) >= @intFromEnum(execution.transition.Fork.prague)) _ = try world.setCode(.{ 0x00, 0x00, 0xf9, 0x08, 0x27, 0xf1, 0xc5, 0x3a, 0x10, 0xcb, 0x7a, 0x02, 0x33, 0x5b, 0x17, 0x53, 0x20, 0x00, 0x29, 0x35 }, &system_setter);
     var header = std.mem.zeroes(execution.Header);
     header.state_root = try world.stateRoot();
     header.gas_limit = 30_000_000;
@@ -613,6 +628,7 @@ fn checkBuiltFork(fork: execution.transition.Fork) !void {
     const temp = arena.allocator();
     const genesis = chain.latest().hash;
     const zero = [_]u8{0} ** 32;
+    const beacon_root = [_]u8{0x55} ** 32;
     var choice = wire.object();
     try wire.put(temp, &choice, "headBlockHash", try wire.hex(temp, &genesis));
     try wire.put(temp, &choice, "safeBlockHash", try wire.hex(temp, &genesis));
@@ -623,7 +639,7 @@ fn checkBuiltFork(fork: execution.transition.Fork) !void {
     try wire.put(temp, &attrs, "suggestedFeeRecipient", try wire.hex(temp, &([_]u8{0} ** 20)));
     const versions = try methodVersions(fork);
     if (versions.forkchoice >= 2) try wire.put(temp, &attrs, "withdrawals", wire.array(temp));
-    if (versions.forkchoice >= 3) try wire.put(temp, &attrs, "parentBeaconBlockRoot", try wire.hex(temp, &zero));
+    if (versions.forkchoice >= 3) try wire.put(temp, &attrs, "parentBeaconBlockRoot", try wire.hex(temp, &beacon_root));
     const started = try server.forkchoiceUpdated(temp, &.{ choice, attrs });
     const id = try wire.field(started, "payloadId");
     const built = try server.getPayload(temp, &.{id}, versions.get_payload);
@@ -633,7 +649,7 @@ fn checkBuiltFork(fork: execution.transition.Fork) !void {
     try params.array.append(p);
     if (versions.new_payload >= 3) {
         try params.array.append(wire.array(temp));
-        try params.array.append(try wire.hex(temp, &zero));
+        try params.array.append(try wire.hex(temp, &beacon_root));
     }
     if (versions.new_payload >= 4) try params.array.append(wire.array(temp));
     const original_hash = try wire.field(p, "blockHash");
@@ -657,4 +673,34 @@ fn checkBuiltFork(fork: execution.transition.Fork) !void {
 
 test "every Engine fork builds, validates, and commits a payload" {
     for ([_]execution.transition.Fork{ .paris, .shanghai, .cancun, .prague, .osaka, .fulu }) |fork| try checkBuiltFork(fork);
+}
+
+test "request queue predeploys prevent unsupported Osaka validation and building" {
+    const a = std.testing.allocator;
+    var world = execution.state.State.init(a);
+    defer world.deinit();
+    _ = try world.setCode(withdrawal_requests_address, &.{0x00});
+    var genesis = std.mem.zeroes(execution.Header);
+    genesis.state_root = try world.stateRoot();
+    genesis.gas_limit = 30_000_000;
+    genesis.base_fee_per_gas = 1;
+    var chain = try execution.chain.Chain.init(a, 1, .osaka, genesis, &world);
+    defer chain.deinit();
+    var pool = execution.pool.Pool.init(a, .{});
+    defer pool.deinit();
+    var server: Server = .{ .allocator = a, .chain = &chain, .world = &world, .pool = &pool, .secret = .{0x42} ** 32 };
+    defer server.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const temp = arena.allocator();
+    const parent_hash = chain.latest().hash;
+    const zero: execution.Hash = .{0} ** 32;
+    var p: fulu.ExecutionPayload = .{ .parent_hash = parent_hash, .fee_recipient = .{0} ** 20, .state_root = genesis.state_root, .receipts_root = zero, .logs_bloom = .{0} ** 256, .prev_randao = zero, .block_number = 1, .gas_limit = genesis.gas_limit, .gas_used = 0, .timestamp = 1, .extra_data = .{ .data = &.{} }, .base_fee_per_gas = 1, .block_hash = zero, .transactions = .{ .data = &.{} }, .withdrawals = .{ .data = &.{} }, .blob_gas_used = 0, .excess_blob_gas = 0 };
+    p.block_hash = try execution.transition.headerHash(temp, .osaka, try payloadHeader(temp, p, zero, try emptyRequestsHash()));
+    const response = try server.newPayload(temp, &.{ try wire.payloadJson(temp, p, 3), wire.array(temp), try wire.hex(temp, &zero), wire.array(temp) }, 4);
+    try std.testing.expectEqualStrings("SYNCING", try wire.string(try wire.field(response, "status")));
+    var attrs = wire.object();
+    try wire.put(temp, &attrs, "timestamp", try wire.number(temp, @as(u64, 1)));
+    try std.testing.expectError(error.UnsupportedRequestQueues, server.startBuild(temp, attrs, genesis, parent_hash, &chain.latest().world));
+    try std.testing.expectEqual(@as(usize, 1), chain.records.items.len);
 }

@@ -2,11 +2,13 @@
 // frame keeps the nonce and gas charge, while reverting its value transfer and
 // storage writes. Ordered receipts commit cumulative gas; withdrawals and any
 // pre-Merge issuance follow transactions before the state root is checked.
+// Cancun beacon roots and Prague parent hashes enter system contracts before
+// transactions, so EVM reads and the final state commitment see those writes.
 //
-// parent header -> transaction 0 -> ... -> withdrawal 0 -> roots -> commit
+// parent header -> system calls -> transactions -> withdrawals -> roots -> commit
 // A block snapshot rolls back all earlier transactions if a later check fails.
-// Supported forks: London, Cancun, and Prague-shaped Fulu. Contract creation
-// and precompiles are tracked separately.
+// Supported forks: London through Osaka/Fulu, with request-producing system
+// transitions still pending. Contract creation and precompiles are separate.
 const std = @import("std");
 const execution = @import("execution.zig");
 const state = execution.state;
@@ -132,6 +134,7 @@ pub const Admission = struct {
     max_fee: u256,
     priority_fee: u256,
     blob_fee_cap: ?u256,
+    blob_count: u8 = 0,
 };
 
 /// Reuses transition validation for a future nonce without changing canonical state.
@@ -145,7 +148,7 @@ pub fn validatePending(allocator: std.mem.Allocator, world: *state.State, contex
     defer world.revert(snap) catch {};
     try world.setNonce(sender, f.nonce);
     _ = try validateTransaction(allocator, world, context, decoded.value, context.gas_limit);
-    return .{ .sender = sender, .nonce = f.nonce, .gas_limit = f.gas_limit, .max_fee = f.max_fee, .priority_fee = f.priority_fee, .blob_fee_cap = f.blob_fee_cap };
+    return .{ .sender = sender, .nonce = f.nonce, .gas_limit = f.gas_limit, .max_fee = f.max_fee, .priority_fee = f.priority_fee, .blob_fee_cap = f.blob_fee_cap, .blob_count = @intCast(f.blob_hashes.len) };
 }
 
 const FrameOutcome = struct {
@@ -423,6 +426,28 @@ fn verifyBlockCommitments(header: execution.Header, result: BlockResult) !void {
     if (result.withdrawals_root) |root| if (!std.mem.eql(u8, &root, &header.withdrawals_root)) return error.InvalidCommitment;
 }
 
+const system_address: execution.Address = .{0xff} ** 19 ++ .{0xfe};
+const beacon_roots_address: execution.Address = .{ 0x00, 0x0f, 0x3d, 0xf6, 0xd7, 0x32, 0x80, 0x7e, 0xf1, 0x31, 0x9f, 0xb7, 0xb8, 0xbb, 0x85, 0x22, 0xd0, 0xbe, 0xac, 0x02 };
+const history_address: execution.Address = .{ 0x00, 0x00, 0xf9, 0x08, 0x27, 0xf1, 0xc5, 0x3a, 0x10, 0xcb, 0x7a, 0x02, 0x33, 0x5b, 0x17, 0x53, 0x20, 0x00, 0x29, 0x35 };
+
+/// Executes a fork's pre-transaction contract call; absent predeploy code is a no-op.
+fn runSystemCall(allocator: std.mem.Allocator, world: *state.State, context: Context, address: execution.Address, input: []const u8) !void {
+    const code = world.getCode(address);
+    if (code.len == 0) return;
+    var machine = evm.Machine.init(allocator, world);
+    defer machine.deinit();
+    try machine.configure(.{ .fork = context.fork, .origin = system_address, .gas_price = 0, .coinbase = context.coinbase, .timestamp = context.timestamp, .number = context.number, .prev_randao = std.mem.readInt(u256, &context.prev_randao, .big), .gas_limit = context.gas_limit, .chain_id = context.chain_id, .base_fee = context.base_fee, .blob_base_fee = context.blob_base_fee orelse 0, .blob_base_fee_supported = context.blob_base_fee != null, .block_hashes = context.block_hashes }, system_address, address, &.{});
+    var result = try machine.run(.{ .code = code, .gas = 30_000_000, .caller = system_address, .callee = address, .data = input });
+    defer result.deinit(allocator);
+    if (result.status != .success) return error.InvalidSystemCall;
+}
+
+/// Applies Cancun beacon-root and Prague parent-hash writes before user transactions.
+pub fn applySystemTransitions(allocator: std.mem.Allocator, world: *state.State, context: Context, parent_hash: execution.Hash, parent_beacon_root: execution.Hash) !void {
+    if (@intFromEnum(context.fork) >= @intFromEnum(Fork.cancun)) try runSystemCall(allocator, world, context, beacon_roots_address, &parent_beacon_root);
+    if (@intFromEnum(context.fork) >= @intFromEnum(Fork.prague)) try runSystemCall(allocator, world, context, history_address, &parent_hash);
+}
+
 /// Applies ordered transactions and withdrawals, checking all claimed roots atomically.
 pub fn applyBlock(allocator: std.mem.Allocator, world: *state.State, block: BlockContext, parent: execution.Header, header: execution.Header, transactions: []const []const u8, withdrawals: []const execution.Withdrawal) !BlockResult {
     const parent_hash = try validateBlockHeader(allocator, block, parent, header, withdrawals);
@@ -437,6 +462,7 @@ pub fn applyBlock(allocator: std.mem.Allocator, world: *state.State, block: Bloc
     var open = true;
     errdefer if (open) world.revert(snapshot) catch {};
     const context: Context = .{ .fork = block.fork, .chain_id = block.chain_id, .coinbase = header.fee_recipient, .number = header.number, .timestamp = header.timestamp, .gas_limit = header.gas_limit, .base_fee = header.base_fee_per_gas, .prev_randao = header.prev_randao, .difficulty = header.difficulty, .blob_base_fee = if (@intFromEnum(block.fork) < @intFromEnum(Fork.cancun)) null else try blobBaseFee(block.fork, header.excess_blob_gas), .block_hashes = block_hashes };
+    try applySystemTransitions(arena.allocator(), world, context, parent_hash, header.parent_beacon_block_root);
     const gas_used = try applyBlockTransactions(arena.allocator(), world, context, transactions, receipts);
     var blob_gas_used: u64 = 0;
     var blob_index: usize = 0;

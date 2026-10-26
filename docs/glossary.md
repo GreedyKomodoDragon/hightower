@@ -166,3 +166,6 @@ Chain:      [Block 0] ───────────────────�
 | BLS-to-execution change | A signed operation that replaces BLS withdrawal credentials with an execution-layer withdrawal address. |
 | Operation pool | A node's temporary collection of validated signed operations that a proposer may include in a block. |
 | Payload builder | An execution engine component that assembles a block's execution payload from a selected parent and proposer attributes. |
+| System call | A fork-required EVM call made by the execution client outside the block's transaction list and gas accounting. |
+| Beacon roots contract | The Cancun system contract that stores each block's parent beacon root alongside its timestamp for later EVM reads. |
+| History storage contract | The Prague system contract that stores recent parent execution block hashes for EVM reads. |

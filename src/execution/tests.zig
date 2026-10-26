@@ -142,7 +142,7 @@ test "execution JSON-RPC dispatches chain and block methods with bounded input" 
     _ = serve_fn;
 }
 
-test "pool accepts five envelopes, preserves nonce gaps, selects prefixes, and enforces replacement" {
+test "pool budgets blobs, preserves nonce gaps, selects prefixes, and enforces replacement" {
     const a = std.testing.allocator;
     var world = execution.state.State.init(a);
     defer world.deinit();
@@ -158,13 +158,14 @@ test "pool accepts five envelopes, preserves nonce gaps, selects prefixes, and e
     std.crypto.hash.sha2.Sha256.hash(&commitment, &versioned_hash, .{});
     versioned_hash[0] = 1;
     const auth = execution.Authorization{ .chain_id = 1, .address = .{0x44} ** 20, .nonce = 0, .y_parity = 0, .r = 1, .s = 1 };
-    for (0..5) |n| {
+    for (0..6) |n| {
         var tx: execution.Transaction = switch (n) {
             0 => .{ .legacy = .{ .nonce = 0, .gas_price = 100, .gas_limit = 100_000, .to = .{0x22} ** 20, .value = 0, .data = &.{}, .v = 27, .r = 1, .s = 1 } },
             1 => .{ .access_list = .{ .chain_id = 1, .nonce = 1, .gas_price = 100, .gas_limit = 100_000, .to = .{0x22} ** 20, .value = 0, .data = &.{}, .access_list = &.{}, .y_parity = 0, .r = 1, .s = 1 } },
             2 => .{ .dynamic_fee = .{ .chain_id = 1, .nonce = 2, .max_priority_fee_per_gas = 10, .max_fee_per_gas = 100, .gas_limit = 100_000, .to = .{0x22} ** 20, .value = 0, .data = &.{}, .access_list = &.{}, .y_parity = 0, .r = 1, .s = 1 } },
             3 => .{ .blob = .{ .chain_id = 1, .nonce = 3, .max_priority_fee_per_gas = 10, .max_fee_per_gas = 100, .gas_limit = 100_000, .to = .{0x22} ** 20, .value = 0, .data = &.{}, .access_list = &.{}, .max_fee_per_blob_gas = 10, .blob_versioned_hashes = &.{versioned_hash}, .y_parity = 0, .r = 1, .s = 1 } },
-            4 => .{ .set_code = .{ .chain_id = 1, .nonce = 4, .max_priority_fee_per_gas = 10, .max_fee_per_gas = 100, .gas_limit = 100_000, .destination = .{0x22} ** 20, .value = 0, .data = &.{}, .access_list = &.{}, .authorization_list = &.{auth}, .y_parity = 0, .r = 1, .s = 1 } },
+            4 => .{ .blob = .{ .chain_id = 1, .nonce = 4, .max_priority_fee_per_gas = 10, .max_fee_per_gas = 100, .gas_limit = 100_000, .to = .{0x22} ** 20, .value = 0, .data = &.{}, .access_list = &.{}, .max_fee_per_blob_gas = 10, .blob_versioned_hashes = &.{versioned_hash}, .y_parity = 0, .r = 1, .s = 1 } },
+            5 => .{ .set_code = .{ .chain_id = 1, .nonce = 5, .max_priority_fee_per_gas = 10, .max_fee_per_gas = 100, .gas_limit = 100_000, .destination = .{0x22} ** 20, .value = 0, .data = &.{}, .access_list = &.{}, .authorization_list = &.{auth}, .y_parity = 0, .r = 1, .s = 1 } },
             else => unreachable,
         };
         try expectSyntheticSender(a, &tx);
@@ -182,24 +183,32 @@ test "pool accepts five envelopes, preserves nonce gaps, selects prefixes, and e
         defer a.free(raw);
         _ = try pool.admit(&world, context, &settings, raw);
     }
-    try testing.expectEqual(@as(usize, 5), pool.entries.items.len);
+    try testing.expectEqual(@as(usize, 6), pool.entries.items.len);
     const original = try world.stateRoot();
-    const bounded = try pool.select(a, &world, context, 150_000);
+    const bounded = try pool.select(a, &world, context, 150_000, 1);
     defer a.free(bounded);
     try testing.expectEqual(@as(usize, 3), bounded.len);
     try testing.expectEqualSlices(u8, &original, &(try world.stateRoot()));
-    const selected = try pool.select(a, &world, context, 1_000_000);
+    const selected = try pool.select(a, &world, context, 1_000_000, 1);
     defer a.free(selected);
-    try testing.expectEqual(@as(usize, 5), selected.len);
+    try testing.expectEqual(@as(usize, 4), selected.len);
+    const both_blobs = try pool.select(a, &world, context, 1_000_000, 2);
+    defer a.free(both_blobs);
+    try testing.expectEqual(@as(usize, 6), both_blobs.len);
     try testing.expectEqualSlices(u8, &original, &(try world.stateRoot()));
-    var gap = execution.Transaction{ .dynamic_fee = .{ .chain_id = 1, .nonce = 6, .max_priority_fee_per_gas = 10, .max_fee_per_gas = 100, .gas_limit = 100_000, .to = .{0x22} ** 20, .value = 0, .data = &.{}, .access_list = &.{}, .y_parity = 0, .r = 1, .s = 1 } };
+    const no_blob = try pool.select(a, &world, context, 1_000_000, 0);
+    defer a.free(no_blob);
+    try testing.expectEqual(@as(usize, 3), no_blob.len);
+    try testing.expectEqual(@as(usize, 6), pool.entries.items.len);
+    try testing.expectEqualSlices(u8, &original, &(try world.stateRoot()));
+    var gap = execution.Transaction{ .dynamic_fee = .{ .chain_id = 1, .nonce = 7, .max_priority_fee_per_gas = 10, .max_fee_per_gas = 100, .gas_limit = 100_000, .to = .{0x22} ** 20, .value = 0, .data = &.{}, .access_list = &.{}, .y_parity = 0, .r = 1, .s = 1 } };
     try expectSyntheticSender(a, &gap);
     const gap_raw = try execution.encode(a, gap);
     defer a.free(gap_raw);
     _ = try pool.admit(&world, context, &settings, gap_raw);
-    const selected_gap = try pool.select(a, &world, context, 1_000_000);
+    const selected_gap = try pool.select(a, &world, context, 1_000_000, 2);
     defer a.free(selected_gap);
-    try testing.expectEqual(@as(usize, 5), selected_gap.len);
+    try testing.expectEqual(@as(usize, 6), selected_gap.len);
     gap.dynamic_fee.max_fee_per_gas = 109;
     gap.dynamic_fee.max_priority_fee_per_gas = 11;
     try expectSyntheticSender(a, &gap);
@@ -907,4 +916,49 @@ test "reject invalid transaction envelopes and field shapes" {
     try testing.expectError(error.InvalidShape, execution.parse(execution.Withdrawal, testing.allocator, &.{0xc0}));
     try testing.expectError(error.InvalidLength, execution.parse(execution.Transaction, testing.allocator, &.{ 0xc9, 0x80, 1, 2, 1, 3, 0x80, 27, 1, 2 }));
     try testing.expectError(error.InvalidLength, execution.parse(execution.Receipt, testing.allocator, &.{ 0xc4, 1, 2, 0x80, 0xc0 }));
+}
+
+test "Cancun and Prague system calls update roots before block commitment" {
+    const a = testing.allocator;
+    const beacon_address: execution.Address = .{ 0x00, 0x0f, 0x3d, 0xf6, 0xd7, 0x32, 0x80, 0x7e, 0xf1, 0x31, 0x9f, 0xb7, 0xb8, 0xbb, 0x85, 0x22, 0xd0, 0xbe, 0xac, 0x02 };
+    const history_address: execution.Address = .{ 0x00, 0x00, 0xf9, 0x08, 0x27, 0xf1, 0xc5, 0x3a, 0x10, 0xcb, 0x7a, 0x02, 0x33, 0x5b, 0x17, 0x53, 0x20, 0x00, 0x29, 0x35 };
+    const beacon_hex = "3373fffffffffffffffffffffffffffffffffffffffe14604d57602036146024575f5ffd5b5f35801560495762001fff810690815414603c575f5ffd5b62001fff01545f5260205ff35b5f5ffd5b62001fff42064281555f359062001fff015500";
+    const history_hex = "3373fffffffffffffffffffffffffffffffffffffffe14604657602036036042575f35600143038111604257611fff81430311604257611fff9006545f5260205ff35b5f5ffd5b5f35611fff60014303065500";
+    var beacon_code: [beacon_hex.len / 2]u8 = undefined;
+    var history_code: [history_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&beacon_code, beacon_hex);
+    _ = try std.fmt.hexToBytes(&history_code, history_hex);
+    for ([_]execution.transition.Fork{ .cancun, .prague, .osaka }) |fork| {
+        var world = execution.state.State.init(a);
+        defer world.deinit();
+        _ = try world.setCode(beacon_address, &beacon_code);
+        _ = try world.setCode(history_address, &history_code);
+        var parent = std.mem.zeroes(execution.Header);
+        parent.gas_limit = 30_000_000;
+        parent.base_fee_per_gas = 1;
+        parent.state_root = try world.stateRoot();
+        var header = parent;
+        header.parent_hash = try execution.transition.headerHash(a, fork, parent);
+        header.number = 1;
+        header.timestamp = 12;
+        header.parent_beacon_block_root = .{0x42} ** 32;
+        header.transactions_root = try execution.trie.orderedRoot(a, &.{});
+        header.receipts_root = try execution.receiptsRoot(a, &.{});
+        header.withdrawals_root = try execution.trie.orderedRoot(a, &.{});
+        var trial = try world.clone(a);
+        defer trial.deinit();
+        try execution.transition.applySystemTransitions(a, &trial, .{ .fork = fork, .chain_id = 1, .coinbase = header.fee_recipient, .number = 1, .timestamp = 12, .gas_limit = header.gas_limit, .base_fee = header.base_fee_per_gas, .blob_base_fee = 1 }, header.parent_hash, header.parent_beacon_block_root);
+        header.state_root = try trial.stateRoot();
+        try testing.expectEqual(@as(u256, 0), world.getStorage(beacon_address, 12));
+        var invalid = header;
+        invalid.state_root = parent.state_root;
+        try testing.expectError(error.InvalidCommitment, execution.transition.applyBlock(a, &world, .{ .fork = fork, .parent_fork = fork, .chain_id = 1 }, parent, invalid, &.{}, &.{}));
+        try testing.expectEqualSlices(u8, &parent.state_root, &(try world.stateRoot()));
+        var result = try execution.transition.applyBlock(a, &world, .{ .fork = fork, .parent_fork = fork, .chain_id = 1 }, parent, header, &.{}, &.{});
+        defer result.deinit();
+        try testing.expectEqualSlices(u8, &header.state_root, &(try world.stateRoot()));
+        try testing.expectEqual(@as(u256, 12), world.getStorage(beacon_address, 12));
+        try testing.expectEqual(std.mem.readInt(u256, &header.parent_beacon_block_root, .big), world.getStorage(beacon_address, 8191 + 12));
+        try testing.expectEqual(if (fork == .cancun) @as(u256, 0) else std.mem.readInt(u256, &header.parent_hash, .big), world.getStorage(history_address, 0));
+    }
 }

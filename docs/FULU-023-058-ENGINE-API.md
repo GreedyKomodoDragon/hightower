@@ -11,16 +11,23 @@ stages it by hash. A forkchoice update prepares any requested build before it
 commits a staged child. The builder uses the parent state, pool transactions,
 and consensus withdrawals. Blob sidecars supply V1 blob proofs or Osaka V2
 cell proofs; the existing KZG setup converts between the two formats.
+Cancun and later execution runs the beacon-roots system call before user
+transactions. Prague and later also stores the parent execution hash at that
+point. Pool selection budgets the fork's blob limit as well as gas, leaving
+transactions that do not fit pending.
 
 The current in-memory chain accepts direct children of its canonical head.
 Execution requests that need system-contract processing return `SYNCING` until
-that transition is implemented. Side-branch reorganization and persistence
+that transition is implemented. Prague/Osaka payloads with deployed request
+queues also return `SYNCING`, even for empty request lists, because the queue
+system calls can change the state root. Building from such a parent returns an
+unsupported-transition error. Side-branch reorganization and persistence
 belong with the execution chain storage work; this server does not report an
 unvalidated request-bearing payload as `VALID`.
 
 ## Local checks
 
-`zig build test --summary all` passes 231 tests, including every supported
+`zig build test --summary all` passes 233 tests, including every supported
 method generation's empty builder flow, JWT rejection, bad payload hashes,
 canonical head changes, and V1/V2 blob bundle conversion. The dedicated
 transition and execution fixture suites pass. Debug and ReleaseSafe builds
