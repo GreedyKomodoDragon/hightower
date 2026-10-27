@@ -109,7 +109,7 @@ pub const coverage = if (builtin.is_test) struct {
 } else struct {};
 
 /// Executable opcode schedules supported by the transaction machine.
-pub const Fork = enum { london, cancun, fulu };
+pub const Fork = enum { london, paris, shanghai, cancun, prague, osaka, fulu };
 
 /// Host values shared by every frame of one transaction. Block hashes are newest first.
 pub const Environment = struct {
@@ -181,14 +181,14 @@ pub const Machine = struct {
         self.environment = environment;
         _ = try self.touchAccount(sender);
         _ = try self.touchAccount(recipient);
-        if (environment.fork == .fulu) if (state.delegationTarget(self.world.getCode(recipient))) |target| {
+        if (@intFromEnum(environment.fork) >= @intFromEnum(Fork.prague)) if (state.delegationTarget(self.world.getCode(recipient))) |target| {
             _ = try self.touchAccount(target);
         };
         _ = try self.touchAccount(environment.coinbase);
         const precompile_count: usize = switch (environment.fork) {
-            .london => 9,
+            .london, .paris, .shanghai => 9,
             .cancun => 10,
-            .fulu => 17,
+            .prague, .osaka, .fulu => 17,
         };
         for (1..precompile_count + 1) |i| {
             var address: state.Address = .{0} ** 20;
@@ -590,9 +590,9 @@ const Frame = struct {
         var precompile: state.Address = .{0} ** 20;
         precompile[19] = target[19];
         const precompile_limit: u8 = switch (if (self.machine.environment) |env| env.fork else Fork.fulu) {
-            .london => 9,
+            .london, .paris, .shanghai => 9,
             .cancun => 10,
-            .fulu => 17,
+            .prague, .osaka, .fulu => 17,
         };
         if (target[19] >= 1 and target[19] <= precompile_limit and same(target, precompile)) return error.UnsupportedPrecompile;
         const transfer = (op == Op.CALL or op == Op.CALLCODE) and value != 0;
@@ -662,7 +662,8 @@ const Frame = struct {
             }
             self.pc += 1;
             if (self.machine.environment) |env| {
-                if (env.fork == .london and (op == Op.BLOBHASH or op == Op.BLOBBASEFEE or (op >= Op.TLOAD and op <= Op.PUSH0))) return error.InvalidOpcode;
+                if (@intFromEnum(env.fork) < @intFromEnum(Fork.cancun) and (op == Op.BLOBHASH or op == Op.BLOBBASEFEE or (op >= Op.TLOAD and op <= Op.MCOPY))) return error.InvalidOpcode;
+                if (@intFromEnum(env.fork) < @intFromEnum(Fork.shanghai) and op == Op.PUSH0) return error.InvalidOpcode;
             }
             if (op >= Op.PUSH1 and op <= Op.PUSH32) {
                 try self.charge(3);

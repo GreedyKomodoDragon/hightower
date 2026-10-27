@@ -1,6 +1,7 @@
 // Pending transactions are ordered by sender nonce. A gap stays pending; only
-// consecutive nonces from current state can be selected. Replacements need a
-// 10% bump in every applicable fee cap. Eviction discards the lowest effective
+// consecutive nonces from current state can be selected within gas and blob
+// budgets. Replacements need a 10% bump in every applicable fee cap. Eviction
+// discards the lowest effective
 // tip first, then the highest nonce and transaction hash to break ties.
 //
 // sender nonce n -> n+1 -> gap -> pending later nonce
@@ -116,8 +117,8 @@ pub const Pool = struct {
         }
     }
 
-    /// Selects executable prefixes by tip within a gas limit; returned slices borrow pool bytes.
-    pub fn select(self: *const Pool, allocator: std.mem.Allocator, world: *execution.state.State, context: transition.Context, gas_limit: u64) ![][]const u8 {
+    /// Selects executable prefixes by tip within gas and blob limits; returned slices borrow pool bytes.
+    pub fn select(self: *const Pool, allocator: std.mem.Allocator, world: *execution.state.State, context: transition.Context, gas_limit: u64, max_blobs: u64) ![][]const u8 {
         var chosen: std.ArrayList([]const u8) = .empty;
         errdefer chosen.deinit(allocator);
         var used = try allocator.alloc(bool, self.entries.items.len);
@@ -126,10 +127,11 @@ pub const Pool = struct {
         const snap = try world.snapshot();
         defer world.revert(snap) catch {};
         var remaining = gas_limit;
+        var blobs_remaining = max_blobs;
         while (true) {
             var best: ?usize = null;
             for (self.entries.items, 0..) |entry, i| {
-                if (used[i] or entry.admission.nonce != world.getNonce(entry.admission.sender) or entry.admission.gas_limit > remaining) continue;
+                if (used[i] or entry.admission.nonce != world.getNonce(entry.admission.sender) or entry.admission.gas_limit > remaining or entry.admission.blob_count > blobs_remaining) continue;
                 if (best == null or better(entry, self.entries.items[best.?], context.base_fee)) best = i;
             }
             const index = best orelse break;
@@ -138,6 +140,7 @@ pub const Pool = struct {
             var outcome = transition.applyTransaction(allocator, world, context, entry.raw, remaining, 0) catch continue;
             defer outcome.deinit();
             remaining -= outcome.gas_used;
+            blobs_remaining -= entry.admission.blob_count;
             try chosen.append(allocator, entry.raw);
         }
         return chosen.toOwnedSlice(allocator);

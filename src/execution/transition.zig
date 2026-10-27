@@ -2,11 +2,13 @@
 // frame keeps the nonce and gas charge, while reverting its value transfer and
 // storage writes. Ordered receipts commit cumulative gas; withdrawals and any
 // pre-Merge issuance follow transactions before the state root is checked.
+// Cancun beacon roots and Prague parent hashes enter system contracts before
+// transactions; Prague request queues run afterward, before the state root.
 //
-// parent header -> transaction 0 -> ... -> withdrawal 0 -> roots -> commit
+// parent -> system calls -> transactions -> withdrawals -> request queues -> roots
 // A block snapshot rolls back all earlier transactions if a later check fails.
-// Supported forks: London, Cancun, and Prague-shaped Fulu. Contract creation
-// and precompiles are tracked separately.
+// Supported forks: London through Osaka/Fulu. Prague deposit logs and request
+// queues are committed after transactions; contract creation is separate.
 const std = @import("std");
 const execution = @import("execution.zig");
 const state = execution.state;
@@ -27,7 +29,7 @@ pub const Context = struct {
     block_hashes: ?[]const execution.Hash = null,
 };
 
-/// Selects block rules; callers supply up to 255 validated older hashes, newest first.
+/// Selects block rules; callers supply up to 255 older hashes and optional typed requests.
 pub const BlockContext = struct {
     fork: Fork,
     parent_fork: Fork,
@@ -35,6 +37,7 @@ pub const BlockContext = struct {
     older_hashes: []const execution.Hash = &.{},
     max_blobs_per_block: u64 = 21,
     expected_blob_hashes: []const execution.Hash = &.{},
+    expected_requests: ?[]const []const u8 = null,
 };
 
 /// Owns a receipt's logs and return bytes until deinit.
@@ -85,8 +88,8 @@ pub fn fields(tx: execution.Transaction, fork: Fork) !TxFields {
         .legacy => |v| .{ .nonce = v.nonce, .gas_limit = v.gas_limit, .to = v.to, .value = v.value, .data = v.data, .access_list = &.{}, .max_fee = v.gas_price, .priority_fee = v.gas_price },
         .access_list => |v| .{ .nonce = v.nonce, .gas_limit = v.gas_limit, .to = v.to, .value = v.value, .data = v.data, .access_list = v.access_list, .max_fee = v.gas_price, .priority_fee = v.gas_price },
         .dynamic_fee => |v| .{ .nonce = v.nonce, .gas_limit = v.gas_limit, .to = v.to, .value = v.value, .data = v.data, .access_list = v.access_list, .max_fee = v.max_fee_per_gas, .priority_fee = v.max_priority_fee_per_gas },
-        .blob => |v| if (fork == .london) error.UnsupportedTransactionType else .{ .nonce = v.nonce, .gas_limit = v.gas_limit, .to = v.to, .value = v.value, .data = v.data, .access_list = v.access_list, .max_fee = v.max_fee_per_gas, .priority_fee = v.max_priority_fee_per_gas, .blob_hashes = v.blob_versioned_hashes, .blob_fee_cap = v.max_fee_per_blob_gas },
-        .set_code => |v| if (fork != .fulu) error.UnsupportedTransactionType else .{ .nonce = v.nonce, .gas_limit = v.gas_limit, .to = v.destination, .value = v.value, .data = v.data, .access_list = v.access_list, .max_fee = v.max_fee_per_gas, .priority_fee = v.max_priority_fee_per_gas, .authorizations = v.authorization_list },
+        .blob => |v| if (@intFromEnum(fork) < @intFromEnum(Fork.cancun)) error.UnsupportedTransactionType else .{ .nonce = v.nonce, .gas_limit = v.gas_limit, .to = v.to, .value = v.value, .data = v.data, .access_list = v.access_list, .max_fee = v.max_fee_per_gas, .priority_fee = v.max_priority_fee_per_gas, .blob_hashes = v.blob_versioned_hashes, .blob_fee_cap = v.max_fee_per_blob_gas },
+        .set_code => |v| if (@intFromEnum(fork) < @intFromEnum(Fork.prague)) error.UnsupportedTransactionType else .{ .nonce = v.nonce, .gas_limit = v.gas_limit, .to = v.destination, .value = v.value, .data = v.data, .access_list = v.access_list, .max_fee = v.max_fee_per_gas, .priority_fee = v.max_priority_fee_per_gas, .authorizations = v.authorization_list },
     };
 }
 
@@ -103,7 +106,7 @@ fn intrinsicGas(tx: TxFields, fork: Fork) !u64 {
         gas = try std.math.add(u64, gas, try std.math.mul(u64, @intCast(entry.storage_keys.len), 1900));
     }
     gas = try std.math.add(u64, gas, try std.math.mul(u64, @intCast(tx.authorizations.len), 25_000));
-    if (fork == .fulu) gas = @max(gas, try std.math.add(u64, 21_000, try std.math.mul(u64, tokens, 10)));
+    if (@intFromEnum(fork) >= @intFromEnum(Fork.prague)) gas = @max(gas, try std.math.add(u64, 21_000, try std.math.mul(u64, tokens, 10)));
     return gas;
 }
 
@@ -132,6 +135,7 @@ pub const Admission = struct {
     max_fee: u256,
     priority_fee: u256,
     blob_fee_cap: ?u256,
+    blob_count: u8 = 0,
 };
 
 /// Reuses transition validation for a future nonce without changing canonical state.
@@ -145,7 +149,7 @@ pub fn validatePending(allocator: std.mem.Allocator, world: *state.State, contex
     defer world.revert(snap) catch {};
     try world.setNonce(sender, f.nonce);
     _ = try validateTransaction(allocator, world, context, decoded.value, context.gas_limit);
-    return .{ .sender = sender, .nonce = f.nonce, .gas_limit = f.gas_limit, .max_fee = f.max_fee, .priority_fee = f.priority_fee, .blob_fee_cap = f.blob_fee_cap };
+    return .{ .sender = sender, .nonce = f.nonce, .gas_limit = f.gas_limit, .max_fee = f.max_fee, .priority_fee = f.priority_fee, .blob_fee_cap = f.blob_fee_cap, .blob_count = @intCast(f.blob_hashes.len) };
 }
 
 const FrameOutcome = struct {
@@ -182,12 +186,12 @@ fn validateTransaction(allocator: std.mem.Allocator, world: *state.State, contex
     if (world.getBalance(sender) < upfront) return error.InsufficientBalance;
     if (f.nonce == std.math.maxInt(u64)) return error.InvalidNonce;
     const sender_code = world.getCode(sender);
-    if (sender_code.len != 0 and (context.fork != .fulu or state.delegationTarget(sender_code) == null)) return error.InvalidSenderCode;
+    if (sender_code.len != 0 and (@intFromEnum(context.fork) < @intFromEnum(Fork.prague) or state.delegationTarget(sender_code) == null)) return error.InvalidSenderCode;
     const recipient = f.to orelse return error.UnsupportedContractCreation;
     const precompile_limit: u8 = switch (context.fork) {
-        .london => 9,
+        .london, .paris, .shanghai => 9,
         .cancun => 10,
-        .fulu => 17,
+        .prague, .osaka, .fulu => 17,
     };
     if (recipient[19] != 0 and recipient[19] <= precompile_limit and std.mem.allEqual(u8, recipient[0..19], 0)) return error.UnsupportedExecution;
     return .{ .fields = f, .sender = sender, .recipient = recipient, .intrinsic_gas = intrinsic, .max_cost = max_cost, .effective_price = @min(f.max_fee, std.math.add(u256, context.base_fee, f.priority_fee) catch std.math.maxInt(u256)), .blob_gas = blob_gas };
@@ -290,7 +294,7 @@ pub fn applyTransaction(allocator: std.mem.Allocator, world: *state.State, conte
     const effects = try applyAuthorizations(arena.allocator(), world, context.chain_id, tx.fields.authorizations);
     const frame = try executeFrame(allocator, arena.allocator(), world, context, tx, effects);
     const spent = tx.fields.gas_limit - frame.gas_remaining;
-    const floor = if (context.fork == .fulu) try calldataFloor(tx.fields.data) else 0;
+    const floor = if (@intFromEnum(context.fork) >= @intFromEnum(Fork.prague)) try calldataFloor(tx.fields.data) else 0;
     const gas_used = @max(spent - frame.refund, floor);
     try settleFees(world, context, tx, gas_used);
     const payload: execution.ReceiptPayload = .{ .status = if (frame.success) 1 else 0, .cumulative_gas_used = std.math.add(u64, cumulative_gas, gas_used) catch return error.BlockGasLimitExceeded, .logs = frame.logs, .logs_bloom = execution.logsBloom(frame.logs) };
@@ -307,7 +311,7 @@ pub fn applyTransaction(allocator: std.mem.Allocator, world: *state.State, conte
 }
 
 /// Calculates EIP-1559's next base fee from the parent gas target.
-fn nextBaseFee(parent_gas_limit: u64, parent_gas_used: u64, parent_base_fee: u256) !u256 {
+pub fn nextBaseFee(parent_gas_limit: u64, parent_gas_used: u64, parent_base_fee: u256) !u256 {
     const target = parent_gas_limit / 2;
     if (target == 0 or parent_gas_used == target) return parent_base_fee;
     if (parent_gas_used > target) {
@@ -322,9 +326,10 @@ fn nextBaseFee(parent_gas_limit: u64, parent_gas_used: u64, parent_base_fee: u25
 pub fn headerHash(allocator: std.mem.Allocator, fork: Fork, header: execution.Header) !execution.Hash {
     const prefix = .{ header.parent_hash, header.ommers_hash, header.fee_recipient, header.state_root, header.transactions_root, header.receipts_root, header.logs_bloom, header.difficulty, header.number, header.gas_limit, header.gas_used, header.timestamp, header.extra_data, header.prev_randao, header.nonce, header.base_fee_per_gas };
     const encoded = switch (fork) {
-        .london => try execution.encode(allocator, prefix),
+        .london, .paris => try execution.encode(allocator, prefix),
+        .shanghai => try execution.encode(allocator, prefix ++ .{header.withdrawals_root}),
         .cancun => try execution.encode(allocator, prefix ++ .{ header.withdrawals_root, header.blob_gas_used, header.excess_blob_gas, header.parent_beacon_block_root }),
-        .fulu => try execution.encode(allocator, prefix ++ .{ header.withdrawals_root, header.blob_gas_used, header.excess_blob_gas, header.parent_beacon_block_root, header.requests_hash }),
+        .prague, .osaka, .fulu => try execution.encode(allocator, prefix ++ .{ header.withdrawals_root, header.blob_gas_used, header.excess_blob_gas, header.parent_beacon_block_root, header.requests_hash }),
     };
     defer allocator.free(encoded);
     var hash: execution.Hash = undefined;
@@ -334,7 +339,7 @@ pub fn headerHash(allocator: std.mem.Allocator, fork: Fork, header: execution.He
 
 /// Calculates the EIP-4844 blob base fee using the active fork's update fraction.
 pub fn blobBaseFee(fork: Fork, excess_blob_gas: u64) !u256 {
-    if (fork == .london) return error.UnsupportedBlobBaseFee;
+    if (@intFromEnum(fork) < @intFromEnum(Fork.cancun)) return error.UnsupportedBlobBaseFee;
     const denominator: u512 = if (fork == .cancun) 3_338_477 else 5_007_716;
     var term: u512 = denominator;
     var sum: u512 = 0;
@@ -359,10 +364,10 @@ fn validateBlockHeader(allocator: std.mem.Allocator, block: BlockContext, parent
     if (parent.gas_used > parent.gas_limit) return error.InvalidParentGasUsed;
     if (header.gas_limit < 5000 or @abs(@as(i128, header.gas_limit) - @as(i128, parent.gas_limit)) >= parent.gas_limit / 1024) return error.InvalidGasLimit;
     if (header.base_fee_per_gas != try nextBaseFee(parent.gas_limit, parent.gas_used, parent.base_fee_per_gas)) return error.InvalidBaseFee;
-    if (block.fork == .london and withdrawals.len != 0) return error.UnsupportedWithdrawals;
-    if (block.fork != .london) {
+    if (@intFromEnum(block.fork) < @intFromEnum(Fork.shanghai) and withdrawals.len != 0) return error.UnsupportedWithdrawals;
+    if (@intFromEnum(block.fork) >= @intFromEnum(Fork.cancun)) {
         const target: u64 = if (block.fork == .cancun) 393_216 else 786_432;
-        const prior: u64 = if (block.parent_fork == .london) 0 else std.math.add(u64, parent.excess_blob_gas, parent.blob_gas_used) catch return error.InvalidExcessBlobGas;
+        const prior: u64 = if (@intFromEnum(block.parent_fork) < @intFromEnum(Fork.cancun)) 0 else std.math.add(u64, parent.excess_blob_gas, parent.blob_gas_used) catch return error.InvalidExcessBlobGas;
         if (header.excess_blob_gas != prior -| target) return error.InvalidExcessBlobGas;
         const max_blobs: u64 = if (block.fork == .cancun) 6 else block.max_blobs_per_block;
         const max_blob_gas = std.math.mul(u64, max_blobs, 131_072) catch return error.InvalidBlobGasUsed;
@@ -408,7 +413,7 @@ fn blockResult(arena: *std.heap.ArenaAllocator, world: *state.State, fork: Fork,
     const tx_root = try execution.trie.orderedRoot(allocator, transactions);
     const receipts_root = try execution.receiptsRoot(allocator, receipts);
     const bloom = execution.receiptsBloom(receipts);
-    const withdrawals_root: ?execution.Hash = if (fork == .london) null else blk: {
+    const withdrawals_root: ?execution.Hash = if (@intFromEnum(fork) < @intFromEnum(Fork.shanghai)) null else blk: {
         const encoded = try allocator.alloc([]const u8, withdrawals.len);
         for (withdrawals, 0..) |withdrawal, i| encoded[i] = try execution.encode(allocator, withdrawal);
         break :blk try execution.trie.orderedRoot(allocator, encoded);
@@ -420,6 +425,107 @@ fn blockResult(arena: *std.heap.ArenaAllocator, world: *state.State, fork: Fork,
 fn verifyBlockCommitments(header: execution.Header, result: BlockResult) !void {
     if (!std.mem.eql(u8, &result.transactions_root, &header.transactions_root) or !std.mem.eql(u8, &result.receipts_root, &header.receipts_root) or !std.mem.eql(u8, &result.state_root, &header.state_root) or !std.mem.eql(u8, &result.logs_bloom, &header.logs_bloom)) return error.InvalidCommitment;
     if (result.withdrawals_root) |root| if (!std.mem.eql(u8, &root, &header.withdrawals_root)) return error.InvalidCommitment;
+}
+
+const system_address: execution.Address = .{0xff} ** 19 ++ .{0xfe};
+const beacon_roots_address: execution.Address = .{ 0x00, 0x0f, 0x3d, 0xf6, 0xd7, 0x32, 0x80, 0x7e, 0xf1, 0x31, 0x9f, 0xb7, 0xb8, 0xbb, 0x85, 0x22, 0xd0, 0xbe, 0xac, 0x02 };
+const history_address: execution.Address = .{ 0x00, 0x00, 0xf9, 0x08, 0x27, 0xf1, 0xc5, 0x3a, 0x10, 0xcb, 0x7a, 0x02, 0x33, 0x5b, 0x17, 0x53, 0x20, 0x00, 0x29, 0x35 };
+pub const withdrawal_requests_address: execution.Address = .{ 0x00, 0x00, 0x09, 0x61, 0xef, 0x48, 0x0e, 0xb5, 0x5e, 0x80, 0xd1, 0x9a, 0xd8, 0x35, 0x79, 0xa6, 0x4c, 0x00, 0x70, 0x02 };
+pub const consolidation_requests_address: execution.Address = .{ 0x00, 0x00, 0xbb, 0xdd, 0xc7, 0xce, 0x48, 0x86, 0x42, 0xfb, 0x57, 0x9f, 0x8b, 0x00, 0xf3, 0xa5, 0x90, 0x00, 0x72, 0x51 };
+const deposit_event_signature: execution.Hash = .{ 0x64, 0x9b, 0xbc, 0x62, 0xd0, 0xe3, 0x13, 0x42, 0xaf, 0xea, 0x4e, 0x5c, 0xd8, 0x2d, 0x40, 0x49, 0xe7, 0xe1, 0xee, 0x91, 0x2f, 0xc0, 0x88, 0x9a, 0xa7, 0x90, 0x80, 0x3b, 0xe3, 0x90, 0x38, 0xc5 };
+const deposit_address: execution.Address = .{ 0x00, 0x00, 0x00, 0x00, 0x21, 0x9a, 0xb5, 0x40, 0x35, 0x6c, 0xbb, 0x83, 0x9c, 0xbe, 0x05, 0x30, 0x3d, 0x77, 0x05, 0xfa };
+
+/// Executes a fork system call and returns its owned output; absent code has empty output.
+fn runSystemCall(allocator: std.mem.Allocator, world: *state.State, context: Context, address: execution.Address, input: []const u8) ![]u8 {
+    const code = world.getCode(address);
+    if (code.len == 0) return allocator.dupe(u8, &.{});
+    var machine = evm.Machine.init(allocator, world);
+    defer machine.deinit();
+    try machine.configure(.{ .fork = context.fork, .origin = system_address, .gas_price = 0, .coinbase = context.coinbase, .timestamp = context.timestamp, .number = context.number, .prev_randao = std.mem.readInt(u256, &context.prev_randao, .big), .gas_limit = context.gas_limit, .chain_id = context.chain_id, .base_fee = context.base_fee, .blob_base_fee = context.blob_base_fee orelse 0, .blob_base_fee_supported = context.blob_base_fee != null, .block_hashes = context.block_hashes }, system_address, address, &.{});
+    var result = try machine.run(.{ .code = code, .gas = 30_000_000, .caller = system_address, .callee = address, .data = input });
+    if (result.status != .success) {
+        result.deinit(allocator);
+        return error.InvalidSystemCall;
+    }
+    return result.output;
+}
+
+/// Applies Cancun beacon-root and Prague parent-hash writes before user transactions.
+pub fn applySystemTransitions(allocator: std.mem.Allocator, world: *state.State, context: Context, parent_hash: execution.Hash, parent_beacon_root: execution.Hash) !void {
+    if (@intFromEnum(context.fork) >= @intFromEnum(Fork.cancun)) allocator.free(try runSystemCall(allocator, world, context, beacon_roots_address, &parent_beacon_root));
+    if (@intFromEnum(context.fork) >= @intFromEnum(Fork.prague)) allocator.free(try runSystemCall(allocator, world, context, history_address, &parent_hash));
+}
+
+/// Extracts deposit data and runs ordered Prague queue calls after transactions.
+pub fn processExecutionRequests(allocator: std.mem.Allocator, world: *state.State, context: Context, receipts: []const execution.Receipt) ![][]const u8 {
+    var requests: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (requests.items) |raw| allocator.free(raw);
+        requests.deinit(allocator);
+    }
+    if (@intFromEnum(context.fork) < @intFromEnum(Fork.prague)) return requests.toOwnedSlice(allocator);
+    var deposits: std.ArrayList(u8) = .empty;
+    defer deposits.deinit(allocator);
+    for (receipts) |receipt| {
+        const payload = switch (receipt) {
+            inline else => |value| value,
+        };
+        for (payload.logs) |log| {
+            if (log.topics.len == 0 or !std.mem.eql(u8, &log.topics[0], &deposit_event_signature)) continue;
+            // shortcut: this in-memory chain has no per-network deposit-contract config; decline a matching event from another address.
+            if (!std.mem.eql(u8, &log.address, &deposit_address)) return error.UnsupportedDepositContract;
+            if (log.data.len != 576) return error.InvalidDepositLog;
+            const offsets = [_]u256{ 160, 256, 320, 384, 512 };
+            const lengths = [_]u256{ 48, 32, 8, 96, 8 };
+            for (offsets, lengths, 0..) |offset, length, i| {
+                if (std.mem.readInt(u256, log.data[i * 32 ..][0..32], .big) != offset or std.mem.readInt(u256, log.data[@intCast(offset)..][0..32], .big) != length) return error.InvalidDepositLog;
+                try deposits.appendSlice(allocator, log.data[@as(usize, @intCast(offset)) + 32 ..][0..@intCast(length)]);
+            }
+        }
+    }
+    if (deposits.items.len / 192 > 8192) return error.TooManyDepositRequests;
+    if (deposits.items.len != 0) {
+        const raw = try allocator.alloc(u8, deposits.items.len + 1);
+        raw[0] = 0;
+        @memcpy(raw[1..], deposits.items);
+        requests.append(allocator, raw) catch |err| {
+            allocator.free(raw);
+            return err;
+        };
+    }
+    const has_withdrawals = world.getCode(withdrawal_requests_address).len != 0;
+    const has_consolidations = world.getCode(consolidation_requests_address).len != 0;
+    // shortcut: synthetic test chains without Prague predeploys keep their empty-request behavior; require both contracts once either is present.
+    if (!has_withdrawals and !has_consolidations) return requests.toOwnedSlice(allocator);
+    if (!has_withdrawals or !has_consolidations) return error.UnsupportedRequestQueues;
+    inline for (.{ .{ withdrawal_requests_address, @as(u8, 1), @as(usize, 76), @as(usize, 16) }, .{ consolidation_requests_address, @as(u8, 2), @as(usize, 116), @as(usize, 2) } }) |spec| {
+        const output = try runSystemCall(allocator, world, context, spec[0], &.{});
+        defer allocator.free(output);
+        if (output.len % spec[2] != 0 or output.len / spec[2] > spec[3]) return error.InvalidExecutionRequests;
+        if (output.len != 0) {
+            const raw = try allocator.alloc(u8, output.len + 1);
+            raw[0] = spec[1];
+            @memcpy(raw[1..], output);
+            requests.append(allocator, raw) catch |err| {
+                allocator.free(raw);
+                return err;
+            };
+        }
+    }
+    return requests.toOwnedSlice(allocator);
+}
+
+/// Commits ordered, nonempty EIP-7685 typed request byte strings.
+pub fn requestsHash(allocator: std.mem.Allocator, requests: []const []const u8) !execution.Hash {
+    const hashes = try allocator.alloc(u8, requests.len * 32);
+    defer allocator.free(hashes);
+    for (requests, 0..) |raw, i| {
+        if (raw.len < 2) return error.InvalidExecutionRequests;
+        std.crypto.hash.sha2.Sha256.hash(raw, hashes[i * 32 ..][0..32], .{});
+    }
+    var result: execution.Hash = undefined;
+    std.crypto.hash.sha2.Sha256.hash(hashes, &result, .{});
+    return result;
 }
 
 /// Applies ordered transactions and withdrawals, checking all claimed roots atomically.
@@ -435,7 +541,8 @@ pub fn applyBlock(allocator: std.mem.Allocator, world: *state.State, block: Bloc
     const snapshot = try world.snapshot();
     var open = true;
     errdefer if (open) world.revert(snapshot) catch {};
-    const context: Context = .{ .fork = block.fork, .chain_id = block.chain_id, .coinbase = header.fee_recipient, .number = header.number, .timestamp = header.timestamp, .gas_limit = header.gas_limit, .base_fee = header.base_fee_per_gas, .prev_randao = header.prev_randao, .difficulty = header.difficulty, .blob_base_fee = if (block.fork == .london) null else try blobBaseFee(block.fork, header.excess_blob_gas), .block_hashes = block_hashes };
+    const context: Context = .{ .fork = block.fork, .chain_id = block.chain_id, .coinbase = header.fee_recipient, .number = header.number, .timestamp = header.timestamp, .gas_limit = header.gas_limit, .base_fee = header.base_fee_per_gas, .prev_randao = header.prev_randao, .difficulty = header.difficulty, .blob_base_fee = if (@intFromEnum(block.fork) < @intFromEnum(Fork.cancun)) null else try blobBaseFee(block.fork, header.excess_blob_gas), .block_hashes = block_hashes };
+    try applySystemTransitions(arena.allocator(), world, context, parent_hash, header.parent_beacon_block_root);
     const gas_used = try applyBlockTransactions(arena.allocator(), world, context, transactions, receipts);
     var blob_gas_used: u64 = 0;
     var blob_index: usize = 0;
@@ -455,6 +562,13 @@ pub fn applyBlock(allocator: std.mem.Allocator, world: *state.State, block: Bloc
     if (blob_gas_used != header.blob_gas_used) return error.InvalidBlobGasUsed;
     if (gas_used != header.gas_used) return error.InvalidGasUsed;
     try applyBlockCredits(world, block.fork, header.fee_recipient, withdrawals);
+    const requests = try processExecutionRequests(arena.allocator(), world, context, receipts);
+    if (block.expected_requests) |expected| {
+        if (requests.len != expected.len) return error.InvalidExecutionRequests;
+        for (requests, expected) |actual, claimed| if (!std.mem.eql(u8, actual, claimed)) return error.InvalidExecutionRequests;
+        const requests_hash = try requestsHash(arena.allocator(), requests);
+        if (!std.mem.eql(u8, &requests_hash, &header.requests_hash)) return error.InvalidExecutionRequests;
+    }
     const result = try blockResult(&arena, world, block.fork, transactions, withdrawals, receipts, gas_used);
     try verifyBlockCommitments(header, result);
     try world.commit(snapshot);

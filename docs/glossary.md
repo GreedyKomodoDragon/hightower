@@ -54,6 +54,20 @@ Chain:      [Block 0] ───────────────────�
 | Delegation indicator | The 23-byte code marker that points an account at another address's executable code under EIP-7702. |
 | Transaction pool | The node's bounded collection of signed transactions awaiting possible block inclusion. |
 | JSON-RPC | The HTTP request and response format used by applications to call execution methods such as `eth_getBalance`. |
+| Engine API | The authenticated JSON-RPC connection through which a consensus client validates execution payloads, chooses the execution head, and requests block builds. |
+| JSON Web Token (JWT) | A short-lived signed credential that proves an Engine API request came from a peer with the shared secret. |
+| Payload status | An execution client's verdict about a proposed payload, such as valid, invalid, syncing, or accepted pending full validation. |
+| Latest valid hash | The most recent execution block hash on a branch that the execution client has fully validated. |
+| Safe block | A fork-choice checkpoint expected to remain on the chosen execution chain. |
+| Finalized block | A fork-choice checkpoint whose consensus history has been finalized. |
+| Payload ID | An eight-byte identifier for a block-building job started by a forkchoice update. |
+| Paris | The execution upgrade associated with Ethereum's switch from mining to proof of stake. |
+| Shanghai | The execution upgrade that added validator withdrawals to block payloads. |
+| Cancun | The execution upgrade that added blob transactions and blob gas fields. |
+| Prague | The execution upgrade that added execution requests and set-code transactions. |
+| Osaka | The execution upgrade whose Engine API builder returns blob cell proofs in `getPayloadV5`. |
+| Fulu | The consensus upgrade paired with Osaka, including expanded blob availability rules. |
+| Blob bundle | The blobs, commitments, and proofs returned by an execution payload builder for blob transactions. |
 | Execution receipt | The status, gas tally, bloom, and logs produced by a transaction. |
 | Execution account | An address's nonce, balance, storage root, and code hash, encoded into the execution state trie. |
 | Ethereum Virtual Machine (EVM) | The execution engine that runs a contract's bytecode one instruction at a time. |
@@ -152,3 +166,7 @@ Chain:      [Block 0] ───────────────────�
 | BLS-to-execution change | A signed operation that replaces BLS withdrawal credentials with an execution-layer withdrawal address. |
 | Operation pool | A node's temporary collection of validated signed operations that a proposer may include in a block. |
 | Payload builder | An execution engine component that assembles a block's execution payload from a selected parent and proposer attributes. |
+| System call | A fork-required EVM call made by the execution client outside the block's transaction list and gas accounting. |
+| Beacon roots contract | The Cancun system contract that stores each block's parent beacon root alongside its timestamp for later EVM reads. |
+| History storage contract | The Prague system contract that stores recent parent execution block hashes for EVM reads. |
+| Execution request queue | A Prague system contract that collects withdrawal or consolidation requests from transactions and releases them after block execution. |

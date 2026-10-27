@@ -313,6 +313,80 @@ pub fn build(b: *std.Build) void {
     });
     consensus_mod.addImport("blob", blob_mod);
     mod.addImport("consensus", consensus_mod);
+    const engine_wire_mod = b.createModule(.{
+        .root_source_file = b.path("src/engine/wire.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "fulu", .module = fulu_mod },
+            .{ .name = "consensus_preset", .module = consensus_preset_mod },
+        },
+    });
+    const engine_jwt_mod = b.createModule(.{
+        .root_source_file = b.path("src/engine/jwt.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const engine_client_mod = b.createModule(.{
+        .root_source_file = b.path("src/engine/client.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "consensus", .module = consensus_mod },
+            .{ .name = "fulu", .module = fulu_mod },
+            .{ .name = "ssz", .module = ssz_mod },
+            .{ .name = "consensus_preset", .module = consensus_preset_mod },
+            .{ .name = "engine_wire", .module = engine_wire_mod },
+            .{ .name = "engine_jwt", .module = engine_jwt_mod },
+        },
+    });
+    mod.addImport("engine_client", engine_client_mod);
+    const engine_server_mod = b.createModule(.{
+        .root_source_file = b.path("src/engine/server.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "execution", .module = execution_mod },
+            .{ .name = "rlp", .module = rlp_mod },
+            .{ .name = "ckzg", .module = ckzg_mod },
+            .{ .name = "consensus", .module = consensus_mod },
+            .{ .name = "fulu", .module = fulu_mod },
+            .{ .name = "ssz", .module = ssz_mod },
+            .{ .name = "consensus_preset", .module = consensus_preset_mod },
+            .{ .name = "engine_wire", .module = engine_wire_mod },
+            .{ .name = "engine_jwt", .module = engine_jwt_mod },
+            .{ .name = "engine_client", .module = engine_client_mod },
+        },
+    });
+    mod.addImport("engine_server", engine_server_mod);
+    const engine_probe = b.addExecutable(.{
+        .name = "hightower-engine-probe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/engine/probe.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "engine_client", .module = engine_client_mod },
+                .{ .name = "consensus", .module = consensus_mod },
+            },
+        }),
+    });
+    const engine_probe_step = b.step("engine-probe", "Build the local Engine API interoperability probe");
+    engine_probe_step.dependOn(&b.addInstallArtifact(engine_probe, .{}).step);
+    const engine_test_server = b.addExecutable(.{
+        .name = "hightower-engine-test-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/engine/test_server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "execution", .module = execution_mod },
+                .{ .name = "engine_server", .module = engine_server_mod },
+            },
+        }),
+    });
+    const engine_test_server_step = b.step("engine-test-server", "Build the loopback Engine API test server");
+    engine_test_server_step.dependOn(&b.addInstallArtifact(engine_test_server, .{}).step);
     const api_mod = b.addModule("hightower_api", .{
         .root_source_file = b.path("src/api/root.zig"),
         .target = target,
@@ -414,6 +488,10 @@ pub fn build(b: *std.Build) void {
     const run_tests_merkle = b.addRunArtifact(merkle_tests);
     const run_fulu_tests = b.addRunArtifact(fulu_tests);
     const run_consensus_tests = b.addRunArtifact(consensus_tests);
+    const engine_client_tests = b.addTest(.{ .root_module = engine_client_mod });
+    const run_engine_client_tests = b.addRunArtifact(engine_client_tests);
+    const engine_server_tests = b.addTest(.{ .root_module = engine_server_mod });
+    const run_engine_server_tests = b.addRunArtifact(engine_server_tests);
     const run_api_tests = b.addRunArtifact(api_tests);
 
     // A top level step for running all tests. dependOn can be called multiple
@@ -423,6 +501,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_tests.step);
     const run_execution_tests = b.addRunArtifact(execution_tests);
     test_step.dependOn(&run_execution_tests.step);
+    test_step.dependOn(&run_engine_client_tests.step);
+    test_step.dependOn(&run_engine_server_tests.step);
     const run_evm_tests = b.addRunArtifact(evm_tests);
     test_step.dependOn(&run_evm_tests.step);
     const run_bloom_filter_tests = b.addRunArtifact(bloom_filter_tests);

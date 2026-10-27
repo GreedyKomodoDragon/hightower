@@ -54,13 +54,20 @@ pub const Chain = struct {
         self.* = undefined;
     }
 
-    /// Validates and appends the next canonical block against ordered consensus blob hashes.
-    pub fn append(self: *Chain, world: *execution.state.State, header: execution.Header, transactions: []const []const u8, withdrawals: []const execution.Withdrawal, expected_blob_hashes: []const execution.Hash) !void {
+    /// Validates and appends the next canonical block against ordered blob hashes and requests.
+    pub fn append(self: *Chain, world: *execution.state.State, header: execution.Header, transactions: []const []const u8, withdrawals: []const execution.Withdrawal, expected_blob_hashes: []const execution.Hash, expected_requests: ?[]const []const u8) !void {
         const parent = self.latest().header;
+        const older_hashes = try self.olderHashes(self.allocator);
+        defer self.allocator.free(older_hashes);
         const snap = try world.snapshot();
         var open = true;
         errdefer if (open) world.revert(snap) catch {};
-        var result = try transition.applyBlock(self.allocator, world, .{ .fork = self.fork, .parent_fork = self.fork, .chain_id = self.chain_id, .expected_blob_hashes = expected_blob_hashes }, parent, header, transactions, withdrawals);
+        const max_blobs: u64 = switch (self.fork) {
+            .cancun => 6,
+            .prague, .osaka => 9,
+            else => 21,
+        };
+        var result = try transition.applyBlock(self.allocator, world, .{ .fork = self.fork, .parent_fork = self.fork, .chain_id = self.chain_id, .older_hashes = older_hashes, .max_blobs_per_block = max_blobs, .expected_blob_hashes = expected_blob_hashes, .expected_requests = expected_requests }, parent, header, transactions, withdrawals);
         var result_owned = true;
         errdefer if (result_owned) result.deinit();
         var record = try self.copyRecord(header, transactions, withdrawals, result, world);
@@ -86,6 +93,14 @@ pub const Chain = struct {
     pub fn byHash(self: *const Chain, hash: execution.Hash) ?*const Record {
         for (self.records.items) |*record| if (std.mem.eql(u8, &record.hash, &hash)) return record;
         return null;
+    }
+
+    /// Copies up to 255 canonical ancestors before the current head, newest first.
+    pub fn olderHashes(self: *const Chain, allocator: std.mem.Allocator) ![]execution.Hash {
+        const count = @min(self.records.items.len - 1, 255);
+        const hashes = try allocator.alloc(execution.Hash, count);
+        for (hashes, 0..) |*hash, i| hash.* = self.records.items[self.records.items.len - 2 - i].hash;
+        return hashes;
     }
 
     /// Locates a transaction and its zero-based index in canonical history.
