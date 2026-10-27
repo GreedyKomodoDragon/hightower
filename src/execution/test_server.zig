@@ -48,7 +48,7 @@ pub fn main(init: std.process.Init) !void {
     next.logs_bloom = execution.receiptsBloom(&.{outcome.receipt});
     next.withdrawals_root = try execution.trie.orderedRoot(a, &.{});
     next.gas_used = outcome.gas_used;
-    try chain.append(&world, next, &.{raw}, &.{}, &.{});
+    try chain.append(&world, next, &.{raw}, &.{}, &.{}, null);
     var pool = execution.pool.Pool.init(a, .{});
     defer pool.deinit();
     var settings = try execution.kzg.loadTrustedSetup("src/execution/trusted_setup.txt");

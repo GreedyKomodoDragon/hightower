@@ -962,3 +962,79 @@ test "Cancun and Prague system calls update roots before block commitment" {
         try testing.expectEqual(if (fork == .cancun) @as(u256, 0) else std.mem.readInt(u256, &header.parent_hash, .big), world.getStorage(history_address, 0));
     }
 }
+
+// Checks empty and queued responses from the pinned Osaka predeploy bytecode.
+test "Osaka request queue calls execute installed Geth predeploys" {
+    const a = testing.allocator;
+    var world = execution.state.State.init(a);
+    defer world.deinit();
+    inline for (.{
+        .{ "3373fffffffffffffffffffffffffffffffffffffffe1460cb5760115f54807fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff146101f457600182026001905f5b5f82111560685781019083028483029004916001019190604d565b909390049250505036603814608857366101f457346101f4575f5260205ff35b34106101f457600154600101600155600354806003026004013381556001015f35815560010160203590553360601b5f5260385f601437604c5fa0600101600355005b6003546002548082038060101160df575060105b5f5b8181146101835782810160030260040181604c02815460601b8152601401816001015481526020019060020154807fffffffffffffffffffffffffffffffff00000000000000000000000000000000168252906010019060401c908160381c81600701538160301c81600601538160281c81600501538160201c81600401538160181c81600301538160101c81600201538160081c81600101535360010160e1565b910180921461019557906002556101a0565b90505f6002555f6003555b5f54807fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff14156101cd57505f5b6001546002828201116101e25750505f6101e8565b01600290035b5f555f600155604c025ff35b5f5ffd", execution.transition.withdrawal_requests_address },
+        .{ "3373fffffffffffffffffffffffffffffffffffffffe1460d35760115f54807fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff1461019a57600182026001905f5b5f82111560685781019083028483029004916001019190604d565b9093900492505050366060146088573661019a573461019a575f5260205ff35b341061019a57600154600101600155600354806004026004013381556001015f358155600101602035815560010160403590553360601b5f5260605f60143760745fa0600101600355005b6003546002548082038060021160e7575060025b5f5b8181146101295782810160040260040181607402815460601b815260140181600101548152602001816002015481526020019060030154905260010160e9565b910180921461013b5790600255610146565b90505f6002555f6003555b5f54807fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff141561017357505f5b6001546001828201116101885750505f61018e565b01600190035b5f555f6001556074025ff35b5f5ffd", execution.transition.consolidation_requests_address },
+    }) |item| {
+        const code_hex = item[0];
+        const code = try a.alloc(u8, code_hex.len / 2);
+        defer a.free(code);
+        _ = try std.fmt.hexToBytes(code, code_hex);
+        _ = try world.setCode(item[1], code);
+        try world.setStorage(item[1], 0, std.math.maxInt(u256));
+    }
+    const empty = try execution.transition.processExecutionRequests(a, &world, .{ .fork = .osaka, .chain_id = 1337, .coinbase = .{0} ** 20, .number = 1, .timestamp = 1, .gas_limit = 30_000_000, .base_fee = 1, .blob_base_fee = 1 }, &.{});
+    defer a.free(empty);
+    try testing.expectEqual(@as(usize, 0), empty.len);
+    try testing.expectEqual(@as(u256, 0), world.getStorage(execution.transition.withdrawal_requests_address, 0));
+    try testing.expectEqual(@as(u256, 0), world.getStorage(execution.transition.consolidation_requests_address, 0));
+    try world.setStorage(execution.transition.withdrawal_requests_address, 3, 1);
+    const queued = try execution.transition.processExecutionRequests(a, &world, .{ .fork = .osaka, .chain_id = 1337, .coinbase = .{0} ** 20, .number = 1, .timestamp = 1, .gas_limit = 30_000_000, .base_fee = 1, .blob_base_fee = 1 }, &.{});
+    defer {
+        for (queued) |raw| a.free(raw);
+        a.free(queued);
+    }
+    try testing.expectEqual(@as(usize, 1), queued.len);
+    try testing.expectEqual(@as(usize, 77), queued[0].len);
+    try testing.expectEqual(@as(u8, 1), queued[0][0]);
+    try world.setStorage(execution.transition.consolidation_requests_address, 3, 1);
+    const consolidated = try execution.transition.processExecutionRequests(a, &world, .{ .fork = .osaka, .chain_id = 1337, .coinbase = .{0} ** 20, .number = 1, .timestamp = 1, .gas_limit = 30_000_000, .base_fee = 1, .blob_base_fee = 1 }, &.{});
+    defer {
+        for (consolidated) |raw| a.free(raw);
+        a.free(consolidated);
+    }
+    try testing.expectEqual(@as(usize, 1), consolidated.len);
+    try testing.expectEqual(@as(usize, 117), consolidated[0].len);
+    try testing.expectEqual(@as(u8, 2), consolidated[0][0]);
+}
+
+// Checks deposit event extraction and rejects a malformed event layout.
+test "Prague deposit logs become ordered execution request bytes" {
+    const a = testing.allocator;
+    var world = execution.state.State.init(a);
+    defer world.deinit();
+    var data: [576]u8 = .{0} ** 576;
+    const offsets = [_]usize{ 160, 256, 320, 384, 512 };
+    const lengths = [_]usize{ 48, 32, 8, 96, 8 };
+    for (offsets, lengths, 0..) |offset, length, i| {
+        std.mem.writeInt(u256, data[i * 32 ..][0..32], offset, .big);
+        std.mem.writeInt(u256, data[offset..][0..32], length, .big);
+        @memset(data[offset + 32 ..][0..length], @intCast(i + 1));
+    }
+    var topic: execution.Hash = undefined;
+    _ = try std.fmt.hexToBytes(&topic, "649bbc62d0e31342afea4e5cd82d4049e7e1ee912fc0889aa790803be39038c5");
+    const log: execution.Log = .{ .address = .{ 0x00, 0x00, 0x00, 0x00, 0x21, 0x9a, 0xb5, 0x40, 0x35, 0x6c, 0xbb, 0x83, 0x9c, 0xbe, 0x05, 0x30, 0x3d, 0x77, 0x05, 0xfa }, .topics = &.{topic}, .data = &data };
+    const receipt: execution.Receipt = .{ .legacy = .{ .status = 1, .cumulative_gas_used = 0, .logs_bloom = .{0} ** 256, .logs = &.{log} } };
+    const context: execution.transition.Context = .{ .fork = .prague, .chain_id = 1, .coinbase = .{0} ** 20, .number = 1, .timestamp = 1, .gas_limit = 30_000_000, .base_fee = 1, .blob_base_fee = 1 };
+    const requests = try execution.transition.processExecutionRequests(a, &world, context, &.{receipt});
+    defer {
+        for (requests) |raw| a.free(raw);
+        a.free(requests);
+    }
+    try testing.expectEqual(@as(usize, 1), requests.len);
+    try testing.expectEqual(@as(usize, 193), requests[0].len);
+    try testing.expectEqual(@as(u8, 0), requests[0][0]);
+    var position: usize = 1;
+    for (lengths, 0..) |length, i| {
+        for (requests[0][position..][0..length]) |byte| try testing.expectEqual(@as(u8, @intCast(i + 1)), byte);
+        position += length;
+    }
+    data[31] = 0;
+    try testing.expectError(error.InvalidDepositLog, execution.transition.processExecutionRequests(a, &world, context, &.{receipt}));
+}

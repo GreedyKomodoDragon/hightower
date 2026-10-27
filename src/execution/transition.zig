@@ -3,12 +3,12 @@
 // storage writes. Ordered receipts commit cumulative gas; withdrawals and any
 // pre-Merge issuance follow transactions before the state root is checked.
 // Cancun beacon roots and Prague parent hashes enter system contracts before
-// transactions, so EVM reads and the final state commitment see those writes.
+// transactions; Prague request queues run afterward, before the state root.
 //
-// parent header -> system calls -> transactions -> withdrawals -> roots -> commit
+// parent -> system calls -> transactions -> withdrawals -> request queues -> roots
 // A block snapshot rolls back all earlier transactions if a later check fails.
-// Supported forks: London through Osaka/Fulu, with request-producing system
-// transitions still pending. Contract creation and precompiles are separate.
+// Supported forks: London through Osaka/Fulu. Prague deposit logs and request
+// queues are committed after transactions; contract creation is separate.
 const std = @import("std");
 const execution = @import("execution.zig");
 const state = execution.state;
@@ -29,7 +29,7 @@ pub const Context = struct {
     block_hashes: ?[]const execution.Hash = null,
 };
 
-/// Selects block rules; callers supply up to 255 validated older hashes, newest first.
+/// Selects block rules; callers supply up to 255 older hashes and optional typed requests.
 pub const BlockContext = struct {
     fork: Fork,
     parent_fork: Fork,
@@ -37,6 +37,7 @@ pub const BlockContext = struct {
     older_hashes: []const execution.Hash = &.{},
     max_blobs_per_block: u64 = 21,
     expected_blob_hashes: []const execution.Hash = &.{},
+    expected_requests: ?[]const []const u8 = null,
 };
 
 /// Owns a receipt's logs and return bytes until deinit.
@@ -429,23 +430,102 @@ fn verifyBlockCommitments(header: execution.Header, result: BlockResult) !void {
 const system_address: execution.Address = .{0xff} ** 19 ++ .{0xfe};
 const beacon_roots_address: execution.Address = .{ 0x00, 0x0f, 0x3d, 0xf6, 0xd7, 0x32, 0x80, 0x7e, 0xf1, 0x31, 0x9f, 0xb7, 0xb8, 0xbb, 0x85, 0x22, 0xd0, 0xbe, 0xac, 0x02 };
 const history_address: execution.Address = .{ 0x00, 0x00, 0xf9, 0x08, 0x27, 0xf1, 0xc5, 0x3a, 0x10, 0xcb, 0x7a, 0x02, 0x33, 0x5b, 0x17, 0x53, 0x20, 0x00, 0x29, 0x35 };
+pub const withdrawal_requests_address: execution.Address = .{ 0x00, 0x00, 0x09, 0x61, 0xef, 0x48, 0x0e, 0xb5, 0x5e, 0x80, 0xd1, 0x9a, 0xd8, 0x35, 0x79, 0xa6, 0x4c, 0x00, 0x70, 0x02 };
+pub const consolidation_requests_address: execution.Address = .{ 0x00, 0x00, 0xbb, 0xdd, 0xc7, 0xce, 0x48, 0x86, 0x42, 0xfb, 0x57, 0x9f, 0x8b, 0x00, 0xf3, 0xa5, 0x90, 0x00, 0x72, 0x51 };
+const deposit_event_signature: execution.Hash = .{ 0x64, 0x9b, 0xbc, 0x62, 0xd0, 0xe3, 0x13, 0x42, 0xaf, 0xea, 0x4e, 0x5c, 0xd8, 0x2d, 0x40, 0x49, 0xe7, 0xe1, 0xee, 0x91, 0x2f, 0xc0, 0x88, 0x9a, 0xa7, 0x90, 0x80, 0x3b, 0xe3, 0x90, 0x38, 0xc5 };
+const deposit_address: execution.Address = .{ 0x00, 0x00, 0x00, 0x00, 0x21, 0x9a, 0xb5, 0x40, 0x35, 0x6c, 0xbb, 0x83, 0x9c, 0xbe, 0x05, 0x30, 0x3d, 0x77, 0x05, 0xfa };
 
-/// Executes a fork's pre-transaction contract call; absent predeploy code is a no-op.
-fn runSystemCall(allocator: std.mem.Allocator, world: *state.State, context: Context, address: execution.Address, input: []const u8) !void {
+/// Executes a fork system call and returns its owned output; absent code has empty output.
+fn runSystemCall(allocator: std.mem.Allocator, world: *state.State, context: Context, address: execution.Address, input: []const u8) ![]u8 {
     const code = world.getCode(address);
-    if (code.len == 0) return;
+    if (code.len == 0) return allocator.dupe(u8, &.{});
     var machine = evm.Machine.init(allocator, world);
     defer machine.deinit();
     try machine.configure(.{ .fork = context.fork, .origin = system_address, .gas_price = 0, .coinbase = context.coinbase, .timestamp = context.timestamp, .number = context.number, .prev_randao = std.mem.readInt(u256, &context.prev_randao, .big), .gas_limit = context.gas_limit, .chain_id = context.chain_id, .base_fee = context.base_fee, .blob_base_fee = context.blob_base_fee orelse 0, .blob_base_fee_supported = context.blob_base_fee != null, .block_hashes = context.block_hashes }, system_address, address, &.{});
     var result = try machine.run(.{ .code = code, .gas = 30_000_000, .caller = system_address, .callee = address, .data = input });
-    defer result.deinit(allocator);
-    if (result.status != .success) return error.InvalidSystemCall;
+    if (result.status != .success) {
+        result.deinit(allocator);
+        return error.InvalidSystemCall;
+    }
+    return result.output;
 }
 
 /// Applies Cancun beacon-root and Prague parent-hash writes before user transactions.
 pub fn applySystemTransitions(allocator: std.mem.Allocator, world: *state.State, context: Context, parent_hash: execution.Hash, parent_beacon_root: execution.Hash) !void {
-    if (@intFromEnum(context.fork) >= @intFromEnum(Fork.cancun)) try runSystemCall(allocator, world, context, beacon_roots_address, &parent_beacon_root);
-    if (@intFromEnum(context.fork) >= @intFromEnum(Fork.prague)) try runSystemCall(allocator, world, context, history_address, &parent_hash);
+    if (@intFromEnum(context.fork) >= @intFromEnum(Fork.cancun)) allocator.free(try runSystemCall(allocator, world, context, beacon_roots_address, &parent_beacon_root));
+    if (@intFromEnum(context.fork) >= @intFromEnum(Fork.prague)) allocator.free(try runSystemCall(allocator, world, context, history_address, &parent_hash));
+}
+
+/// Extracts deposit data and runs ordered Prague queue calls after transactions.
+pub fn processExecutionRequests(allocator: std.mem.Allocator, world: *state.State, context: Context, receipts: []const execution.Receipt) ![][]const u8 {
+    var requests: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (requests.items) |raw| allocator.free(raw);
+        requests.deinit(allocator);
+    }
+    if (@intFromEnum(context.fork) < @intFromEnum(Fork.prague)) return requests.toOwnedSlice(allocator);
+    var deposits: std.ArrayList(u8) = .empty;
+    defer deposits.deinit(allocator);
+    for (receipts) |receipt| {
+        const payload = switch (receipt) {
+            inline else => |value| value,
+        };
+        for (payload.logs) |log| {
+            if (log.topics.len == 0 or !std.mem.eql(u8, &log.topics[0], &deposit_event_signature)) continue;
+            // shortcut: this in-memory chain has no per-network deposit-contract config; decline a matching event from another address.
+            if (!std.mem.eql(u8, &log.address, &deposit_address)) return error.UnsupportedDepositContract;
+            if (log.data.len != 576) return error.InvalidDepositLog;
+            const offsets = [_]u256{ 160, 256, 320, 384, 512 };
+            const lengths = [_]u256{ 48, 32, 8, 96, 8 };
+            for (offsets, lengths, 0..) |offset, length, i| {
+                if (std.mem.readInt(u256, log.data[i * 32 ..][0..32], .big) != offset or std.mem.readInt(u256, log.data[@intCast(offset)..][0..32], .big) != length) return error.InvalidDepositLog;
+                try deposits.appendSlice(allocator, log.data[@as(usize, @intCast(offset)) + 32 ..][0..@intCast(length)]);
+            }
+        }
+    }
+    if (deposits.items.len / 192 > 8192) return error.TooManyDepositRequests;
+    if (deposits.items.len != 0) {
+        const raw = try allocator.alloc(u8, deposits.items.len + 1);
+        raw[0] = 0;
+        @memcpy(raw[1..], deposits.items);
+        requests.append(allocator, raw) catch |err| {
+            allocator.free(raw);
+            return err;
+        };
+    }
+    const has_withdrawals = world.getCode(withdrawal_requests_address).len != 0;
+    const has_consolidations = world.getCode(consolidation_requests_address).len != 0;
+    // shortcut: synthetic test chains without Prague predeploys keep their empty-request behavior; require both contracts once either is present.
+    if (!has_withdrawals and !has_consolidations) return requests.toOwnedSlice(allocator);
+    if (!has_withdrawals or !has_consolidations) return error.UnsupportedRequestQueues;
+    inline for (.{ .{ withdrawal_requests_address, @as(u8, 1), @as(usize, 76), @as(usize, 16) }, .{ consolidation_requests_address, @as(u8, 2), @as(usize, 116), @as(usize, 2) } }) |spec| {
+        const output = try runSystemCall(allocator, world, context, spec[0], &.{});
+        defer allocator.free(output);
+        if (output.len % spec[2] != 0 or output.len / spec[2] > spec[3]) return error.InvalidExecutionRequests;
+        if (output.len != 0) {
+            const raw = try allocator.alloc(u8, output.len + 1);
+            raw[0] = spec[1];
+            @memcpy(raw[1..], output);
+            requests.append(allocator, raw) catch |err| {
+                allocator.free(raw);
+                return err;
+            };
+        }
+    }
+    return requests.toOwnedSlice(allocator);
+}
+
+/// Commits ordered, nonempty EIP-7685 typed request byte strings.
+pub fn requestsHash(allocator: std.mem.Allocator, requests: []const []const u8) !execution.Hash {
+    const hashes = try allocator.alloc(u8, requests.len * 32);
+    defer allocator.free(hashes);
+    for (requests, 0..) |raw, i| {
+        if (raw.len < 2) return error.InvalidExecutionRequests;
+        std.crypto.hash.sha2.Sha256.hash(raw, hashes[i * 32 ..][0..32], .{});
+    }
+    var result: execution.Hash = undefined;
+    std.crypto.hash.sha2.Sha256.hash(hashes, &result, .{});
+    return result;
 }
 
 /// Applies ordered transactions and withdrawals, checking all claimed roots atomically.
@@ -482,6 +562,13 @@ pub fn applyBlock(allocator: std.mem.Allocator, world: *state.State, block: Bloc
     if (blob_gas_used != header.blob_gas_used) return error.InvalidBlobGasUsed;
     if (gas_used != header.gas_used) return error.InvalidGasUsed;
     try applyBlockCredits(world, block.fork, header.fee_recipient, withdrawals);
+    const requests = try processExecutionRequests(arena.allocator(), world, context, receipts);
+    if (block.expected_requests) |expected| {
+        if (requests.len != expected.len) return error.InvalidExecutionRequests;
+        for (requests, expected) |actual, claimed| if (!std.mem.eql(u8, actual, claimed)) return error.InvalidExecutionRequests;
+        const requests_hash = try requestsHash(arena.allocator(), requests);
+        if (!std.mem.eql(u8, &requests_hash, &header.requests_hash)) return error.InvalidExecutionRequests;
+    }
     const result = try blockResult(&arena, world, block.fork, transactions, withdrawals, receipts, gas_used);
     try verifyBlockCommitments(header, result);
     try world.commit(snapshot);
