@@ -178,6 +178,7 @@ pub const Server = struct {
             const code: i64 = switch (err) {
                 error.InvalidParams => -32602,
                 error.InvalidForkchoiceState => -38002,
+                error.InvalidPayloadAttributes => -38003,
                 error.UnsupportedFork => -38005,
                 error.UnknownPayload => -38001,
                 error.MethodNotFound => -32601,
@@ -269,10 +270,26 @@ pub const Server = struct {
         }
         const header = try payloadHeader(a, payload, beacon_root, requests_hash);
         const computed = try execution.transition.headerHash(a, self.chain.fork, header);
+        var known_parent: ?execution.Header = if (self.chain.byHash(payload.parent_hash)) |record| record.header else null;
+        if (known_parent == null) for (self.staged.items) |candidate| {
+            if (std.mem.eql(u8, &candidate.payload.block_hash, &payload.parent_hash)) known_parent = candidate.header;
+        };
+        for (payload.transactions.data) |raw| {
+            var decoded = execution.parse(execution.Transaction, a, raw.data) catch |err| {
+                if (err == error.OutOfMemory) return err;
+                return status(a, "INVALID", if (known_parent != null) payload.parent_hash else null);
+            };
+            decoded.deinit();
+        }
         if (!std.mem.eql(u8, &computed, &payload.block_hash)) return status(a, "INVALID_BLOCK_HASH", null);
         if (self.chain.byHash(payload.block_hash) != null) return status(a, "VALID", payload.block_hash);
         const parent = self.chain.latest();
-        if (!std.mem.eql(u8, &payload.parent_hash, &parent.hash)) return status(a, "SYNCING", null);
+        if (!std.mem.eql(u8, &payload.parent_hash, &parent.hash)) {
+            const ancestor = known_parent orelse return status(a, "SYNCING", null);
+            if (payload.block_number != ancestor.number +| 1 or payload.timestamp <= ancestor.timestamp or payload.gas_used > payload.gas_limit) return status(a, "INVALID", payload.parent_hash);
+            // shortcut: side branches are syntax and header checked only; execute them when reorganization support is added.
+            return status(a, "ACCEPTED", null);
+        }
         const txs = try a.alloc([]const u8, payload.transactions.data.len);
         for (payload.transactions.data, txs) |raw, *out| out.* = raw.data;
         const withdrawals = try a.alloc(execution.Withdrawal, payload.withdrawals.data.len);
@@ -321,8 +338,6 @@ pub const Server = struct {
         if (safe_number > head_number or finalized_number > safe_number or (std.mem.allEqual(u8, &safe, 0) and !std.mem.allEqual(u8, &finalized, 0))) return error.InvalidForkchoiceState;
         const parent_header = if (selected) |candidate| candidate.header else self.chain.latest().header;
         const parent_world = if (selected) |candidate| &candidate.world else &self.chain.latest().world;
-        var pending: ?Build = if (params[1] == .null) null else try self.startBuild(a, params[1], parent_header, head, parent_world);
-        errdefer if (pending) |*build| build.deinit();
         if (selected) |candidate| {
             const p = candidate.payload;
             const txs = try a.alloc([]const u8, p.transactions.data.len);
@@ -332,6 +347,11 @@ pub const Server = struct {
             try self.chain.append(self.world, candidate.header, txs, withdrawals, candidate.hashes, candidate.requests);
             self.pool.prune(self.world);
         }
+        var pending: ?Build = if (params[1] == .null) null else self.startBuild(a, params[1], parent_header, head, parent_world) catch |err| {
+            if (err == error.InvalidParams) return error.InvalidPayloadAttributes;
+            return err;
+        };
+        errdefer if (pending) |*build| build.deinit();
         var id: ?u64 = null;
         if (pending) |build| {
             if (self.build) |*old| old.deinit();
@@ -592,6 +612,9 @@ test "authenticated capabilities do not change canonical head" {
     const malformed = try server.dispatch(a, bearer, "{", 1_000);
     defer a.free(malformed);
     try std.testing.expect(std.mem.indexOf(u8, malformed, "-32700") != null);
+    const bad_params = try server.dispatch(a, bearer, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"engine_newPayloadV4\",\"params\":[]}", 1_000);
+    defer a.free(bad_params);
+    try std.testing.expect(std.mem.indexOf(u8, bad_params, "-32602") != null);
     try std.testing.expectEqual(@as(usize, 1), chain.records.items.len);
     try std.testing.expectError(error.Unauthorized, server.dispatch(a, "Bearer bad", "{}", 1_000));
 }
@@ -674,13 +697,52 @@ fn checkBuiltFork(fork: execution.transition.Fork) !void {
     try std.testing.expectEqualStrings("VALID", try wire.string(try wire.field(accepted, "status")));
     try std.testing.expectEqual(@as(usize, 1), chain.records.items.len);
     try wire.put(temp, &choice, "headBlockHash", try wire.field(p, "blockHash"));
-    try std.testing.expectError(error.InvalidParams, server.forkchoiceUpdated(temp, &.{ choice, attrs }));
+    choice.object.getPtr("safeBlockHash").?.* = try wire.hex(temp, &([_]u8{0x77} ** 32));
+    try std.testing.expectError(error.InvalidForkchoiceState, server.forkchoiceUpdated(temp, &.{ choice, .null }));
     try std.testing.expectEqual(@as(usize, 1), chain.records.items.len);
+    choice.object.getPtr("safeBlockHash").?.* = try wire.hex(temp, &genesis);
+    var request = wire.object();
+    try wire.put(temp, &request, "jsonrpc", .{ .string = "2.0" });
+    try wire.put(temp, &request, "id", .{ .integer = 7 });
+    try wire.put(temp, &request, "method", .{ .string = try std.fmt.allocPrint(temp, "engine_forkchoiceUpdatedV{d}", .{versions.forkchoice}) });
+    var request_params = wire.array(temp);
+    try request_params.array.append(choice);
+    try request_params.array.append(attrs);
+    try wire.put(temp, &request, "params", request_params);
+    const bearer = try jwt.sign(temp, server.secret, 1_000);
+    const body = try std.json.Stringify.valueAlloc(temp, request, .{});
+    const invalid_attrs = try server.dispatch(a, bearer, body, 1_000);
+    defer a.free(invalid_attrs);
+    try std.testing.expect(std.mem.indexOf(u8, invalid_attrs, "-38003") != null);
+    try std.testing.expectEqual(@as(usize, 2), chain.records.items.len);
     const committed = try server.forkchoiceUpdated(temp, &.{ choice, .null });
     try std.testing.expectEqualStrings("VALID", try wire.string(try wire.field(try wire.field(committed, "payloadStatus"), "status")));
     try std.testing.expectEqual(@as(usize, 2), chain.records.items.len);
     const older = try chain.olderHashes(temp);
     try std.testing.expectEqualSlices(execution.Hash, &.{genesis}, older);
+    const payload_value = &params.array.items[0];
+    payload_value.object.getPtr("extraData").?.* = try wire.hex(temp, &.{0x01});
+    const request_hash = if (versions.new_payload >= 4) try execution.transition.requestsHash(temp, server.staged.items[0].requests) else try emptyRequestsHash();
+    const side_payload = try wire.parsePayload(temp, payload_value.*, @min(versions.new_payload, 3));
+    const side_hash = try execution.transition.headerHash(temp, fork, try payloadHeader(temp, side_payload, beacon_root, request_hash));
+    payload_value.object.getPtr("blockHash").?.* = try wire.hex(temp, &side_hash);
+    const side = try server.newPayload(temp, params.array.items, versions.new_payload);
+    try std.testing.expectEqualStrings("ACCEPTED", try wire.string(try wire.field(side, "status")));
+    try std.testing.expect((try wire.field(side, "latestValidHash")) == .null);
+    var txs = try wire.field(payload_value.*, "transactions");
+    try txs.array.append(try wire.hex(temp, &.{}));
+    payload_value.object.getPtr("transactions").?.* = txs;
+    const empty_tx = try server.newPayload(temp, params.array.items, versions.new_payload);
+    try std.testing.expectEqualStrings("INVALID", try wire.string(try wire.field(empty_tx, "status")));
+    try std.testing.expectEqualStrings(try wire.string(try wire.hex(temp, &genesis)), try wire.string(try wire.field(empty_tx, "latestValidHash")));
+    payload_value.object.getPtr("transactions").?.* = wire.array(temp);
+    payload_value.object.getPtr("parentHash").?.* = try wire.hex(temp, &([_]u8{0x77} ** 32));
+    const orphan_payload = try wire.parsePayload(temp, payload_value.*, @min(versions.new_payload, 3));
+    const orphan_hash = try execution.transition.headerHash(temp, fork, try payloadHeader(temp, orphan_payload, beacon_root, request_hash));
+    payload_value.object.getPtr("blockHash").?.* = try wire.hex(temp, &orphan_hash);
+    const unknown = try server.newPayload(temp, params.array.items, versions.new_payload);
+    try std.testing.expectEqualStrings("SYNCING", try wire.string(try wire.field(unknown, "status")));
+    try std.testing.expectEqual(@as(usize, 2), chain.records.items.len);
 }
 
 test "every Engine fork builds, validates, and commits a payload" {

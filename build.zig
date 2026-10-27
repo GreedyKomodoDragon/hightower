@@ -382,6 +382,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "execution", .module = execution_mod },
                 .{ .name = "engine_server", .module = engine_server_mod },
+                .{ .name = "engine_wire", .module = engine_wire_mod },
             },
         }),
     });
