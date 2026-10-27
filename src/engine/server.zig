@@ -607,7 +607,7 @@ fn checkBuiltFork(fork: execution.transition.Fork) !void {
     if (@intFromEnum(fork) >= @intFromEnum(execution.transition.Fork.cancun)) _ = try world.setCode(.{ 0x00, 0x0f, 0x3d, 0xf6, 0xd7, 0x32, 0x80, 0x7e, 0xf1, 0x31, 0x9f, 0xb7, 0xb8, 0xbb, 0x85, 0x22, 0xd0, 0xbe, 0xac, 0x02 }, &system_setter);
     if (@intFromEnum(fork) >= @intFromEnum(execution.transition.Fork.prague)) {
         _ = try world.setCode(.{ 0x00, 0x00, 0xf9, 0x08, 0x27, 0xf1, 0xc5, 0x3a, 0x10, 0xcb, 0x7a, 0x02, 0x33, 0x5b, 0x17, 0x53, 0x20, 0x00, 0x29, 0x35 }, &system_setter);
-        _ = try world.setCode(execution.transition.withdrawal_requests_address, if (fork == .osaka) &queue_output else &queue_setter);
+        _ = try world.setCode(execution.transition.withdrawal_requests_address, if (fork == .prague or fork == .osaka) &queue_output else &queue_setter);
         _ = try world.setCode(execution.transition.consolidation_requests_address, &queue_setter);
     }
     var header = std.mem.zeroes(execution.Header);
@@ -641,7 +641,7 @@ fn checkBuiltFork(fork: execution.transition.Fork) !void {
     const id = try wire.field(started, "payloadId");
     const built = try server.getPayload(temp, &.{id}, versions.get_payload);
     const p = if (versions.get_payload == 1) built else try wire.field(built, "executionPayload");
-    if (versions.get_payload >= 4) try std.testing.expectEqual(@as(usize, @intFromBool(fork == .osaka)), (try wire.field(built, "executionRequests")).array.items.len);
+    if (versions.get_payload >= 4) try std.testing.expectEqual(@as(usize, @intFromBool(fork == .prague or fork == .osaka)), (try wire.field(built, "executionRequests")).array.items.len);
     try std.testing.expectEqual(@as(usize, 1), chain.records.items.len);
     var params = wire.array(temp);
     try params.array.append(p);
