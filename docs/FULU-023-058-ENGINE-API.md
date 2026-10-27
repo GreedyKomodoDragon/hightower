@@ -17,17 +17,19 @@ point. Pool selection budgets the fork's blob limit as well as gas, leaving
 transactions that do not fit pending.
 
 The current in-memory chain accepts direct children of its canonical head.
-Execution requests that need system-contract processing return `SYNCING` until
-that transition is implemented. Prague/Osaka payloads with deployed request
-queues also return `SYNCING`, even for empty request lists, because the queue
-system calls can change the state root. Building from such a parent returns an
-unsupported-transition error. Side-branch reorganization and persistence
+Prague/Osaka deposit logs and withdrawal and consolidation queue outputs are
+assembled in type order after transactions. The server compares those bytes
+with `newPayloadV4` requests and includes them in builder output and the
+requests hash. A deposit event from an address other than the hardcoded
+mainnet deposit contract returns `SYNCING` until per-network deposit-contract
+configuration is available. Synthetic chains without either request predeploy
+retain empty-request behavior. Side-branch reorganization and persistence
 belong with the execution chain storage work; this server does not report an
 unvalidated request-bearing payload as `VALID`.
 
 ## Local checks
 
-`zig build test --summary all` passes 233 tests, including every supported
+`zig build test --summary all` passes 235 tests, including every supported
 method generation's empty builder flow, JWT rejection, bad payload hashes,
 canonical head changes, and V1/V2 blob bundle conversion. The dedicated
 transition and execution fixture suites pass. Debug and ReleaseSafe builds

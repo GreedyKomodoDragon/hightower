@@ -54,8 +54,8 @@ pub const Chain = struct {
         self.* = undefined;
     }
 
-    /// Validates and appends the next canonical block against ordered consensus blob hashes.
-    pub fn append(self: *Chain, world: *execution.state.State, header: execution.Header, transactions: []const []const u8, withdrawals: []const execution.Withdrawal, expected_blob_hashes: []const execution.Hash) !void {
+    /// Validates and appends the next canonical block against ordered blob hashes and requests.
+    pub fn append(self: *Chain, world: *execution.state.State, header: execution.Header, transactions: []const []const u8, withdrawals: []const execution.Withdrawal, expected_blob_hashes: []const execution.Hash, expected_requests: ?[]const []const u8) !void {
         const parent = self.latest().header;
         const older_hashes = try self.olderHashes(self.allocator);
         defer self.allocator.free(older_hashes);
@@ -67,7 +67,7 @@ pub const Chain = struct {
             .prague, .osaka => 9,
             else => 21,
         };
-        var result = try transition.applyBlock(self.allocator, world, .{ .fork = self.fork, .parent_fork = self.fork, .chain_id = self.chain_id, .older_hashes = older_hashes, .max_blobs_per_block = max_blobs, .expected_blob_hashes = expected_blob_hashes }, parent, header, transactions, withdrawals);
+        var result = try transition.applyBlock(self.allocator, world, .{ .fork = self.fork, .parent_fork = self.fork, .chain_id = self.chain_id, .older_hashes = older_hashes, .max_blobs_per_block = max_blobs, .expected_blob_hashes = expected_blob_hashes, .expected_requests = expected_requests }, parent, header, transactions, withdrawals);
         var result_owned = true;
         errdefer if (result_owned) result.deinit();
         var record = try self.copyRecord(header, transactions, withdrawals, result, world);

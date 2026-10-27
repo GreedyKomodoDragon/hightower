@@ -3,7 +3,7 @@
 // the canonical chain changes only after a valid forkchoice update. A local
 // builder derives a fork-appropriate payload from the selected parent, pool,
 // and supplied withdrawals. In-memory stages are bounded to 32 direct children;
-// deployed Prague request queues remain unsupported and are never validated.
+// Prague deposit logs and queue outputs are checked against typed requests.
 //
 // parent snapshot -> validate payload -> staged hash -> forkchoice -> canonical
 const std = @import("std");
@@ -17,13 +17,6 @@ const client = @import("engine_client");
 
 const Value = wire.Value;
 const max_body = 32 * 1024 * 1024;
-const withdrawal_requests_address: execution.Address = .{ 0x00, 0x00, 0x09, 0x61, 0xef, 0x48, 0x0e, 0xb5, 0x5e, 0x80, 0xd1, 0x9a, 0xd8, 0x35, 0x79, 0xa6, 0x4c, 0x00, 0x70, 0x02 };
-const consolidation_requests_address: execution.Address = .{ 0x00, 0x00, 0xbb, 0xdd, 0xc7, 0xce, 0x48, 0x86, 0x42, 0xfb, 0x57, 0x9f, 0x8b, 0x00, 0xf3, 0xa5, 0x90, 0x00, 0x72, 0x51 };
-
-/// Detects Prague request queues whose end-of-block calls are not implemented.
-fn hasRequestQueues(world: *const execution.state.State, fork: execution.transition.Fork) bool {
-    return @intFromEnum(fork) >= @intFromEnum(execution.transition.Fork.prague) and (world.getCode(withdrawal_requests_address).len != 0 or world.getCode(consolidation_requests_address).len != 0);
-}
 
 /// Maps the configured execution fork to its Engine API method generations.
 fn methodVersions(fork: execution.transition.Fork) !@TypeOf(client.versions(.osaka)) {
@@ -117,6 +110,7 @@ const Candidate = struct {
     hashes: []execution.Hash,
     parent_beacon_root: execution.Hash,
     requests_hash: execution.Hash,
+    requests: []const []const u8,
     header: execution.Header,
     world: execution.state.State,
 
@@ -135,6 +129,7 @@ const Build = struct {
     commitments: [][48]u8,
     blob_proofs: [][48]u8,
     cell_proofs: [][48]u8,
+    requests: [][]const u8,
 
     /// Frees the builder's borrowed payload fields.
     fn deinit(self: *Build) void {
@@ -258,8 +253,16 @@ pub const Server = struct {
         const owner = arena.allocator();
         const payload = try wire.parsePayload(owner, params[0], @min(version, 3));
         const beacon_root = if (version >= 3) try wire.fixed(32, params[2]) else [_]u8{0} ** 32;
-        const request_lists = if (version >= 4) try client.parseRequests(owner, params[3]) else null;
-        const requests_hash = if (version >= 4) try requestsHash(a, params[3]) else try emptyRequestsHash();
+        if (version >= 4) _ = client.parseRequests(owner, params[3]) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            return error.InvalidParams;
+        };
+        const requests: []const []const u8 = if (version >= 4) blk: {
+            const values = try owner.alloc([]const u8, params[3].array.items.len);
+            for (params[3].array.items, values) |item, *raw| raw.* = try wire.bytes(owner, item, 8 * 1024 * 1024);
+            break :blk values;
+        } else &.{};
+        const requests_hash = try execution.transition.requestsHash(a, requests);
         const hashes = try owner.alloc(execution.Hash, if (version >= 3) params[1].array.items.len else 0);
         if (version >= 3) {
             for (params[1].array.items, hashes) |item, *hash| hash.* = try wire.fixed(32, item);
@@ -270,10 +273,6 @@ pub const Server = struct {
         if (self.chain.byHash(payload.block_hash) != null) return status(a, "VALID", payload.block_hash);
         const parent = self.chain.latest();
         if (!std.mem.eql(u8, &payload.parent_hash, &parent.hash)) return status(a, "SYNCING", null);
-        // shortcut: request queues need end-of-block system calls; return SYNCING while they are unsupported.
-        if (hasRequestQueues(&parent.world, self.chain.fork)) return status(a, "SYNCING", null);
-        // shortcut: request-producing execution needs the system-contract transition; return SYNCING until it is implemented.
-        if (request_lists) |lists| if (lists.deposits.data.len != 0 or lists.withdrawals.data.len != 0 or lists.consolidations.data.len != 0) return status(a, "SYNCING", null);
         const txs = try a.alloc([]const u8, payload.transactions.data.len);
         for (payload.transactions.data, txs) |raw, *out| out.* = raw.data;
         const withdrawals = try a.alloc(execution.Withdrawal, payload.withdrawals.data.len);
@@ -282,8 +281,9 @@ pub const Server = struct {
         var retained_trial = false;
         defer if (!retained_trial) trial.deinit();
         const older_hashes = try self.chain.olderHashes(a);
-        var result = execution.transition.applyBlock(a, &trial, .{ .fork = self.chain.fork, .parent_fork = self.chain.fork, .chain_id = self.chain.chain_id, .older_hashes = older_hashes, .max_blobs_per_block = maxBlobs(self.chain.fork), .expected_blob_hashes = hashes }, parent.header, header, txs, withdrawals) catch |err| {
+        var result = execution.transition.applyBlock(a, &trial, .{ .fork = self.chain.fork, .parent_fork = self.chain.fork, .chain_id = self.chain.chain_id, .older_hashes = older_hashes, .max_blobs_per_block = maxBlobs(self.chain.fork), .expected_blob_hashes = hashes, .expected_requests = if (version >= 4) requests else null }, parent.header, header, txs, withdrawals) catch |err| {
             if (err == error.OutOfMemory) return err;
+            if (err == error.UnsupportedRequestQueues or err == error.UnsupportedDepositContract) return status(a, "SYNCING", null);
             return status(a, "INVALID", parent.hash);
         };
         result.deinit();
@@ -292,7 +292,7 @@ pub const Server = struct {
             var oldest = self.staged.orderedRemove(0);
             oldest.deinit();
         }
-        try self.staged.append(self.allocator, .{ .arena = arena, .payload = payload, .hashes = hashes, .parent_beacon_root = beacon_root, .requests_hash = requests_hash, .header = header, .world = trial });
+        try self.staged.append(self.allocator, .{ .arena = arena, .payload = payload, .hashes = hashes, .parent_beacon_root = beacon_root, .requests_hash = requests_hash, .requests = requests, .header = header, .world = trial });
         retained = true;
         retained_trial = true;
         return status(a, "VALID", payload.block_hash);
@@ -329,7 +329,7 @@ pub const Server = struct {
             for (p.transactions.data, txs) |raw, *out| out.* = raw.data;
             const withdrawals = try a.alloc(execution.Withdrawal, p.withdrawals.data.len);
             for (p.withdrawals.data, withdrawals) |w, *out| out.* = .{ .index = w.index, .validator_index = w.validator_index, .address = w.address, .amount = w.amount };
-            try self.chain.append(self.world, candidate.header, txs, withdrawals, candidate.hashes);
+            try self.chain.append(self.world, candidate.header, txs, withdrawals, candidate.hashes, candidate.requests);
             self.pool.prune(self.world);
         }
         var id: ?u64 = null;
@@ -345,7 +345,6 @@ pub const Server = struct {
 
     /// Prepares a payload build from a validated parent without changing canonical state.
     fn startBuild(self: *Server, a: std.mem.Allocator, value: Value, parent_header: execution.Header, parent_hash: execution.Hash, parent_world: *const execution.state.State) !Build {
-        if (hasRequestQueues(parent_world, self.chain.fork)) return error.UnsupportedRequestQueues;
         const timestamp = try wire.quantity(u64, try wire.field(value, "timestamp"));
         if (timestamp <= parent_header.timestamp) return error.InvalidParams;
         var arena = std.heap.ArenaAllocator.init(self.allocator);
@@ -408,6 +407,7 @@ pub const Server = struct {
             const amount = try std.math.mul(u256, w.amount, 1_000_000_000);
             try trial.setBalance(w.address, try std.math.add(u256, trial.getBalance(w.address), amount));
         }
+        const requests = try execution.transition.processExecutionRequests(owner, &trial, context, receipts);
         const zero: execution.Hash = .{0} ** 32;
         var p: fulu.ExecutionPayload = .{
             .parent_hash = parent_hash,
@@ -428,9 +428,9 @@ pub const Server = struct {
             .blob_gas_used = try std.math.mul(u64, @intCast(blobs.items.len), 131_072),
             .excess_blob_gas = excess_blob_gas,
         };
-        const header = try payloadHeader(a, p, root, try emptyRequestsHash());
+        const header = try payloadHeader(a, p, root, try execution.transition.requestsHash(a, requests));
         p.block_hash = try execution.transition.headerHash(a, self.chain.fork, header);
-        return .{ .arena = arena, .payload = p, .id = self.next_id, .blobs = try blobs.toOwnedSlice(owner), .commitments = try commitments.toOwnedSlice(owner), .blob_proofs = try blob_proofs.toOwnedSlice(owner), .cell_proofs = try cell_proofs.toOwnedSlice(owner) };
+        return .{ .arena = arena, .payload = p, .id = self.next_id, .blobs = try blobs.toOwnedSlice(owner), .commitments = try commitments.toOwnedSlice(owner), .blob_proofs = try blob_proofs.toOwnedSlice(owner), .cell_proofs = try cell_proofs.toOwnedSlice(owner), .requests = requests };
     }
 
     /// Returns Osaka builder output with an empty cell-proof bundle.
@@ -459,23 +459,14 @@ pub const Server = struct {
             try wire.put(a, &bundle, "proofs", proof_values);
             try wire.put(a, &out, "blobsBundle", bundle);
         }
-        if (version >= 4) try wire.put(a, &out, "executionRequests", wire.array(a));
+        if (version >= 4) {
+            var requests = wire.array(a);
+            for (build.requests) |request| try requests.array.append(try wire.hex(a, request));
+            try wire.put(a, &out, "executionRequests", requests);
+        }
         return out;
     }
 };
-
-/// Computes the EIP-7685 hash of ordered, typed request byte lists.
-fn requestsHash(a: std.mem.Allocator, value: Value) !execution.Hash {
-    if (value != .array) return error.InvalidParams;
-    const combined = try a.alloc(u8, value.array.items.len * 32);
-    for (value.array.items, 0..) |item, i| {
-        const raw = try wire.bytes(a, item, 8 * 1024 * 1024);
-        std.crypto.hash.sha2.Sha256.hash(raw, combined[i * 32 ..][0..32], .{});
-    }
-    var hash: execution.Hash = undefined;
-    std.crypto.hash.sha2.Sha256.hash(combined, &hash, .{});
-    return hash;
-}
 
 /// Returns the request commitment for no execution requests.
 fn emptyRequestsHash() !execution.Hash {
@@ -611,8 +602,14 @@ fn checkBuiltFork(fork: execution.transition.Fork) !void {
     var world = execution.state.State.init(a);
     defer world.deinit();
     const system_setter = [_]u8{ 0x5f, 0x35, 0x5f, 0x55, 0x00 };
+    const queue_setter = [_]u8{ 0x5f, 0x54, 0x60, 0x01, 0x01, 0x5f, 0x55, 0x00 };
+    const queue_output = [_]u8{ 0x60, 0x4c, 0x60, 0x00, 0xf3 };
     if (@intFromEnum(fork) >= @intFromEnum(execution.transition.Fork.cancun)) _ = try world.setCode(.{ 0x00, 0x0f, 0x3d, 0xf6, 0xd7, 0x32, 0x80, 0x7e, 0xf1, 0x31, 0x9f, 0xb7, 0xb8, 0xbb, 0x85, 0x22, 0xd0, 0xbe, 0xac, 0x02 }, &system_setter);
-    if (@intFromEnum(fork) >= @intFromEnum(execution.transition.Fork.prague)) _ = try world.setCode(.{ 0x00, 0x00, 0xf9, 0x08, 0x27, 0xf1, 0xc5, 0x3a, 0x10, 0xcb, 0x7a, 0x02, 0x33, 0x5b, 0x17, 0x53, 0x20, 0x00, 0x29, 0x35 }, &system_setter);
+    if (@intFromEnum(fork) >= @intFromEnum(execution.transition.Fork.prague)) {
+        _ = try world.setCode(.{ 0x00, 0x00, 0xf9, 0x08, 0x27, 0xf1, 0xc5, 0x3a, 0x10, 0xcb, 0x7a, 0x02, 0x33, 0x5b, 0x17, 0x53, 0x20, 0x00, 0x29, 0x35 }, &system_setter);
+        _ = try world.setCode(execution.transition.withdrawal_requests_address, if (fork == .osaka) &queue_output else &queue_setter);
+        _ = try world.setCode(execution.transition.consolidation_requests_address, &queue_setter);
+    }
     var header = std.mem.zeroes(execution.Header);
     header.state_root = try world.stateRoot();
     header.gas_limit = 30_000_000;
@@ -644,6 +641,7 @@ fn checkBuiltFork(fork: execution.transition.Fork) !void {
     const id = try wire.field(started, "payloadId");
     const built = try server.getPayload(temp, &.{id}, versions.get_payload);
     const p = if (versions.get_payload == 1) built else try wire.field(built, "executionPayload");
+    if (versions.get_payload >= 4) try std.testing.expectEqual(@as(usize, @intFromBool(fork == .osaka)), (try wire.field(built, "executionRequests")).array.items.len);
     try std.testing.expectEqual(@as(usize, 1), chain.records.items.len);
     var params = wire.array(temp);
     try params.array.append(p);
@@ -651,13 +649,27 @@ fn checkBuiltFork(fork: execution.transition.Fork) !void {
         try params.array.append(wire.array(temp));
         try params.array.append(try wire.hex(temp, &beacon_root));
     }
-    if (versions.new_payload >= 4) try params.array.append(wire.array(temp));
+    if (versions.new_payload >= 4) try params.array.append(try wire.field(built, "executionRequests"));
     const original_hash = try wire.field(p, "blockHash");
     params.array.items[0].object.getPtr("blockHash").?.* = try wire.hex(temp, &zero);
     const rejected = try server.newPayload(temp, params.array.items, versions.new_payload);
     try std.testing.expectEqualStrings("INVALID_BLOCK_HASH", try wire.string(try wire.field(rejected, "status")));
     try std.testing.expectEqual(@as(usize, 1), chain.records.items.len);
     params.array.items[0].object.getPtr("blockHash").?.* = original_hash;
+    if (fork == .osaka) {
+        const fake = [_]u8{1} ++ [_]u8{0x7f} ** 76;
+        var changed = wire.array(temp);
+        try changed.array.append(try wire.hex(temp, &fake));
+        params.array.items[3] = changed;
+        const claimed = try wire.parsePayload(temp, params.array.items[0], 3);
+        const forged_hash = try execution.transition.headerHash(temp, fork, try payloadHeader(temp, claimed, beacon_root, try execution.transition.requestsHash(temp, &.{&fake})));
+        params.array.items[0].object.getPtr("blockHash").?.* = try wire.hex(temp, &forged_hash);
+        const mismatched = try server.newPayload(temp, params.array.items, versions.new_payload);
+        try std.testing.expectEqualStrings("INVALID", try wire.string(try wire.field(mismatched, "status")));
+        try std.testing.expectEqual(@as(usize, 1), chain.records.items.len);
+        params.array.items[0].object.getPtr("blockHash").?.* = original_hash;
+        params.array.items[3] = try wire.field(built, "executionRequests");
+    }
     const accepted = try server.newPayload(temp, params.array.items, versions.new_payload);
     try std.testing.expectEqualStrings("VALID", try wire.string(try wire.field(accepted, "status")));
     try std.testing.expectEqual(@as(usize, 1), chain.records.items.len);
@@ -675,11 +687,11 @@ test "every Engine fork builds, validates, and commits a payload" {
     for ([_]execution.transition.Fork{ .paris, .shanghai, .cancun, .prague, .osaka, .fulu }) |fork| try checkBuiltFork(fork);
 }
 
-test "request queue predeploys prevent unsupported Osaka validation and building" {
+test "partial request queue deployment cannot validate or build Osaka payloads" {
     const a = std.testing.allocator;
     var world = execution.state.State.init(a);
     defer world.deinit();
-    _ = try world.setCode(withdrawal_requests_address, &.{0x00});
+    _ = try world.setCode(execution.transition.withdrawal_requests_address, &.{0x00});
     var genesis = std.mem.zeroes(execution.Header);
     genesis.state_root = try world.stateRoot();
     genesis.gas_limit = 30_000_000;
@@ -701,6 +713,10 @@ test "request queue predeploys prevent unsupported Osaka validation and building
     try std.testing.expectEqualStrings("SYNCING", try wire.string(try wire.field(response, "status")));
     var attrs = wire.object();
     try wire.put(temp, &attrs, "timestamp", try wire.number(temp, @as(u64, 1)));
+    try wire.put(temp, &attrs, "prevRandao", try wire.hex(temp, &zero));
+    try wire.put(temp, &attrs, "suggestedFeeRecipient", try wire.hex(temp, &([_]u8{0} ** 20)));
+    try wire.put(temp, &attrs, "withdrawals", wire.array(temp));
+    try wire.put(temp, &attrs, "parentBeaconBlockRoot", try wire.hex(temp, &zero));
     try std.testing.expectError(error.UnsupportedRequestQueues, server.startBuild(temp, attrs, genesis, parent_hash, &chain.latest().world));
     try std.testing.expectEqual(@as(usize, 1), chain.records.items.len);
 }

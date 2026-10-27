@@ -169,3 +169,4 @@ Chain:      [Block 0] ───────────────────�
 | System call | A fork-required EVM call made by the execution client outside the block's transaction list and gas accounting. |
 | Beacon roots contract | The Cancun system contract that stores each block's parent beacon root alongside its timestamp for later EVM reads. |
 | History storage contract | The Prague system contract that stores recent parent execution block hashes for EVM reads. |
+| Execution request queue | A Prague system contract that collects withdrawal or consolidation requests from transactions and releases them after block execution. |
