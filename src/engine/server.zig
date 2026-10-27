@@ -270,6 +270,7 @@ pub const Server = struct {
         }
         const header = try payloadHeader(a, payload, beacon_root, requests_hash);
         const computed = try execution.transition.headerHash(a, self.chain.fork, header);
+        if (!std.mem.eql(u8, &computed, &payload.block_hash)) return status(a, "INVALID_BLOCK_HASH", null);
         var known_parent: ?execution.Header = if (self.chain.byHash(payload.parent_hash)) |record| record.header else null;
         if (known_parent == null) for (self.staged.items) |candidate| {
             if (std.mem.eql(u8, &candidate.payload.block_hash, &payload.parent_hash)) known_parent = candidate.header;
@@ -281,7 +282,6 @@ pub const Server = struct {
             };
             decoded.deinit();
         }
-        if (!std.mem.eql(u8, &computed, &payload.block_hash)) return status(a, "INVALID_BLOCK_HASH", null);
         if (self.chain.byHash(payload.block_hash) != null) return status(a, "VALID", payload.block_hash);
         const parent = self.chain.latest();
         if (!std.mem.eql(u8, &payload.parent_hash, &parent.hash)) {
@@ -755,6 +755,10 @@ fn checkBuiltFork(fork: execution.transition.Fork) !void {
     const empty_tx = try server.newPayload(temp, params.array.items, versions.new_payload);
     try std.testing.expectEqualStrings("INVALID", try wire.string(try wire.field(empty_tx, "status")));
     try std.testing.expectEqualStrings(try wire.string(try wire.hex(temp, &genesis)), try wire.string(try wire.field(empty_tx, "latestValidHash")));
+    payload_value.object.getPtr("blockHash").?.* = try wire.hex(temp, &zero);
+    const wrong_hash_and_tx = try server.newPayload(temp, params.array.items, versions.new_payload);
+    try std.testing.expectEqualStrings("INVALID_BLOCK_HASH", try wire.string(try wire.field(wrong_hash_and_tx, "status")));
+    payload_value.object.getPtr("blockHash").?.* = try wire.hex(temp, &side_hash);
     payload_value.object.getPtr("transactions").?.* = wire.array(temp);
     payload_value.object.getPtr("parentHash").?.* = try wire.hex(temp, &([_]u8{0x77} ** 32));
     const orphan_payload = try wire.parsePayload(temp, payload_value.*, @min(versions.new_payload, 3));
