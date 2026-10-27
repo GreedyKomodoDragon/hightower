@@ -266,3 +266,11 @@ test "Engine verdict mapping keeps pending and invalid block hash distinct" {
         value.object.deinit(a);
     }
 }
+
+test "Engine transport failure remains an error" {
+    if (Client.init(std.testing.allocator, std.testing.io, "http://127.0.0.1:0", .{0x42} ** 32, .osaka)) |connected| {
+        var client = connected;
+        client.deinit();
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expect(err == error.AddressUnavailable or err == error.ConnectionRefused);
+}

@@ -34,8 +34,9 @@ unvalidated request-bearing payload as `VALID`.
 
 ## Local checks
 
-`zig build test --summary all` covers every supported method generation's
-empty builder flow, JWT rejection, malformed requests and transactions,
+`zig build test --summary all` passes 236 tests and covers every supported
+method generation's empty builder flow, JWT rejection, transport failure,
+malformed requests and transactions,
 payload status distinctions, invalid attributes, canonical head changes, and
 V1/V2 blob bundle conversion.
 
