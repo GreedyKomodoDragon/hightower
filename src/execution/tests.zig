@@ -963,7 +963,7 @@ test "Cancun and Prague system calls update roots before block commitment" {
     }
 }
 
-/// Checks empty and queued responses from the pinned Osaka predeploy bytecode.
+// Checks empty and queued responses from the pinned Osaka predeploy bytecode.
 test "Osaka request queue calls execute installed Geth predeploys" {
     const a = testing.allocator;
     var world = execution.state.State.init(a);
@@ -1004,7 +1004,7 @@ test "Osaka request queue calls execute installed Geth predeploys" {
     try testing.expectEqual(@as(u8, 2), consolidated[0][0]);
 }
 
-/// Checks deposit event extraction and rejects a malformed event layout.
+// Checks deposit event extraction and rejects a malformed event layout.
 test "Prague deposit logs become ordered execution request bytes" {
     const a = testing.allocator;
     var world = execution.state.State.init(a);
