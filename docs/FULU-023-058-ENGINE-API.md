@@ -45,20 +45,11 @@ For Geth interoperability, use the pinned
 `sha256:6e9669cca5359cdb2c5571198d51e78fc18128b56bff50a1f8422d1c2946fd64`).
 The [Osaka genesis](engine/osaka-genesis.json) comes from Geth's
 `--dev dumpgenesis` output with `bogotaTime` removed; its system contracts are
-needed for Osaka payload building. From the repository root:
+needed for Osaka payload building. CI and local runs use the same command from
+the repository root:
 
 ```sh
-interop_dir=$(mktemp -d /tmp/hightower-engine-interop.XXXXXX)
-openssl rand -hex 32 > "$interop_dir/jwt.hex"
-docker run --rm -v "$PWD/docs/engine/osaka-genesis.json:/genesis.json:ro" -v "$interop_dir/data:/data" ethereum/client-go:v1.17.7 --datadir /data init /genesis.json
-docker run -d --rm --name hightower-geth-interop -p 127.0.0.1:18551:8551 -v "$interop_dir/data:/data" -v "$interop_dir/jwt.hex:/jwt.hex:ro" ethereum/client-go:v1.17.7 --datadir /data --networkid 1337 --authrpc.addr 0.0.0.0 --authrpc.vhosts '*' --authrpc.jwtsecret /jwt.hex --nodiscover --maxpeers 0
-zig build engine-test-server engine-probe
-./zig-out/bin/hightower-engine-test-server 18552 "$interop_dir/jwt.hex" docs/engine/osaka-genesis.json &
-fixture_pid=$!
-sleep 3
-./zig-out/bin/hightower-engine-probe http://127.0.0.1:18552 http://127.0.0.1:18551 "$interop_dir/jwt.hex" 0xd5bfe455af9e369a28ae13737769879f1ad8d2aa281ebfdbdf8529d48a20ae7f
-kill "$fixture_pid"
-docker stop hightower-geth-interop
+bash scripts/test_engine_interop.sh
 ```
 
 The fresh-chain run printed the Geth genesis hash
