@@ -6,6 +6,11 @@
 - When documentation introduces a new term related to the Ethereum network, add the term and a plain-language definition to [`docs/glossary.md`](docs/glossary.md).
 - Give every function a brief doc comment explaining what it does. Include input constraints, ownership, errors, or ordering when those matter; avoid merely repeating the function name.
 
+## JSON handling
+
+- Construct valid JSON with structured values and a JSON serializer. Parse JSON responses and assert their fields. Do not hand-write valid JSON as escaped string literals or assemble it with string concatenation, including in tests.
+- Raw string literals are allowed only when the raw bytes are the subject of the test, such as malformed JSON or an exact wire-format fixture.
+
 ## GitHub issue tracking
 
 - Track Hightower work in GitHub Issues for [`GreedyKomodoDragon/hightower`](https://github.com/GreedyKomodoDragon/hightower).

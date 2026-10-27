@@ -606,17 +606,37 @@ test "authenticated capabilities do not change canonical head" {
     defer server.deinit();
     const bearer = try jwt.sign(a, secret, 1_000);
     defer a.free(bearer);
-    const response = try server.dispatch(a, bearer, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"engine_exchangeCapabilities\",\"params\":[[]]}", 1_000);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const temp = arena.allocator();
+    var request = wire.object();
+    try wire.put(temp, &request, "jsonrpc", .{ .string = "2.0" });
+    try wire.put(temp, &request, "id", .{ .integer = 1 });
+    try wire.put(temp, &request, "method", .{ .string = "engine_exchangeCapabilities" });
+    var params = wire.array(temp);
+    try params.array.append(wire.array(temp));
+    try wire.put(temp, &request, "params", params);
+    const response = try server.dispatch(a, bearer, try std.json.Stringify.valueAlloc(temp, request, .{}), 1_000);
     defer a.free(response);
-    try std.testing.expect(std.mem.indexOf(u8, response, "engine_getPayloadV5") != null);
+    const capabilities = try wire.field((try std.json.parseFromSlice(Value, temp, response, .{})).value, "result");
+    var found = false;
+    for (capabilities.array.items) |capability| if (std.mem.eql(u8, try wire.string(capability), "engine_getPayloadV5")) {
+        found = true;
+    };
+    try std.testing.expect(found);
     const malformed = try server.dispatch(a, bearer, "{", 1_000);
     defer a.free(malformed);
-    try std.testing.expect(std.mem.indexOf(u8, malformed, "-32700") != null);
-    const bad_params = try server.dispatch(a, bearer, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"engine_newPayloadV4\",\"params\":[]}", 1_000);
+    const parse_error = try wire.field(try wire.field((try std.json.parseFromSlice(Value, temp, malformed, .{})).value, "error"), "code");
+    try std.testing.expectEqual(@as(i64, -32700), parse_error.integer);
+    request.object.getPtr("id").?.* = .{ .integer = 2 };
+    request.object.getPtr("method").?.* = .{ .string = "engine_newPayloadV4" };
+    request.object.getPtr("params").?.* = wire.array(temp);
+    const bad_params = try server.dispatch(a, bearer, try std.json.Stringify.valueAlloc(temp, request, .{}), 1_000);
     defer a.free(bad_params);
-    try std.testing.expect(std.mem.indexOf(u8, bad_params, "-32602") != null);
+    const params_error = try wire.field(try wire.field((try std.json.parseFromSlice(Value, temp, bad_params, .{})).value, "error"), "code");
+    try std.testing.expectEqual(@as(i64, -32602), params_error.integer);
     try std.testing.expectEqual(@as(usize, 1), chain.records.items.len);
-    try std.testing.expectError(error.Unauthorized, server.dispatch(a, "Bearer bad", "{}", 1_000));
+    try std.testing.expectError(error.Unauthorized, server.dispatch(a, "Bearer bad", "", 1_000));
 }
 
 /// Exercises one fork's build, validation, and canonical commit sequence.

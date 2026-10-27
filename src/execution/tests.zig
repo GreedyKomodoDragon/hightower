@@ -9,6 +9,11 @@ test {
     _ = execution.rpc;
 }
 
+/// Serializes one valid JSON-RPC test request from structured parameters.
+fn rpcRequest(a: std.mem.Allocator, id: usize, method: []const u8, params: []const std.json.Value) ![]u8 {
+    return std.json.Stringify.valueAlloc(a, .{ .jsonrpc = "2.0", .id = id, .method = method, .params = params }, .{});
+}
+
 test "pinned c-kzg zero-blob vector accepts its proof and rejects another" {
     var settings = try execution.kzg.loadTrustedSetup("src/execution/trusted_setup.txt");
     defer settings.deinit();
@@ -115,24 +120,35 @@ test "execution JSON-RPC dispatches chain and block methods with bounded input" 
     var pool = execution.pool.Pool.init(a, .{});
     defer pool.deinit();
     var server: execution.rpc.Server = .{ .chain = &chain, .pool = &pool, .world = &world };
-    const response = try server.dispatch(a, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_chainId\",\"params\":[]}");
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const temp = arena.allocator();
+    const response = try server.dispatch(a, try rpcRequest(temp, 1, "eth_chainId", &.{}));
     defer a.free(response);
-    try std.testing.expect(std.mem.indexOf(u8, response, "\"result\":\"0x1\"") != null);
-    const invalid = try server.dispatch(a, "[{},{}]");
+    var parsed_response = try std.json.parseFromSlice(std.json.Value, a, response, .{});
+    defer parsed_response.deinit();
+    try std.testing.expectEqualStrings("0x1", parsed_response.value.object.get("result").?.string);
+    const invalid = try server.dispatch(a, try std.json.Stringify.valueAlloc(temp, &[_]struct {}{ .{}, .{} }, .{}));
     defer a.free(invalid);
-    try std.testing.expect(std.mem.indexOf(u8, invalid, "-32600") != null);
-    const requests = [_][]const u8{
-        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"eth_blockNumber\",\"params\":[]}",
-        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"eth_getBlockByNumber\",\"params\":[\"latest\",false]}",
-        "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"eth_getBalance\",\"params\":[\"0x0000000000000000000000000000000000000000\",\"latest\"]}",
-        "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"eth_call\",\"params\":[{\"to\":\"0x0000000000000000000000000000000000000000\"},\"latest\"]}",
-        "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"eth_estimateGas\",\"params\":[{\"to\":\"0x0000000000000000000000000000000000000000\"},\"latest\"]}",
-        "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"eth_getTransactionReceipt\",\"params\":[\"0x0000000000000000000000000000000000000000000000000000000000000000\"]}",
-        "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"eth_getLogs\",\"params\":[{}]}",
-        "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"eth_sendRawTransaction\",\"params\":[\"0x\"]}",
+    var parsed_invalid = try std.json.parseFromSlice(std.json.Value, a, invalid, .{});
+    defer parsed_invalid.deinit();
+    try std.testing.expectEqual(@as(usize, 2), parsed_invalid.value.array.items.len);
+    for (parsed_invalid.value.array.items) |item| try std.testing.expectEqual(@as(i64, -32600), item.object.get("error").?.object.get("code").?.integer);
+    const zero_address = "0x0000000000000000000000000000000000000000";
+    var call = std.json.Value{ .object = .empty };
+    try call.object.put(temp, "to", .{ .string = zero_address });
+    const requests = [_]struct { method: []const u8, params: []const std.json.Value }{
+        .{ .method = "eth_blockNumber", .params = &.{} },
+        .{ .method = "eth_getBlockByNumber", .params = &.{ .{ .string = "latest" }, .{ .bool = false } } },
+        .{ .method = "eth_getBalance", .params = &.{ .{ .string = zero_address }, .{ .string = "latest" } } },
+        .{ .method = "eth_call", .params = &.{ call, .{ .string = "latest" } } },
+        .{ .method = "eth_estimateGas", .params = &.{ call, .{ .string = "latest" } } },
+        .{ .method = "eth_getTransactionReceipt", .params = &.{.{ .string = "0x0000000000000000000000000000000000000000000000000000000000000000" }} },
+        .{ .method = "eth_getLogs", .params = &.{.{ .object = .empty }} },
+        .{ .method = "eth_sendRawTransaction", .params = &.{.{ .string = "0x" }} },
     };
-    for (requests) |request| {
-        const reply = try server.dispatch(a, request);
+    for (requests, 2..) |request, id| {
+        const reply = try server.dispatch(a, try rpcRequest(temp, id, request.method, request.params));
         defer a.free(reply);
         var parsed = try std.json.parseFromSlice(std.json.Value, a, reply, .{});
         defer parsed.deinit();
