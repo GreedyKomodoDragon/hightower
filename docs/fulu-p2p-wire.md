@@ -1,0 +1,7 @@
+# Fulu P2P wire payloads
+
+`consensus.P2PWire` handles byte payloads after SSZ serialization and before transport. It exposes the pinned request protocol prefixes for Status v2, Ping v1, Metadata v3, block by root/range v2, and data columns by root/range v1. `topicName` formats block, attestation, aggregate, and data-column gossip topics from the caller's fork digest and rejects invalid subnet numbers.
+
+`encodeGossip` and `decodeGossip` use Snappy blocks with the 10 MiB uncompressed payload limit and a caller-supplied encoded-size cap. `encodePayload` and `decodePayload` use an unsigned protobuf varint for the uncompressed SSZ length, followed by Snappy stream frames. The decoder checks the length and encoded-size caps before allocating output, then verifies frame sizes, CRC32C checksums, and exact output length. The caller passes the SSZ type's maximum size. The writer uses valid uncompressed Snappy frames; the reader accepts both compressed and uncompressed frames.
+
+These functions operate on complete byte slices. The transport must enforce read timeouts and bound bytes while receiving, append `/ssz_snappy` to the protocol prefixes, and handle response codes, fork context, message validation, and peer scoring. The Snappy block writer currently emits literals, so a near-limit gossip message can exceed its encoded-size cap and be rejected by `encodeGossip`.

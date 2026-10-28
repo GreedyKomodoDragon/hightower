@@ -56,6 +56,11 @@ Chain:      [Block 0] ───────────────────�
 | Data availability sampling | Checking selected, verified columns before treating a blob-carrying block as available. |
 | Node ID | A 32-byte discovery identity used to select a node's custody groups. |
 | discv5 | Ethereum's peer discovery protocol, which uses node records and UDP messages to find other nodes. |
+| Fork digest | Four bytes that identify a chain's current consensus fork for network messages. |
+| Gossipsub | The peer-to-peer protocol that spreads consensus messages through subscribed topics. |
+| Subnet | A numbered gossip topic group used to distribute attestations or data columns. |
+| Req/Resp | The consensus network's request and response streams for fetching peer data. |
+| Snappy frame | A checksummed chunk in the streaming form of Snappy compression used by consensus requests and responses. |
 | Authorization list | Signed permissions carried by a set-code transaction to delegate account behavior. |
 | Delegation indicator | The 23-byte code marker that points an account at another address's executable code under EIP-7702. |
 | Transaction pool | The node's bounded collection of signed transactions awaiting possible block inclusion. |
