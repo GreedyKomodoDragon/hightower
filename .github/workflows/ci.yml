@@ -19,6 +19,7 @@ jobs:
       - run: zig build
       - run: zig build test
       - run: zig build test-transition
+      - run: bash scripts/test_engine_local.sh
       - run: zig build api-test-server
       - uses: actions/setup-node@v4
         with:

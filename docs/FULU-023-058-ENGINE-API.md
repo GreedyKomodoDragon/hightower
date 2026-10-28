@@ -34,6 +34,11 @@ unvalidated request-bearing payload as `VALID`.
 
 ## Local checks
 
+`bash scripts/test_engine_local.sh` runs the production client against the
+production server on loopback. It checks JWT rejection and completes an Osaka
+payload build, validation, and head selection without Docker. CI runs it in
+the `checks` job.
+
 `zig build test --summary all` passes 236 tests and covers every supported
 method generation's empty builder flow, JWT rejection, transport failure,
 malformed requests and transactions, payload status distinctions, invalid
