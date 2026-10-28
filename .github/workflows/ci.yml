@@ -27,6 +27,7 @@ jobs:
       - run: bash scripts/test_beacon_api.sh
 
   engine-interop:
+    name: Geth ${{ matrix.version }} interop
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
