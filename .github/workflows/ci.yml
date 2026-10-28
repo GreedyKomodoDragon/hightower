@@ -19,10 +19,31 @@ jobs:
       - run: zig build
       - run: zig build test
       - run: zig build test-transition
-      - run: bash scripts/test_engine_interop.sh
       - run: zig build api-test-server
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
       - run: npm install --global @usebruno/cli@4.3.0
       - run: bash scripts/test_beacon_api.sh
+
+  engine-interop:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: v1.17.7
+            digest: 6e9669cca5359cdb2c5571198d51e78fc18128b56bff50a1f8422d1c2946fd64
+          - version: v1.17.8
+            digest: abf3605177f8bdcfce436985a8054cca4ae59256323a4ffb72c56c04f3d1fadd
+          - version: v1.17.9
+            digest: 1ae3571b074ccda207808fd228ade023f62ebdeb1dab6b393093dcc8b5293109
+          - version: v1.17.10
+            digest: 5015dcab74ec5c9ef6584ada930ea353264a1c4e72383f256802e3178e10918c
+    steps:
+      - uses: actions/checkout@v7
+      - uses: vercel-labs/setup-zig@v1
+        with:
+          version: 0.16.0
+      - name: Geth ${{ matrix.version }} Engine API interoperability
+        run: bash scripts/test_engine_interop.sh ethereum/client-go@sha256:${{ matrix.digest }}

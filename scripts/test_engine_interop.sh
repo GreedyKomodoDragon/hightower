@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-geth_image=ethereum/client-go@sha256:6e9669cca5359cdb2c5571198d51e78fc18128b56bff50a1f8422d1c2946fd64
+geth_image=${1:-ethereum/client-go@sha256:6e9669cca5359cdb2c5571198d51e78fc18128b56bff50a1f8422d1c2946fd64}
 genesis_hash=0xd5bfe455af9e369a28ae13737769879f1ad8d2aa281ebfdbdf8529d48a20ae7f
 interop_dir=$(mktemp -d /tmp/hightower-engine-interop.XXXXXX)
 geth_container=

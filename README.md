@@ -47,7 +47,7 @@ zig build test -- --fuzz
 
 The compiled binary lands in `zig-out/bin/hightower`.
 
-CI (`.github/workflows/ci.yml`): `zig fmt --check`, `zig build`, `zig build test`, `zig build test-transition`, a pinned Geth Engine API interoperability check, and Bruno HTTP checks on Zig 0.16.0.
+CI (`.github/workflows/ci.yml`): `zig fmt --check`, `zig build`, `zig build test`, `zig build test-transition`, pinned Geth v1.17.7–v1.17.10 Engine API interoperability checks, and Bruno HTTP checks on Zig 0.16.0.
 
 ## JSON conventions
 

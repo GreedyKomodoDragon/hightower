@@ -36,13 +36,12 @@ unvalidated request-bearing payload as `VALID`.
 
 `zig build test --summary all` passes 236 tests and covers every supported
 method generation's empty builder flow, JWT rejection, transport failure,
-malformed requests and transactions,
-payload status distinctions, invalid attributes, canonical head changes, and
-V1/V2 blob bundle conversion.
+malformed requests and transactions, payload status distinctions, invalid
+attributes, canonical head changes, and V1/V2 blob bundle conversion.
 
-For Geth interoperability, use the pinned
-`ethereum/client-go:v1.17.7` image (digest
-`sha256:6e9669cca5359cdb2c5571198d51e78fc18128b56bff50a1f8422d1c2946fd64`).
+For Geth interoperability, CI tests v1.17.7 through v1.17.10 with pinned
+image digests in [the workflow](../.github/workflows/ci.yml). The script
+defaults to v1.17.7 and accepts a pinned image reference as its argument.
 The [Osaka genesis](engine/osaka-genesis.json) comes from Geth's
 `--dev dumpgenesis` output with `bogotaTime` removed; its system contracts are
 needed for Osaka payload building. CI and local runs use the same command from
@@ -52,9 +51,10 @@ the repository root:
 bash scripts/test_engine_interop.sh
 ```
 
-The fresh-chain run printed the Geth genesis hash
-`0xd5bfe455af9e369a28ae13737769879f1ad8d2aa281ebfdbdf8529d48a20ae7f`;
-the Hightower fixture computed the same hash. The probe then reported:
+Fresh-chain runs against all four pinned versions initialized the Osaka
+genesis. Hightower computed
+`0xd5bfe455af9e369a28ae13737769879f1ad8d2aa281ebfdbdf8529d48a20ae7f`
+each time, and each probe reported:
 `Osaka Engine API: Geth accepted Hightower payload and selected head`.
 The original single-engine probe still accepts its three arguments.
 It reported capability exchange, payload build and validation, and head
