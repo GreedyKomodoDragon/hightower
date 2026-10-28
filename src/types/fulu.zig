@@ -149,6 +149,8 @@ pub const DepositData = struct {
     signature: BLSSignature,
 };
 
+pub const DepositDataList = types.List(DepositData, @as(usize, 1) << 32);
+
 pub const Deposit = struct {
     proof: [33]Bytes32,
     data: DepositData,
@@ -264,6 +266,18 @@ pub const BeaconBlockBody = struct {
     execution_requests: ExecutionRequests,
 };
 
+/// Phase 0 empty body layout used to seed the genesis block header root.
+pub const GenesisBlockBody = struct {
+    randao_reveal: BLSSignature,
+    eth1_data: Eth1Data,
+    graffiti: Bytes32,
+    proposer_slashings: types.List(ProposerSlashing, preset.MAX_PROPOSER_SLASHINGS),
+    attester_slashings: types.List(AttesterSlashing, 2),
+    attestations: types.List(Attestation, 128),
+    deposits: types.List(Deposit, preset.MAX_DEPOSITS_PER_BLOCK),
+    voluntary_exits: types.List(SignedVoluntaryExit, preset.MAX_VOLUNTARY_EXITS),
+};
+
 pub const BeaconBlock = struct {
     slot: Slot,
     proposer_index: ValidatorIndex,
@@ -317,4 +331,45 @@ pub const BeaconState = struct {
     pending_partial_withdrawals: types.List(PendingPartialWithdrawal, preset.PENDING_PARTIAL_WITHDRAWALS_LIMIT),
     pending_consolidations: types.List(PendingConsolidation, preset.PENDING_CONSOLIDATIONS_LIMIT),
     proposer_lookahead: [2 * preset.SLOTS_PER_EPOCH]ValidatorIndex,
+};
+
+/// Electra state at the fork boundary; its SSZ fields precede Fulu's proposer window.
+pub const ElectraBeaconState = struct {
+    genesis_time: u64,
+    genesis_validators_root: Root,
+    slot: Slot,
+    fork: Fork,
+    latest_block_header: BeaconBlockHeader,
+    block_roots: [preset.SLOTS_PER_HISTORICAL_ROOT]Root,
+    state_roots: [preset.SLOTS_PER_HISTORICAL_ROOT]Root,
+    historical_roots: types.List(Root, preset.HISTORICAL_ROOTS_LIMIT),
+    eth1_data: Eth1Data,
+    eth1_data_votes: types.List(Eth1Data, @intCast(preset.EPOCHS_PER_ETH1_VOTING_PERIOD * preset.SLOTS_PER_EPOCH)),
+    eth1_deposit_index: u64,
+    validators: types.List(Validator, preset.VALIDATOR_REGISTRY_LIMIT),
+    balances: types.List(Gwei, preset.VALIDATOR_REGISTRY_LIMIT),
+    randao_mixes: [preset.EPOCHS_PER_HISTORICAL_VECTOR]Bytes32,
+    slashings: [preset.EPOCHS_PER_SLASHINGS_VECTOR]Gwei,
+    previous_epoch_participation: types.List(ParticipationFlags, preset.VALIDATOR_REGISTRY_LIMIT),
+    current_epoch_participation: types.List(ParticipationFlags, preset.VALIDATOR_REGISTRY_LIMIT),
+    justification_bits: types.BitVector(preset.JUSTIFICATION_BITS_LENGTH),
+    previous_justified_checkpoint: Checkpoint,
+    current_justified_checkpoint: Checkpoint,
+    finalized_checkpoint: Checkpoint,
+    inactivity_scores: types.List(u64, preset.VALIDATOR_REGISTRY_LIMIT),
+    current_sync_committee: SyncCommittee,
+    next_sync_committee: SyncCommittee,
+    latest_execution_payload_header: ExecutionPayloadHeader,
+    next_withdrawal_index: WithdrawalIndex,
+    next_withdrawal_validator_index: ValidatorIndex,
+    historical_summaries: types.List(HistoricalSummary, preset.HISTORICAL_SUMMARIES_LIMIT),
+    deposit_requests_start_index: u64,
+    deposit_balance_to_consume: Gwei,
+    exit_balance_to_consume: Gwei,
+    earliest_exit_epoch: Epoch,
+    consolidation_balance_to_consume: Gwei,
+    earliest_consolidation_epoch: Epoch,
+    pending_deposits: types.List(PendingDeposit, preset.PENDING_DEPOSITS_LIMIT),
+    pending_partial_withdrawals: types.List(PendingPartialWithdrawal, preset.PENDING_PARTIAL_WITHDRAWALS_LIMIT),
+    pending_consolidations: types.List(PendingConsolidation, preset.PENDING_CONSOLIDATIONS_LIMIT),
 };

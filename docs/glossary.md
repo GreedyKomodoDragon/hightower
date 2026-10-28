@@ -68,6 +68,12 @@ Chain:      [Block 0] ───────────────────�
 | Prague | The execution upgrade that added execution requests and set-code transactions. |
 | Osaka | The execution upgrade whose Engine API builder returns blob cell proofs in `getPayloadV5`. |
 | Fulu | The consensus upgrade paired with Osaka, including expanded blob availability rules. |
+| Electra | The consensus upgrade immediately before Fulu; its state supplies all inherited Fulu fields. |
+| Genesis state | The first beacon-chain state, built from ordered Eth1 deposits and used to identify the chain. |
+| Eth1 | The execution-layer chain that supplied deposits and an initial block hash before the beacon chain began. |
+| Deposit tree | The Merkle tree maintained by the Eth1 deposit contract to commit to ordered validator deposits. |
+| Deposit proof | A Merkle branch showing that a validator deposit belongs to the Eth1 deposit tree at its recorded index. |
+| Proposer lookahead | The two-epoch list of validators assigned to propose upcoming Fulu slots. |
 | Blob bundle | The blobs, commitments, and proofs returned by an execution payload builder for blob transactions. |
 | Execution receipt | The status, gas tally, bloom, and logs produced by a transaction. |
 | Execution account | An address's nonce, balance, storage root, and code hash, encoded into the execution state trie. |

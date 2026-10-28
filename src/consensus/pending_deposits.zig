@@ -71,6 +71,7 @@ pub fn processPendingDeposits(allocator: std.mem.Allocator, state: *fulu.BeaconS
     state.deposit_balance_to_consume = if (churn_reached) available - processed_amount else 0;
 }
 
+/// Find the first validator with this key, so repeat deposits top up its balance.
 fn findValidator(validators: []const fulu.Validator, pubkey: fulu.BLSPubkey) ?usize {
     for (validators, 0..) |validator, index| {
         if (std.mem.eql(u8, &validator.pubkey, &pubkey)) return index;
@@ -87,21 +88,14 @@ fn appendOwned(comptime T: type, allocator: std.mem.Allocator, slice: *[]const T
     slice.* = new;
 }
 
+/// Apply a proven deposit; invalid signatures for new keys are ignored by consensus.
 fn applyDeposit(allocator: std.mem.Allocator, state: *fulu.BeaconState, deposit: fulu.PendingDeposit, existing_index: ?usize) !void {
     if (existing_index) |index| {
         @constCast(state.balances.data)[index] =
             std.math.add(u64, state.balances.data[index], deposit.amount) catch return error.BalanceOverflow;
         return;
     }
-    const message = DepositMessage{
-        .pubkey = deposit.pubkey,
-        .withdrawal_credentials = deposit.withdrawal_credentials,
-        .amount = deposit.amount,
-    };
-    const message_root = try merkle.HashTreeRoot(allocator, message);
-    const domain = domains.computeDomain(helpers.DOMAIN_DEPOSIT, helpers.GENESIS_FORK_VERSION, [_]u8{0} ** 32);
-    const signing_root = domains.computeSigningRoot(message_root, domain);
-    bls.verify(deposit.pubkey, signing_root, deposit.signature) catch return;
+    if (!try validNewDepositSignature(allocator, deposit)) return;
 
     const max_balance: u64 = if (deposit.withdrawal_credentials[0] == 0x02)
         helpers.MAX_EFFECTIVE_BALANCE_ELECTRA
@@ -122,6 +116,20 @@ fn applyDeposit(allocator: std.mem.Allocator, state: *fulu.BeaconState, deposit:
     try appendOwned(u8, allocator, &state.previous_epoch_participation.data, 0);
     try appendOwned(u8, allocator, &state.current_epoch_participation.data, 0);
     try appendOwned(u64, allocator, &state.inactivity_scores.data, 0);
+}
+
+/// Check a new validator's deposit-domain proof of possession; malformed signatures are ignored.
+pub fn validNewDepositSignature(allocator: std.mem.Allocator, deposit: fulu.PendingDeposit) !bool {
+    const message = DepositMessage{
+        .pubkey = deposit.pubkey,
+        .withdrawal_credentials = deposit.withdrawal_credentials,
+        .amount = deposit.amount,
+    };
+    const message_root = try merkle.HashTreeRoot(allocator, message);
+    const domain = domains.computeDomain(helpers.DOMAIN_DEPOSIT, helpers.GENESIS_FORK_VERSION, [_]u8{0} ** 32);
+    const signing_root = domains.computeSigningRoot(message_root, domain);
+    bls.verify(deposit.pubkey, signing_root, deposit.signature) catch return false;
+    return true;
 }
 
 test "pending deposits match pinned finalized and churn fixtures" {

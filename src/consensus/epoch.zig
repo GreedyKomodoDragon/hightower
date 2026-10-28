@@ -294,10 +294,11 @@ pub fn processSyncCommitteeUpdates(allocator: std.mem.Allocator, state: *fulu.Be
     if (next_epoch % helpers.EPOCHS_PER_SYNC_COMMITTEE_PERIOD != 0) return;
     // Promote the committee already used for this period before sampling its successor.
     state.current_sync_committee = state.next_sync_committee;
-    state.next_sync_committee = try computeNextSyncCommittee(allocator, state, next_epoch);
+    state.next_sync_committee = try computeSyncCommittee(allocator, state, next_epoch);
 }
 
-fn computeNextSyncCommittee(allocator: std.mem.Allocator, state: *const fulu.BeaconState, epoch_number: fulu.Epoch) !fulu.SyncCommittee {
+/// Sample a committee for the supplied period epoch from the active validator set.
+pub fn computeSyncCommittee(allocator: std.mem.Allocator, state: *const fulu.BeaconState, epoch_number: fulu.Epoch) !fulu.SyncCommittee {
     const active = try helpers.getActiveValidatorIndices(allocator, state.validators.data, epoch_number);
     defer allocator.free(active);
     if (active.len == 0) return error.NoEligibleProposer;
