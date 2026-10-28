@@ -312,6 +312,8 @@ pub fn build(b: *std.Build) void {
         },
     });
     consensus_mod.addImport("blob", blob_mod);
+    consensus_mod.addImport("execution", execution_mod);
+    consensus_mod.addImport("ckzg", ckzg_mod);
     mod.addImport("consensus", consensus_mod);
     const engine_wire_mod = b.createModule(.{
         .root_source_file = b.path("src/engine/wire.zig"),
@@ -381,6 +383,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "execution", .module = execution_mod },
+                .{ .name = "ckzg", .module = ckzg_mod },
                 .{ .name = "engine_server", .module = engine_server_mod },
                 .{ .name = "engine_wire", .module = engine_wire_mod },
             },
@@ -466,6 +469,8 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "merkle", .module = merkle_mod },
                 .{ .name = "consensus_preset", .module = consensus_preset_mod },
                 .{ .name = "blob", .module = blob_mod },
+                .{ .name = "execution", .module = execution_mod },
+                .{ .name = "ckzg", .module = ckzg_mod },
             },
         }),
     });

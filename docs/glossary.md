@@ -50,6 +50,12 @@ Chain:      [Block 0] ───────────────────�
 | Versioned hash | A 32-byte identifier made from a blob's KZG commitment; its first byte identifies the hash version. |
 | Blob proof | A KZG proof that a whole blob matches its commitment. |
 | Cell proof | A KZG proof that one erasure-coded part of a blob matches its commitment; Fulu network wrappers carry 128 proofs per blob. |
+| Data column | The cells at one index across all blobs in a Fulu block. |
+| Data-column sidecar | A signed-block-linked set of data-column cells, commitments, and proofs carried beside the block. |
+| Custody group | A public, deterministic assignment of columns a node retains and serves. |
+| Data availability sampling | Checking selected, verified columns before treating a blob-carrying block as available. |
+| Node ID | A 32-byte discovery identity used to select a node's custody groups. |
+| discv5 | Ethereum's peer discovery protocol, which uses node records and UDP messages to find other nodes. |
 | Authorization list | Signed permissions carried by a set-code transaction to delegate account behavior. |
 | Delegation indicator | The 23-byte code marker that points an account at another address's executable code under EIP-7702. |
 | Transaction pool | The node's bounded collection of signed transactions awaiting possible block inclusion. |

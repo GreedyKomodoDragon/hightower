@@ -33,5 +33,6 @@ pub const saveForkChoiceStore = @import("fork_choice_snapshot.zig").saveForkChoi
 pub const loadForkChoiceStore = @import("fork_choice_snapshot.zig").loadForkChoiceStore;
 pub const fixtureRunner = @import("fixture_runner.zig");
 pub const DataAvailabilityCheck = @import("fork_choice.zig").DataAvailabilityCheck;
+pub const DataColumns = @import("data_columns.zig");
 pub const computeWeakSubjectivityPeriod = @import("helpers.zig").computeWeakSubjectivityPeriod;
 pub const isWithinWeakSubjectivityPeriod = @import("fork_choice.zig").isWithinWeakSubjectivityPeriod;

@@ -118,3 +118,7 @@ cases and two subgroup-rejection inputs come from the official
 (downloaded SHA-256 `0dc1dfabfa7b3e0f8e8029f9cb2bb8733597526fa085b18f160d2c4eb0b448bc`).
 The generic BLS suite's empty-aggregate rule differs from Ethereum's; the Ethereum
 cases are used for this wrapper. Run these tests with `zig build test-transition`.
+
+Fulu sidecar validation, deterministic custody selection, and the block-aware
+fork-choice availability callback are described in
+[`docs/fulu-data-columns.md`](../../docs/fulu-data-columns.md).

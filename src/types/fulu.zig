@@ -32,6 +32,8 @@ pub const Version = [4]u8;
 pub const ExecutionAddress = [20]u8;
 pub const BLSPubkey = [48]u8;
 pub const KZGCommitment = [48]u8;
+pub const KZGProof = [48]u8;
+pub const Cell = [2048]u8;
 pub const BLSSignature = [96]u8;
 
 pub const Fork = struct {
@@ -52,6 +54,16 @@ pub const BeaconBlockHeader = struct {
 pub const SignedBeaconBlockHeader = struct {
     message: BeaconBlockHeader,
     signature: BLSSignature,
+};
+
+/// One erasure-coded cell per blob, bound to a signed block header.
+pub const DataColumnSidecar = struct {
+    index: u64,
+    column: types.List(Cell, preset.MAX_BLOB_COMMITMENTS_PER_BLOCK),
+    kzg_commitments: types.List(KZGCommitment, preset.MAX_BLOB_COMMITMENTS_PER_BLOCK),
+    kzg_proofs: types.List(KZGProof, preset.MAX_BLOB_COMMITMENTS_PER_BLOCK),
+    signed_block_header: SignedBeaconBlockHeader,
+    kzg_commitments_inclusion_proof: [4]Bytes32,
 };
 
 pub const Checkpoint = struct {

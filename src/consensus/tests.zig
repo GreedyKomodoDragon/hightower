@@ -37,6 +37,7 @@ test {
     _ = @import("pending_consolidations.zig");
     _ = @import("pending_deposits.zig");
     _ = @import("fork_choice.zig");
+    _ = @import("data_columns.zig");
     _ = @import("fork_choice_snapshot.zig");
 }
 
