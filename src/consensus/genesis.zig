@@ -16,6 +16,60 @@ const helpers = @import("helpers.zig");
 const deposits_mod = @import("pending_deposits.zig");
 const epoch = @import("epoch.zig");
 
+// A deposit tree has 2^32 leaves. The frontier keeps one completed subtree
+// per height; appending and obtaining each length-mixed prefix root take 32
+// hashes regardless of the number of earlier deposits.
+const DepositTree = struct {
+    branch: [32]fulu.Root = undefined,
+    zero_hashes: [32]fulu.Root = undefined,
+    full_root: fulu.Root = undefined,
+    count: u64 = 0,
+
+    /// Initialize the empty subtree roots for every height of the contract tree.
+    fn init() DepositTree {
+        var tree: DepositTree = .{};
+        tree.zero_hashes[0] = [_]u8{0} ** 32;
+        for (1..32) |height| tree.zero_hashes[height] = hashPair(tree.zero_hashes[height - 1], tree.zero_hashes[height - 1]);
+        return tree;
+    }
+
+    /// Append one deposit leaf in chronological order; at capacity keep the completed root.
+    fn append(self: *DepositTree, leaf: fulu.Root) void {
+        var size = self.count;
+        var node = leaf;
+        for (0..32) |height| {
+            if (size & 1 == 0) {
+                self.branch[height] = node;
+                break;
+            }
+            node = hashPair(self.branch[height], node);
+            size >>= 1;
+        }
+        self.count += 1;
+        if (self.count == (@as(u64, 1) << 32)) self.full_root = node;
+    }
+
+    /// Return the SSZ list root after the most recently appended leaf.
+    fn root(self: *const DepositTree) fulu.Root {
+        var size = self.count;
+        var node = [_]u8{0} ** 32;
+        if (size == (@as(u64, 1) << 32)) {
+            node = self.full_root;
+        } else {
+            for (0..32) |height| {
+                node = if (size & 1 == 1)
+                    hashPair(self.branch[height], node)
+                else
+                    hashPair(node, self.zero_hashes[height]);
+                size >>= 1;
+            }
+        }
+        var length = [_]u8{0} ** 32;
+        std.mem.writeInt(u64, length[0..8], self.count, .little);
+        return hashPair(node, length);
+    }
+};
+
 /// Build an owned Fulu genesis state from chronological deposits with valid contract proofs.
 pub fn initializeBeaconStateFromEth1(
     allocator: std.mem.Allocator,
@@ -37,24 +91,53 @@ pub fn initializeBeaconStateFromEth1(
     state.earliest_exit_epoch = helpers.EPOCH_OFFSET + helpers.MAX_SEED_LOOKAHEAD + 1;
     state.earliest_consolidation_epoch = helpers.EPOCH_OFFSET + helpers.MAX_SEED_LOOKAHEAD;
 
-    const data = try allocator.alloc(fulu.DepositData, deposits.len);
-    defer allocator.free(data);
+    var tree = DepositTree.init();
+    var validator_indices = std.AutoHashMap(fulu.BLSPubkey, usize).init(allocator);
+    defer validator_indices.deinit();
+    var validators: std.ArrayList(fulu.Validator) = .empty;
+    defer validators.deinit(allocator);
+    var balances: std.ArrayList(fulu.Gwei) = .empty;
+    defer balances.deinit(allocator);
     for (deposits, 0..) |deposit, index| {
-        data[index] = deposit.data;
-        state.eth1_data.deposit_root = try merkle.HashTreeRoot(allocator, fulu.DepositDataList{ .data = data[0 .. index + 1] });
         const leaf = try merkle.HashTreeRoot(allocator, deposit.data);
+        tree.append(leaf);
+        state.eth1_data.deposit_root = tree.root();
         if (!merkle.verifyMerkleProof(leaf, &deposit.proof, (@as(u64, 1) << 33) + index, state.eth1_data.deposit_root))
             return error.InvalidDepositProof;
-        const existing = deposits_mod.findValidator(state.validators.data, deposit.data.pubkey);
-        try deposits_mod.applyDeposit(allocator, &state, .{
+        const entry: fulu.PendingDeposit = .{
             .pubkey = deposit.data.pubkey,
             .withdrawal_credentials = deposit.data.withdrawal_credentials,
             .amount = deposit.data.amount,
             .signature = deposit.data.signature,
             .slot = 0,
-        }, existing);
+        };
+        if (validator_indices.get(entry.pubkey)) |existing| {
+            balances.items[existing] = std.math.add(u64, balances.items[existing], entry.amount) catch return error.BalanceOverflow;
+        } else if (try deposits_mod.validNewDepositSignature(allocator, entry)) {
+            const validator_index = validators.items.len;
+            try validators.append(allocator, .{
+                .pubkey = entry.pubkey,
+                .withdrawal_credentials = entry.withdrawal_credentials,
+                .effective_balance = @min(entry.amount - entry.amount % helpers.EFFECTIVE_BALANCE_INCREMENT, helpers.MAX_EFFECTIVE_BALANCE),
+                .slashed = false,
+                .activation_eligibility_epoch = helpers.FAR_FUTURE_EPOCH,
+                .activation_epoch = helpers.FAR_FUTURE_EPOCH,
+                .exit_epoch = helpers.FAR_FUTURE_EPOCH,
+                .withdrawable_epoch = helpers.FAR_FUTURE_EPOCH,
+            });
+            try balances.append(allocator, entry.amount);
+            try validator_indices.put(entry.pubkey, validator_index);
+        }
         state.eth1_deposit_index += 1;
     }
+    state.validators.data = try validators.toOwnedSlice(allocator);
+    state.balances.data = try balances.toOwnedSlice(allocator);
+    state.previous_epoch_participation.data = try allocator.alloc(u8, state.validators.data.len);
+    @memset(@constCast(state.previous_epoch_participation.data), 0);
+    state.current_epoch_participation.data = try allocator.alloc(u8, state.validators.data.len);
+    @memset(@constCast(state.current_epoch_participation.data), 0);
+    state.inactivity_scores.data = try allocator.alloc(u64, state.validators.data.len);
+    @memset(@constCast(state.inactivity_scores.data), 0);
     for (@constCast(state.validators.data), state.balances.data) |*validator, balance| {
         validator.effective_balance = @min(balance - balance % helpers.EFFECTIVE_BALANCE_INCREMENT, helpers.MAX_EFFECTIVE_BALANCE);
         if (validator.effective_balance == helpers.MAX_EFFECTIVE_BALANCE) {
@@ -94,7 +177,7 @@ pub fn initializeBeaconStateFromEth1(
     return state;
 }
 
-/// Hash two SSZ tree nodes in their left-to-right order for test proofs.
+/// Hash two SSZ tree nodes in their left-to-right order for the frontier and proofs.
 fn hashPair(left: fulu.Root, right: fulu.Root) fulu.Root {
     var input: [64]u8 = undefined;
     @memcpy(input[0..32], &left);
@@ -102,6 +185,19 @@ fn hashPair(left: fulu.Root, right: fulu.Root) fulu.Root {
     var root: fulu.Root = undefined;
     std.crypto.hash.sha2.Sha256.hash(&input, &root, .{});
     return root;
+}
+
+test "incremental deposit roots match SSZ list roots across changing tree heights" {
+    const allocator = std.testing.allocator;
+    var tree = DepositTree.init();
+    var data: [17]fulu.DepositData = undefined;
+    for (&data, 0..) |*deposit, index| {
+        deposit.* = std.mem.zeroes(fulu.DepositData);
+        deposit.amount = @intCast(index + 1);
+        tree.append(try merkle.HashTreeRoot(allocator, deposit.*));
+        const expected = try merkle.HashTreeRoot(allocator, fulu.DepositDataList{ .data = data[0 .. index + 1] });
+        try std.testing.expectEqual(expected, tree.root());
+    }
 }
 
 /// Form a two-leaf contract proof against a prefix of one or two deposits.
@@ -171,4 +267,23 @@ test "genesis accepts duplicate deposits, ignores invalid new signatures, and re
     defer ssz.freeDecoded(allocator, fulu.BeaconState, with_ignored);
     try std.testing.expectEqual(@as(usize, 1), with_ignored.validators.data.len);
     try std.testing.expectEqual(@as(u64, 2), with_ignored.eth1_deposit_index);
+
+    const second_seed = [_]u8{0x43} ** 32;
+    var second_secret = blst.SecretKey{};
+    second_secret.keygen(&second_seed, null);
+    defer second_secret.deinit();
+    const second_pubkey = try bls.publicKey(&second_secret);
+    const second_message = .{ .pubkey = second_pubkey, .withdrawal_credentials = message.withdrawal_credentials, .amount = message.amount };
+    const second_message_root = try merkle.HashTreeRoot(allocator, second_message);
+    const distinct_data: fulu.DepositData = .{
+        .pubkey = second_pubkey,
+        .withdrawal_credentials = message.withdrawal_credentials,
+        .amount = message.amount,
+        .signature = bls.sign(&second_secret, domains.computeSigningRoot(second_message_root, domain)),
+    };
+    const distinct: fulu.Deposit = .{ .data = distinct_data, .proof = testProof(first_leaf, 1, 2) };
+    const with_distinct = try initializeBeaconStateFromEth1(allocator, eth1_hash, 1_600_000_000, &.{ first, distinct });
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, with_distinct);
+    try std.testing.expectEqual(@as(usize, 2), with_distinct.validators.data.len);
+    try std.testing.expectEqual(second_pubkey, with_distinct.validators.data[1].pubkey);
 }
