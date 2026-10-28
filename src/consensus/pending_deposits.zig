@@ -71,7 +71,8 @@ pub fn processPendingDeposits(allocator: std.mem.Allocator, state: *fulu.BeaconS
     state.deposit_balance_to_consume = if (churn_reached) available - processed_amount else 0;
 }
 
-fn findValidator(validators: []const fulu.Validator, pubkey: fulu.BLSPubkey) ?usize {
+/// Find the first validator with this key, so repeat deposits top up its balance.
+pub fn findValidator(validators: []const fulu.Validator, pubkey: fulu.BLSPubkey) ?usize {
     for (validators, 0..) |validator, index| {
         if (std.mem.eql(u8, &validator.pubkey, &pubkey)) return index;
     }
@@ -87,7 +88,8 @@ fn appendOwned(comptime T: type, allocator: std.mem.Allocator, slice: *[]const T
     slice.* = new;
 }
 
-fn applyDeposit(allocator: std.mem.Allocator, state: *fulu.BeaconState, deposit: fulu.PendingDeposit, existing_index: ?usize) !void {
+/// Apply a proven deposit; invalid signatures for new keys are ignored by consensus.
+pub fn applyDeposit(allocator: std.mem.Allocator, state: *fulu.BeaconState, deposit: fulu.PendingDeposit, existing_index: ?usize) !void {
     if (existing_index) |index| {
         @constCast(state.balances.data)[index] =
             std.math.add(u64, state.balances.data[index], deposit.amount) catch return error.BalanceOverflow;

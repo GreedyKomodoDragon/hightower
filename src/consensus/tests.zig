@@ -26,6 +26,8 @@ test {
     _ = @import("snappy.zig");
     _ = @import("fixture_runner.zig");
     _ = @import("transition.zig");
+    _ = @import("fork.zig");
+    _ = @import("genesis.zig");
     _ = @import("lookahead.zig");
     _ = @import("execution_engine.zig");
     _ = @import("operation_pool.zig");

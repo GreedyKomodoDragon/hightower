@@ -24,6 +24,7 @@ pub const Config = switch (name) {
 };
 
 pub const Minimal = struct {
+    pub const GENESIS_DELAY: u64 = 300;
     pub const SECONDS_PER_SLOT: u64 = 6;
     pub const PROPOSER_BOOST_WINDOW_SECONDS: u64 = 2;
     pub const MIN_ATTESTATION_INCLUSION_DELAY: u64 = 1;
@@ -99,11 +100,15 @@ pub const Minimal = struct {
     pub const SHARD_COMMITTEE_PERIOD: u64 = 64;
     pub const PROPORTIONAL_SLASHING_MULTIPLIER_BELLATRIX: u64 = 3;
     pub const GENESIS_FORK_VERSION: [4]u8 = .{ 0, 0, 0, 1 };
+    pub const ELECTRA_FORK_VERSION: [4]u8 = .{ 5, 0, 0, 1 };
+    pub const FULU_FORK_VERSION: [4]u8 = .{ 6, 0, 0, 1 };
+    pub const FULU_FORK_EPOCH: u64 = std.math.maxInt(u64);
     pub const CAPELLA_FORK_VERSION: [4]u8 = .{ 3, 0, 0, 1 };
     pub const ELECTRA_FORK_EPOCH: u64 = std.math.maxInt(u64);
 };
 
 pub const Mainnet = struct {
+    pub const GENESIS_DELAY: u64 = 604_800;
     pub const SECONDS_PER_SLOT: u64 = 12;
     pub const PROPOSER_BOOST_WINDOW_SECONDS: u64 = 4;
     pub const MIN_ATTESTATION_INCLUSION_DELAY: u64 = 1;
@@ -182,6 +187,9 @@ pub const Mainnet = struct {
     pub const SHARD_COMMITTEE_PERIOD: u64 = 256;
     pub const PROPORTIONAL_SLASHING_MULTIPLIER_BELLATRIX: u64 = 3;
     pub const GENESIS_FORK_VERSION: [4]u8 = .{ 0, 0, 0, 0 };
+    pub const ELECTRA_FORK_VERSION: [4]u8 = .{ 5, 0, 0, 0 };
+    pub const FULU_FORK_VERSION: [4]u8 = .{ 6, 0, 0, 0 };
+    pub const FULU_FORK_EPOCH: u64 = 411_392;
     pub const CAPELLA_FORK_VERSION: [4]u8 = .{ 3, 0, 0, 0 };
     pub const ELECTRA_FORK_EPOCH: u64 = 364_032;
 };
