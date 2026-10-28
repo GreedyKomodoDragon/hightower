@@ -163,8 +163,13 @@ pub const Client = struct {
         return .{ .payload = payload, .commitments = commitments, .requests = requests };
     }
 
-    /// Sends a bounded JSON-RPC request and rejects protocol or transport errors.
+    /// Sends a bounded JSON-RPC request through the normal HTTP transport.
     fn call(self: *Client, method: []const u8, params: []const wire.Value) !wire.Value {
+        return self.callWithFetch(method, params, std.http.Client.fetch);
+    }
+
+    /// Propagates transport errors before decoding an Engine JSON-RPC response.
+    fn callWithFetch(self: *Client, method: []const u8, params: []const wire.Value, comptime fetch: *const fn (*std.http.Client, std.http.Client.FetchOptions) std.http.Client.FetchError!std.http.Client.FetchResult) !wire.Value {
         const a = self.arena.allocator();
         var request = wire.object();
         try wire.put(a, &request, "jsonrpc", .{ .string = "2.0" });
@@ -177,7 +182,7 @@ pub const Client = struct {
         const now = std.Io.Timestamp.toSeconds(std.Io.Clock.real.now(self.http.io));
         const bearer = try jwt.sign(a, self.secret, now);
         var output = std.Io.Writer.Allocating.init(a);
-        const result = try self.http.fetch(.{ .location = .{ .url = self.url }, .method = .POST, .payload = body, .response_writer = &output.writer, .extra_headers = &.{ .{ .name = "authorization", .value = bearer }, .{ .name = "content-type", .value = "application/json" } }, .keep_alive = false });
+        const result = try fetch(&self.http, .{ .location = .{ .url = self.url }, .method = .POST, .payload = body, .response_writer = &output.writer, .extra_headers = &.{ .{ .name = "authorization", .value = bearer }, .{ .name = "content-type", .value = "application/json" } }, .keep_alive = false });
         if (result.status != .ok) return error.EngineHttpStatus;
         if (output.written().len > 32 * 1024 * 1024) return error.EngineResponseTooLarge;
         const parsed = std.json.parseFromSlice(wire.Value, a, output.written(), .{ .allocate = .alloc_always }) catch return error.InvalidEngineResponse;
@@ -265,4 +270,17 @@ test "Engine verdict mapping keeps pending and invalid block hash distinct" {
         try std.testing.expectEqual(case.expected, (try parseVerdict(value)).status);
         value.object.deinit(a);
     }
+}
+
+test "Engine transport failure remains an error" {
+    const a = std.testing.allocator;
+    var client: Client = .{ .allocator = a, .http = .{ .allocator = a, .io = std.testing.io }, .arena = std.heap.ArenaAllocator.init(a), .built_arena = std.heap.ArenaAllocator.init(a), .url = "http://engine.test", .secret = .{0x42} ** 32, .fork = .osaka };
+    defer client.deinit();
+    const failing = struct {
+        /// Simulates a failed connection without opening a socket.
+        fn fetch(_: *std.http.Client, _: std.http.Client.FetchOptions) std.http.Client.FetchError!std.http.Client.FetchResult {
+            return error.ConnectionRefused;
+        }
+    }.fetch;
+    try std.testing.expectError(error.ConnectionRefused, client.callWithFetch("engine_exchangeCapabilities", &.{}, failing));
 }

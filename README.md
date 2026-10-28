@@ -47,7 +47,11 @@ zig build test -- --fuzz
 
 The compiled binary lands in `zig-out/bin/hightower`.
 
-CI (`.github/workflows/ci.yml`): `zig fmt --check`, `zig build`, `zig build test`, `zig build test-transition`, and Bruno HTTP checks on Zig 0.16.0.
+CI (`.github/workflows/ci.yml`): `zig fmt --check`, `zig build`, `zig build test`, `zig build test-transition`, pinned Geth v1.17.7–v1.17.10 Engine API interoperability checks, and Bruno HTTP checks on Zig 0.16.0.
+
+## JSON conventions
+
+Build valid JSON from structured values and serialize it; parse responses and check their fields. Do not embed valid JSON as escaped string literals or assemble it by concatenating strings, including in tests. Use raw literals only when the exact bytes matter, such as a malformed-JSON test or a wire-format fixture.
 
 ## Project layout
 

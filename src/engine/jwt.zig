@@ -10,7 +10,7 @@ const header = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
 
 /// Creates an Engine API bearer token for the supplied Unix second.
 pub fn sign(a: std.mem.Allocator, secret: [32]u8, issued_at: i64) ![]u8 {
-    const payload = try std.fmt.allocPrint(a, "{{\"iat\":{d}}}", .{issued_at});
+    const payload = try std.json.Stringify.valueAlloc(a, .{ .iat = issued_at }, .{});
     defer a.free(payload);
     const encoded_payload = try a.alloc(u8, encoder.calcSize(payload.len));
     defer a.free(encoded_payload);
