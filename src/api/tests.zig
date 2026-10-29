@@ -16,7 +16,7 @@ fn validPayload(_: *anyopaque, _: consensus.NewPayloadRequest) anyerror!consensu
 }
 
 /// Mark pinned fixture block data available for import.
-fn available(_: *anyopaque, _: fulu.Root) anyerror!bool {
+fn available(_: *anyopaque, _: fulu.Root, _: *const fulu.BeaconBlock) anyerror!bool {
     return true;
 }
 

@@ -28,11 +28,12 @@ pub const LatestMessage = struct {
 
 pub const DataAvailabilityCheck = struct {
     context: *anyopaque,
-    is_available: *const fn (*anyopaque, fulu.Root) anyerror!bool,
+    is_available: *const fn (*anyopaque, fulu.Root, *const fulu.BeaconBlock) anyerror!bool,
 
     /// Check whether all required data for a block root is available.
-    pub fn check(self: DataAvailabilityCheck, root: fulu.Root) anyerror!bool {
-        return self.is_available(self.context, root);
+    pub fn check(self: DataAvailabilityCheck, root: fulu.Root, block: *const fulu.BeaconBlock) anyerror!bool {
+        if (block.body.blob_kzg_commitments.data.len == 0) return true;
+        return self.is_available(self.context, root, block);
     }
 };
 
@@ -186,7 +187,7 @@ pub fn onBlock(store: *Store, signed_block: fulu.SignedBeaconBlock, engine: engi
 
     const block_root = try merkle.HashTreeRoot(store.allocator, block);
     if (store.blocks.contains(block_root)) return error.DuplicateBlock;
-    if (!try availability.check(block_root)) return error.DataUnavailable;
+    if (!try availability.check(block_root, &block)) return error.DataUnavailable;
 
     var state = try cloneSSZ(store.allocator, fulu.BeaconState, parent_state.*);
     defer ssz.freeDecoded(store.allocator, fulu.BeaconState, state);
@@ -524,7 +525,7 @@ const AvailabilityTestContext = struct {
     calls: usize = 0,
 
     /// Return the configured availability result and count checks.
-    fn check(context: *anyopaque, _: fulu.Root) anyerror!bool {
+    fn check(context: *anyopaque, _: fulu.Root, _: *const fulu.BeaconBlock) anyerror!bool {
         const self: *AvailabilityTestContext = @ptrCast(@alignCast(context));
         self.calls += 1;
         return self.available;
@@ -567,6 +568,20 @@ test "fork-choice rejects unavailable block without changing the store" {
     try std.testing.expectEqual(@as(usize, 0), store.block_timeliness.count());
     try std.testing.expectEqual([_]u8{0} ** 32, store.proposer_boost_root);
     try std.testing.expectEqual(store.justified_checkpoint.root, try getHead(&store));
+}
+
+test "blobless blocks need no availability callback" {
+    const allocator = std.testing.allocator;
+    const fixture = try loadAvailabilityFixture(allocator);
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, fixture[0]);
+    defer ssz.freeDecoded(allocator, fulu.BeaconBlock, fixture[1]);
+    defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, fixture[2]);
+    var block = fixture[2].message;
+    block.body.blob_kzg_commitments = .{ .data = &.{} };
+    var context = AvailabilityTestContext{ .available = false };
+    const check = DataAvailabilityCheck{ .context = &context, .is_available = AvailabilityTestContext.check };
+    try std.testing.expect(try check.check([_]u8{0} ** 32, &block));
+    try std.testing.expectEqual(@as(usize, 0), context.calls);
 }
 
 test "fork-choice stores an available block and assigns timely proposer boost" {

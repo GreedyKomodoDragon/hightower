@@ -11,9 +11,14 @@ pub const Error = error{
 
 /// Decompresses one Snappy block, rejecting malformed data or preset-oversized output before allocation.
 pub fn decompress(allocator: std.mem.Allocator, input: []const u8) (Error || std.mem.Allocator.Error)![]u8 {
+    return decompressLimited(allocator, input, preset.MAX_SNAPPY_DECOMPRESSED_BLOCK_BYTES);
+}
+
+/// Decode a block under a caller-supplied wire size cap.
+pub fn decompressLimited(allocator: std.mem.Allocator, input: []const u8, max_output: usize) (Error || std.mem.Allocator.Error)![]u8 {
     var cursor: usize = 0;
     const output_len = try readVarint(input, &cursor);
-    if (output_len > preset.MAX_SNAPPY_DECOMPRESSED_BLOCK_BYTES) return error.OutputTooLarge;
+    if (output_len > max_output) return error.OutputTooLarge;
     const output = try allocator.alloc(u8, output_len);
     errdefer allocator.free(output);
 
@@ -70,6 +75,32 @@ pub fn decompress(allocator: std.mem.Allocator, input: []const u8) (Error || std
     return output;
 }
 
+/// Encode a valid Snappy block using literals; callers enforce encoded peer limits.
+/// shortcut: literals can exceed gossip frame limits near 10 MiB; add match compression before sending such payloads.
+pub fn compress(allocator: std.mem.Allocator, input: []const u8) std.mem.Allocator.Error![]u8 {
+    var output: std.ArrayList(u8) = .empty;
+    errdefer output.deinit(allocator);
+    var length = input.len;
+    while (length >= 128) : (length >>= 7) try output.append(allocator, @as(u8, @truncate(length)) | 0x80);
+    try output.append(allocator, @intCast(length));
+    var offset: usize = 0;
+    while (offset < input.len) {
+        const chunk_len = @min(input.len - offset, 65536);
+        const encoded_len = chunk_len - 1;
+        if (encoded_len < 60) {
+            try output.append(allocator, @intCast(encoded_len << 2));
+        } else {
+            const extra: usize = if (encoded_len <= 0xff) 1 else 2;
+            try output.append(allocator, @intCast((59 + extra) << 2));
+            try output.append(allocator, @truncate(encoded_len));
+            if (extra == 2) try output.append(allocator, @truncate(encoded_len >> 8));
+        }
+        try output.appendSlice(allocator, input[offset..][0..chunk_len]);
+        offset += chunk_len;
+    }
+    return output.toOwnedSlice(allocator);
+}
+
 /// Reads the Snappy length prefix and advances the cursor, rejecting truncated or overlong values.
 fn readVarint(input: []const u8, cursor: *usize) Error!usize {
     var value: usize = 0;
@@ -111,4 +142,17 @@ test "Snappy block decoder rejects bad offsets and truncated input" {
     try std.testing.expectError(error.MalformedBlock, decompress(std.testing.allocator, &[_]u8{ 2, 1, 1, 0 }));
     try std.testing.expectError(error.MalformedBlock, decompress(std.testing.allocator, &[_]u8{ 3, 8, 'a' }));
     try std.testing.expectError(error.OutputTooLarge, decompress(std.testing.allocator, &[_]u8{ 0x80, 0x80, 0x80, 0x21 }));
+}
+
+test "Snappy literal encoder round trips across the 64 KiB boundary" {
+    const allocator = std.testing.allocator;
+    const input = try allocator.alloc(u8, 65537);
+    defer allocator.free(input);
+    @memset(input, 0x42);
+    const encoded = try compress(allocator, input);
+    defer allocator.free(encoded);
+    const decoded = try decompressLimited(allocator, encoded, input.len);
+    defer allocator.free(decoded);
+    try std.testing.expectEqualSlices(u8, input, decoded);
+    try std.testing.expectError(error.OutputTooLarge, decompressLimited(allocator, encoded, input.len - 1));
 }

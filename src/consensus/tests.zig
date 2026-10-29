@@ -24,6 +24,7 @@ test {
     _ = @import("bls.zig");
     _ = @import("bls_vectors_test.zig");
     _ = @import("snappy.zig");
+    _ = @import("p2p_wire.zig");
     _ = @import("fixture_runner.zig");
     _ = @import("transition.zig");
     _ = @import("fork.zig");
@@ -37,6 +38,7 @@ test {
     _ = @import("pending_consolidations.zig");
     _ = @import("pending_deposits.zig");
     _ = @import("fork_choice.zig");
+    _ = @import("data_columns.zig");
     _ = @import("fork_choice_snapshot.zig");
 }
 

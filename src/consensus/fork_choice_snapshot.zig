@@ -336,7 +336,7 @@ test "snapshot round trip and recovery errors" {
 }
 
 /// Accept fixture blocks whose availability has already been established.
-fn fixtureAvailable(_: *anyopaque, _: fulu.Root) anyerror!bool {
+fn fixtureAvailable(_: *anyopaque, _: fulu.Root, _: *const fulu.BeaconBlock) anyerror!bool {
     return true;
 }
 
