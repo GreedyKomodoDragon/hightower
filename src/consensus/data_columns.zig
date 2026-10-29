@@ -22,6 +22,27 @@ pub const column_count: usize = 128;
 pub const custody_requirement: usize = 4;
 pub const samples_per_slot: usize = 8;
 pub const retention_epochs: u64 = 4096;
+pub const max_request_blocks: usize = 128;
+pub const max_request_columns: usize = max_request_blocks * column_count;
+
+pub const ByRoot = struct {
+    block_root: fulu.Root,
+    columns: []const u64,
+};
+
+pub const ServedColumn = struct {
+    block_root: fulu.Root,
+    slot: u64,
+    index: u8,
+    /// Borrowed from Store; callers must finish encoding before pruning it.
+    bytes: []const u8,
+};
+
+pub const CanonicalRoots = struct {
+    context: *anyopaque,
+    /// Return the block root selected by one fork-choice snapshot at this slot.
+    root_at_slot: *const fn (*anyopaque, u64) ?fulu.Root,
+};
 
 pub const Groups = struct {
     values: [column_count]u8 = undefined,
@@ -168,6 +189,49 @@ pub const Store = struct {
         return entry.bytes;
     }
 
+    /// Select verified custodied columns in request order, bounded by the Fulu limit.
+    pub fn serveByRoot(self: *const Store, allocator: std.mem.Allocator, requests: []const ByRoot) ![]ServedColumn {
+        if (requests.len > max_request_blocks) return error.InvalidRequest;
+        var total: usize = 0;
+        var result: std.ArrayList(ServedColumn) = .empty;
+        errdefer result.deinit(allocator);
+        for (requests) |request| {
+            if (request.columns.len > column_count or request.columns.len > max_request_columns - total) return error.InvalidRequest;
+            total += request.columns.len;
+            var seen = [_]bool{false} ** column_count;
+            for (request.columns) |index| {
+                if (index >= column_count or seen[index]) return error.InvalidRequest;
+                seen[index] = true;
+                if (!self.custody.contains(index)) continue;
+                const entry = self.columns.get(.{ .root = request.block_root, .index = @intCast(index) }) orelse continue;
+                try result.append(allocator, .{ .block_root = request.block_root, .slot = entry.slot, .index = @intCast(index), .bytes = entry.bytes });
+            }
+        }
+        return result.toOwnedSlice(allocator);
+    }
+
+    /// Serve a canonical slot range in (slot, column_index) order, skipping empty slots.
+    pub fn serveByRange(self: *const Store, allocator: std.mem.Allocator, start_slot: u64, count: u64, columns: []const u64, canonical: CanonicalRoots) ![]ServedColumn {
+        if (count > max_request_blocks or start_slot > std.math.maxInt(u64) - count or columns.len > column_count) return error.InvalidRequest;
+        var requested = [_]bool{false} ** column_count;
+        for (columns) |index| {
+            if (index >= column_count or requested[index]) return error.InvalidRequest;
+            requested[index] = true;
+        }
+        var result: std.ArrayList(ServedColumn) = .empty;
+        errdefer result.deinit(allocator);
+        for (start_slot..start_slot + count) |slot| {
+            const root = canonical.root_at_slot(canonical.context, slot) orelse continue;
+            for (requested, 0..) |want, index| {
+                if (!want or !self.custody.contains(index)) continue;
+                const entry = self.columns.get(.{ .root = root, .index = @intCast(index) }) orelse continue;
+                if (entry.slot != slot) return error.InconsistentStore;
+                try result.append(allocator, .{ .block_root = root, .slot = slot, .index = @intCast(index), .bytes = entry.bytes });
+            }
+        }
+        return result.toOwnedSlice(allocator);
+    }
+
     /// Drop columns older than the required request retention window.
     pub fn prune(self: *Store, current_slot: u64) !void {
         const window = retention_epochs * preset.SLOTS_PER_EPOCH;
@@ -194,6 +258,53 @@ test "custody selection is deterministic, distinct, and nested in sampling" {
     try std.testing.expectError(error.InvalidCustodyCount, selectGroups(id, 129));
     const official = try selectGroups([_]u8{0xff} ** 32, 4);
     try std.testing.expectEqualSlices(u8, &.{ 1, 47, 87, 102 }, official.values[0..official.len]);
+}
+
+test "column serving enforces custody, request bounds, canonical order and retention" {
+    const allocator = std.testing.allocator;
+    const root_a = [_]u8{1} ** 32;
+    const root_b = [_]u8{2} ** 32;
+    var store = try Store.init(allocator, [_]u8{0} ** 32, custody_requirement);
+    defer store.deinit();
+    const first = store.custody.values[0];
+    const second = store.custody.values[1];
+    try store.columns.put(.{ .root = root_a, .index = first }, .{ .slot = 10, .bytes = try allocator.dupe(u8, "a0") });
+    try store.columns.put(.{ .root = root_a, .index = second }, .{ .slot = 10, .bytes = try allocator.dupe(u8, "a1") });
+    try store.columns.put(.{ .root = root_b, .index = first }, .{ .slot = 12, .bytes = try allocator.dupe(u8, "b0") });
+    var uncustodied: u64 = 0;
+    while (store.custody.contains(uncustodied)) : (uncustodied += 1) {}
+    const requested = [_]u64{ uncustodied, second, first };
+    const by_root = try store.serveByRoot(allocator, &.{.{ .block_root = root_a, .columns = &requested }});
+    defer allocator.free(by_root);
+    try std.testing.expectEqual(@as(usize, 2), by_root.len);
+    try std.testing.expectEqual(second, by_root[0].index);
+    try std.testing.expectEqual(first, by_root[1].index);
+    try std.testing.expectError(error.InvalidRequest, store.serveByRoot(allocator, &.{.{ .block_root = root_a, .columns = &.{ first, first } }}));
+    try std.testing.expectError(error.InvalidRequest, store.serveByRoot(allocator, &.{.{ .block_root = root_a, .columns = &.{128} }}));
+
+    const roots = struct {
+        fn at(_: *anyopaque, slot: u64) ?fulu.Root {
+            return switch (slot) {
+                10 => root_a,
+                12 => root_b,
+                else => null,
+            };
+        }
+    };
+    const canonical = CanonicalRoots{ .context = &store, .root_at_slot = roots.at };
+    const by_range = try store.serveByRange(allocator, 10, 3, &requested, canonical);
+    defer allocator.free(by_range);
+    try std.testing.expectEqual(@as(usize, 3), by_range.len);
+    try std.testing.expectEqual(first, by_range[0].index);
+    try std.testing.expectEqual(second, by_range[1].index);
+    try std.testing.expectEqual(@as(u64, 12), by_range[2].slot);
+    try std.testing.expectError(error.InvalidRequest, store.serveByRange(allocator, 10, 129, &requested, canonical));
+    try std.testing.expectError(error.InvalidRequest, store.serveByRange(allocator, 10, 1, &.{ second, second }, canonical));
+    try store.prune(10 + retention_epochs * preset.SLOTS_PER_EPOCH);
+    try std.testing.expect(store.get(root_a, first) != null);
+    try store.prune(10 + retention_epochs * preset.SLOTS_PER_EPOCH + 1);
+    try std.testing.expect(store.get(root_a, first) == null);
+    try std.testing.expect(store.get(root_b, first) != null);
 }
 
 test "availability needs eight matching selected columns" {
@@ -261,6 +372,23 @@ test "official PeerDAS columns complete the eight-sample availability gate" {
         try store.put(&settings, &sidecar, &signed.message, &state);
         try std.testing.expectEqual(i == inputs.len - 1, store.available(root, &signed.message));
     }
+    var custody_indices: [custody_requirement]u64 = undefined;
+    for (&custody_indices, store.custody.values[0..custody_requirement]) |*target, index| target.* = index;
+    const served = try store.serveByRoot(allocator, &.{.{ .block_root = root, .columns = &custody_indices }});
+    defer allocator.free(served);
+    try std.testing.expectEqual(custody_requirement, served.len);
+    for (served) |column| try std.testing.expectEqualSlices(u8, store.get(root, column.index).?, column.bytes);
+    var canonical_context = struct { slot: u64, root: fulu.Root }{ .slot = signed.message.slot, .root = root };
+    const canonical = CanonicalRoots{ .context = &canonical_context, .root_at_slot = struct {
+        fn at(context: *anyopaque, slot: u64) ?fulu.Root {
+            const snapshot: *@TypeOf(canonical_context) = @ptrCast(@alignCast(context));
+            return if (slot == snapshot.slot) snapshot.root else null;
+        }
+    }.at };
+    const range = try store.serveByRange(allocator, signed.message.slot, 1, &custody_indices, canonical);
+    defer allocator.free(range);
+    try std.testing.expectEqual(custody_requirement, range.len);
+    for (range, 0..) |column, i| try std.testing.expectEqual(store.custody.values[i], column.index);
     try fork_choice.onBlock(&choice, signed, engine.interface(), availability);
     try std.testing.expectEqual(@as(usize, 2), choice.blocks.count());
 }

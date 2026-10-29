@@ -55,6 +55,113 @@ pub const ResponseChunk = struct {
     payload: []u8,
 };
 
+/// Split a bounded Req/Resp byte stream into chunks as bytes arrive. Each
+/// returned payload is owned by the caller; deinit releases only buffered wire
+/// bytes. The stream ends at EOF, which the transport must report separately.
+pub const ResponseStream = struct {
+    allocator: std.mem.Allocator,
+    protocol: Protocol,
+    type_max: usize,
+    pending: std.ArrayList(u8) = .empty,
+    scan_offset: usize = 0,
+    scan_written: usize = 0,
+    declared: ?usize = null,
+
+    /// Initialize a stream for one negotiated protocol and SSZ type limit.
+    pub fn init(allocator: std.mem.Allocator, protocol: Protocol, type_max: usize) ResponseStream {
+        return .{ .allocator = allocator, .protocol = protocol, .type_max = type_max };
+    }
+
+    /// Release pending wire bytes after the stream closes.
+    pub fn deinit(self: *ResponseStream) void {
+        self.pending.deinit(self.allocator);
+    }
+
+    /// Buffer received bytes, rejecting a peer that exceeds its 16 MiB queue.
+    pub fn append(self: *ResponseStream, bytes: []const u8) !void {
+        if (bytes.len > 16 * 1024 * 1024 - self.pending.items.len) return error.PayloadTooLarge;
+        try self.pending.appendSlice(self.allocator, bytes);
+    }
+
+    /// Return the next complete chunk, or null while more wire bytes are needed.
+    pub fn next(self: *ResponseStream, expected_fork_digest: ?[4]u8) !?ResponseChunk {
+        const size = (try self.chunkLength()) orelse return null;
+        const chunk = try decodeResponseChunk(self.allocator, self.protocol, self.pending.items[0..size], expected_fork_digest, self.type_max);
+        std.mem.copyForwards(u8, self.pending.items[0 .. self.pending.items.len - size], self.pending.items[size..]);
+        self.pending.items.len -= size;
+        self.scan_offset = 0;
+        self.scan_written = 0;
+        self.declared = null;
+        return chunk;
+    }
+
+    /// Find a chunk boundary without rescanning frames already received.
+    fn chunkLength(self: *ResponseStream) !?usize {
+        const bytes = self.pending.items;
+        if (self.declared == null) {
+            if (bytes.len == 0) return null;
+            const code: ResponseCode = switch (bytes[0]) {
+                0 => .success,
+                1 => .invalid_request,
+                2 => .server_error,
+                3 => .resource_unavailable,
+                else => return error.InvalidResponseCode,
+            };
+            if (code == .resource_unavailable and self.protocol != .columns_by_root and self.protocol != .columns_by_range) return error.InvalidResponseCode;
+            var offset: usize = if (code == .success and hasForkContext(self.protocol)) 5 else 1;
+            if (bytes.len < offset) return null;
+            var length: u64 = 0;
+            var finished = false;
+            for (0..10) |i| {
+                if (offset >= bytes.len) return null;
+                const byte = bytes[offset];
+                offset += 1;
+                if (i == 9 and byte > 1) return error.InvalidLength;
+                length |= @as(u64, byte & 0x7f) << @intCast(i * 7);
+                if (byte & 0x80 == 0) {
+                    if (i > 0 and byte == 0) return error.InvalidLength;
+                    finished = true;
+                    break;
+                }
+            }
+            if (!finished) return error.InvalidLength;
+            const expected = std.math.cast(usize, length) orelse return error.PayloadTooLarge;
+            if (expected > @min(if (code == .success) self.type_max else 256, max_payload_size)) return error.PayloadTooLarge;
+            if (bytes.len - offset < stream_identifier.len) return null;
+            if (!std.mem.eql(u8, bytes[offset..][0..stream_identifier.len], &stream_identifier)) return error.InvalidFrame;
+            self.scan_offset = offset + stream_identifier.len;
+            self.declared = expected;
+        }
+        while (self.scan_written < self.declared.?) {
+            if (bytes.len - self.scan_offset < 4) return null;
+            const kind = bytes[self.scan_offset];
+            const frame_len = @as(usize, bytes[self.scan_offset + 1]) | (@as(usize, bytes[self.scan_offset + 2]) << 8) | (@as(usize, bytes[self.scan_offset + 3]) << 16);
+            if ((kind == 0 or kind == 1) and frame_len > frame_size + 4) return error.InvalidFrame;
+            if (frame_len > bytes.len - self.scan_offset - 4) return null;
+            const frame = bytes[self.scan_offset + 4 ..][0..frame_len];
+            if (kind >= 0x80 and kind <= 0xfe) {
+                self.scan_offset += 4 + frame_len;
+                continue;
+            }
+            if (kind == 0xff) {
+                if (!std.mem.eql(u8, frame, stream_identifier[4..])) return error.InvalidFrame;
+                self.scan_offset += 4 + frame_len;
+                continue;
+            }
+            if (kind != 0 and kind != 1 or frame.len < 4) return error.InvalidFrame;
+            const plain_len = if (kind == 1) frame.len - 4 else blk: {
+                const plain = try snappy.decompressLimited(self.allocator, frame[4..], frame_size);
+                defer self.allocator.free(plain);
+                break :blk plain.len;
+            };
+            if (plain_len == 0 or plain_len > self.declared.? - self.scan_written) return error.InvalidFrame;
+            self.scan_offset += 4 + frame_len;
+            self.scan_written += plain_len;
+        }
+        return self.scan_offset;
+    }
+};
+
 /// Return whether a successful response has a four-byte fork context.
 fn hasForkContext(protocol: Protocol) bool {
     return switch (protocol) {
@@ -310,4 +417,43 @@ test "response chunks enforce result codes, fork context, and error bounds" {
     try std.testing.expectError(error.InvalidResponseCode, decodeResponseChunk(allocator, .blocks_by_root, unavailable, digest, 0));
     try std.testing.expectError(error.InvalidResponseCode, decodeResponseChunk(allocator, .ping, &.{4}, null, 8));
     try std.testing.expectError(error.PayloadTooLarge, encodeResponseChunk(allocator, .ping, .invalid_request, null, &([_]u8{0} ** 257), 257));
+}
+
+test "response stream splits arbitrary reads and consecutive chunks" {
+    const allocator = std.testing.allocator;
+    const digest = [4]u8{ 1, 2, 3, 4 };
+    const first = try encodeResponseChunk(allocator, .columns_by_root, .success, digest, "column", 6);
+    defer allocator.free(first);
+    const second = try encodeResponseChunk(allocator, .columns_by_root, .resource_unavailable, null, "missing", 6);
+    defer allocator.free(second);
+    var stream = ResponseStream.init(allocator, .columns_by_root, 6);
+    defer stream.deinit();
+    for (first[0 .. first.len - 1]) |byte| {
+        try stream.append(&.{byte});
+        try std.testing.expect((try stream.next(digest)) == null);
+    }
+    try stream.append(first[first.len - 1 ..]);
+    try stream.append(second);
+    const decoded = (try stream.next(digest)).?;
+    defer allocator.free(decoded.payload);
+    try std.testing.expectEqualStrings("column", decoded.payload);
+    const unavailable = (try stream.next(digest)).?;
+    defer allocator.free(unavailable.payload);
+    try std.testing.expectEqual(ResponseCode.resource_unavailable, unavailable.code);
+    try std.testing.expectEqualStrings("missing", unavailable.payload);
+    try std.testing.expect((try stream.next(digest)) == null);
+}
+
+test "response stream finds a compressed Snappy frame boundary" {
+    const allocator = std.testing.allocator;
+    var chunk = [_]u8{ 0, 3, 0xff, 6, 0, 0, 's', 'N', 'a', 'P', 'p', 'Y', 0, 9, 0, 0, 0, 0, 0, 0, 3, 8, 'a', 'b', 'c' };
+    std.mem.writeInt(u32, chunk[16..20], maskedCrc("abc"), .little);
+    var stream = ResponseStream.init(allocator, .ping, 3);
+    defer stream.deinit();
+    try stream.append(chunk[0..21]);
+    try std.testing.expect((try stream.next(null)) == null);
+    try stream.append(chunk[21..]);
+    const decoded = (try stream.next(null)).?;
+    defer allocator.free(decoded.payload);
+    try std.testing.expectEqualStrings("abc", decoded.payload);
 }
