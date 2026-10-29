@@ -280,25 +280,25 @@ pub const Store = struct {
         defer self.mutex.unlock(self.io);
         const window = retention_epochs * preset.SLOTS_PER_EPOCH;
         const cutoff = current_slot -| window;
-        while (true) {
-            const rows = try self.database.scan(self.allocator, &.{'S'}, &.{'T'}, null, 128, 8192);
-            defer lsm.Database.freeRows(self.allocator, rows);
+        const upper = slotKey(cutoff, [_]u8{0} ** 32, 0);
+        const expired = try self.database.snapshotKeys(self.allocator, &.{'S'}, &upper);
+        defer lsm.Database.freeKeys(self.allocator, expired);
+        for (0..(expired.len + 127) / 128) |batch| {
+            const keys = expired[batch * 128 .. @min(expired.len, (batch + 1) * 128)];
             var ops: [256]lsm.Operation = undefined;
             var data_keys: [128][34]u8 = undefined;
             var count: usize = 0;
-            for (rows, 0..) |row, i| {
-                if (row.key.len != 42) return error.InconsistentStore;
-                const slot = std.mem.readInt(u64, row.key[1..9], .big);
-                if (slot >= cutoff) break;
-                @memcpy(data_keys[i][1..34], row.key[9..42]);
+            for (keys, 0..) |key, i| {
+                if (key.len != 42) return error.InconsistentStore;
+                @memcpy(data_keys[i][1..34], key[9..42]);
                 data_keys[i][0] = 'D';
-                ops[count] = .{ .delete = row.key };
+                ops[count] = .{ .delete = key };
                 ops[count + 1] = .{ .delete = &data_keys[i] };
                 count += 2;
             }
-            if (count == 0) return;
             try self.database.write(ops[0..count]);
         }
+        if (expired.len != 0) try self.database.reclaimIfNeeded();
     }
 
     /// Free owned response payloads after a peer response is encoded.
@@ -418,6 +418,34 @@ test "column serving enforces custody, request bounds, canonical order and reten
     try store.prune(10 + retention_epochs * preset.SLOTS_PER_EPOCH + 1);
     try std.testing.expect(!try has(&store, root_a, first));
     try std.testing.expect(try has(&store, root_b, first));
+}
+
+test "pruning multiple batches reclaims expired columns across restart" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const genesis = [_]u8{9} ** 32;
+    const node = [_]u8{0} ** 32;
+    var store = try Store.open(allocator, std.testing.io, tmp.dir, "columns", genesis, node, custody_requirement);
+    const index = store.custody.values[0];
+    for (0..130) |i| {
+        var root = [_]u8{0} ** 32;
+        std.mem.writeInt(u64, root[0..8], i + 1, .little);
+        try putRaw(&store, root, index, 1, "expired");
+    }
+    const live_root = [_]u8{0xff} ** 32;
+    try putRaw(&store, live_root, index, 2, "live");
+    try store.prune(1 + retention_epochs * preset.SLOTS_PER_EPOCH + 1);
+    try std.testing.expectEqual(@as(usize, 3), store.database.index.count());
+    try std.testing.expect(try has(&store, live_root, index));
+    store.deinit();
+    var restored = try Store.open(allocator, std.testing.io, tmp.dir, "columns", genesis, node, custody_requirement);
+    defer restored.deinit();
+    try std.testing.expectEqual(@as(usize, 3), restored.database.index.count());
+    try std.testing.expect(try has(&restored, live_root, index));
+    var first_root = [_]u8{0} ** 32;
+    std.mem.writeInt(u64, first_root[0..8], 1, .little);
+    try std.testing.expect(!try has(&restored, first_root, index));
 }
 
 test "availability needs eight matching selected columns" {

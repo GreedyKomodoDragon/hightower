@@ -205,6 +205,40 @@ pub const Database = struct {
         return rows.toOwnedSlice(allocator);
     }
 
+    /// Snapshot live keys in [lower, upper) once for callers that batch mutations.
+    pub fn snapshotKeys(self: *Database, allocator: std.mem.Allocator, lower: []const u8, upper: []const u8) ![][]u8 {
+        try self.mutex.lockShared(self.io);
+        defer self.mutex.unlockShared(self.io);
+        if (self.poisoned) return error.DatabaseNeedsReopen;
+        var result: std.ArrayList([]u8) = .empty;
+        errdefer {
+            for (result.items) |key| allocator.free(key);
+            result.deinit(allocator);
+        }
+        var iter = self.index.iterator();
+        while (iter.next()) |item| {
+            const key = item.key_ptr.*;
+            if (item.value_ptr.deleted or std.mem.order(u8, key, lower) == .lt or std.mem.order(u8, key, upper) != .lt) continue;
+            const copy = try allocator.dupe(u8, key);
+            result.append(allocator, copy) catch |err| {
+                allocator.free(copy);
+                return err;
+            };
+        }
+        std.mem.sort([]u8, result.items, {}, struct {
+            fn less(_: void, a: []u8, b: []u8) bool {
+                return std.mem.order(u8, a, b) == .lt;
+            }
+        }.less);
+        return result.toOwnedSlice(allocator);
+    }
+
+    /// Free a key snapshot returned by snapshotKeys.
+    pub fn freeKeys(allocator: std.mem.Allocator, keys_snapshot: [][]u8) void {
+        for (keys_snapshot) |key| allocator.free(key);
+        allocator.free(keys_snapshot);
+    }
+
     /// Free a page returned by scan.
     pub fn freeRows(allocator: std.mem.Allocator, rows: []Row) void {
         for (rows) |row| {
@@ -222,12 +256,29 @@ pub const Database = struct {
         try self.flushLocked();
     }
 
-    /// Merge four similarly sized immutable tables when available.
+    /// Fully compact live keys and reclaim tombstones, including small batches.
     pub fn compact(self: *Database) !void {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         if (self.poisoned) return error.DatabaseNeedsReopen;
-        try self.compactLocked();
+        try self.flushLocked();
+        try self.reclaimLocked();
+    }
+
+    /// Reclaim accumulated tombstones by replacing every table with live keys.
+    pub fn reclaimIfNeeded(self: *Database) !void {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.poisoned) return error.DatabaseNeedsReopen;
+        var deleted: usize = 0;
+        var live: usize = 0;
+        var iter = self.index.iterator();
+        while (iter.next()) |item| {
+            if (item.value_ptr.deleted) deleted += 1 else live += 1;
+        }
+        if (deleted < 128 or deleted < live / 4) return;
+        try self.flushLocked();
+        try self.reclaimLocked();
     }
 
     /// Find a live value while the read lock is held.
@@ -335,7 +386,7 @@ pub const Database = struct {
         if (self.mem_bytes == 0) return;
         const table_id = self.next_id;
         const wal_id = table_id + 1;
-        var moves = try self.writeTable(table_id, 0, null);
+        var moves = try self.writeTable(table_id, 0, null, false);
         defer moves.deinit(self.allocator);
         var installed = false;
         const wal_name = try fileName(self.allocator, "wal", wal_id);
@@ -393,7 +444,7 @@ pub const Database = struct {
                 continue;
             }
             const new_id = self.next_id;
-            var moves = try self.writeTable(new_id, level + 1, &selected);
+            var moves = try self.writeTable(new_id, level + 1, &selected, false);
             defer moves.deinit(self.allocator);
             var replacement: std.ArrayList(Table) = .empty;
             defer replacement.deinit(self.allocator);
@@ -420,19 +471,65 @@ pub const Database = struct {
                 defer self.allocator.free(name);
                 self.dir.deleteFile(self.io, name) catch {};
             }
+            if (moves.items.len == 0) {
+                const name = try fileName(self.allocator, "sst", new_id);
+                defer self.allocator.free(name);
+                self.dir.deleteFile(self.io, name) catch {};
+            }
             level = 0;
         }
     }
 
+    /// Install one table of live keys before deleting old tables and tombstones.
+    fn reclaimLocked(self: *Database) !void {
+        const new_id = self.next_id;
+        var moves = try self.writeTable(new_id, 0, null, true);
+        defer moves.deinit(self.allocator);
+        var dead: std.ArrayList([]const u8) = .empty;
+        defer dead.deinit(self.allocator);
+        var manifest_attempted = false;
+        errdefer if (!manifest_attempted) {
+            const name = fileName(self.allocator, "sst", new_id) catch null;
+            if (name) |path| {
+                defer self.allocator.free(path);
+                self.dir.deleteFile(self.io, path) catch {};
+            }
+        };
+        var iter = self.index.iterator();
+        while (iter.next()) |item| if (item.value_ptr.deleted) {
+            try dead.append(self.allocator, item.key_ptr.*);
+        };
+        try self.tables.ensureTotalCapacity(self.allocator, 1);
+        const replacement = [_]Table{.{ .id = new_id, .level = 0 }};
+        manifest_attempted = true;
+        self.saveManifest(self.wal_id, new_id + 1, &replacement) catch |err| {
+            self.poisoned = true;
+            return err;
+        };
+        for (moves.items) |move| self.index.getPtr(move.key).?.location = .{ .table = .{ .id = new_id, .offset = move.offset } };
+        for (dead.items) |key| {
+            const removed = self.index.fetchRemove(key).?;
+            self.allocator.free(removed.key);
+        }
+        for (self.tables.items) |table| {
+            const name = fileName(self.allocator, "sst", table.id) catch continue;
+            defer self.allocator.free(name);
+            self.dir.deleteFile(self.io, name) catch {};
+        }
+        self.tables.clearRetainingCapacity();
+        self.tables.appendAssumeCapacity(replacement[0]);
+        self.next_id = new_id + 1;
+    }
+
     /// Serialize selected current entries in key order into one immutable SST.
-    fn writeTable(self: *Database, id: u64, level: u8, sources: ?*const [4]u64) !std.ArrayList(Move) {
+    fn writeTable(self: *Database, id: u64, level: u8, sources: ?*const [4]u64, live_only: bool) !std.ArrayList(Move) {
         _ = level;
         var keys: std.ArrayList([]const u8) = .empty;
         defer keys.deinit(self.allocator);
         var iter = self.index.iterator();
         while (iter.next()) |item| {
             const location = item.value_ptr.location;
-            const selected = if (sources) |ids| blk: {
+            const selected = if (live_only) !item.value_ptr.deleted else if (sources) |ids| blk: {
                 if (location != .table) break :blk false;
                 for (ids) |candidate| if (candidate == location.table.id) break :blk true;
                 break :blk false;
@@ -707,6 +804,52 @@ test "multiple compaction levels retain the latest value" {
     defer allocator.free(hot);
     try std.testing.expectEqualStrings("revision-19", hot);
     try std.testing.expect((try restored.get(allocator, "cold")) == null);
+}
+
+test "reclamation removes tombstones without reviving older table values" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var db = try Database.open(allocator, io, tmp.dir, "kv");
+    for (0..4) |round| {
+        for (0..130) |i| {
+            const key = try std.fmt.allocPrint(allocator, "expired-{d}", .{i});
+            defer allocator.free(key);
+            const value = try std.fmt.allocPrint(allocator, "round-{d}", .{round});
+            defer allocator.free(value);
+            try db.put(key, value);
+        }
+        try db.flush();
+    }
+    try db.put("keep", "live");
+    for (0..130) |i| {
+        const key = try std.fmt.allocPrint(allocator, "expired-{d}", .{i});
+        defer allocator.free(key);
+        try db.delete(key);
+    }
+    try db.reclaimIfNeeded();
+    try std.testing.expectEqual(@as(usize, 1), db.index.count());
+    try std.testing.expectEqual(@as(usize, 1), db.tables.items.len);
+    db.close();
+    var restored = try Database.open(allocator, io, tmp.dir, "kv");
+    defer restored.close();
+    try std.testing.expectEqual(@as(usize, 1), restored.index.count());
+    try std.testing.expect((try restored.get(allocator, "expired-0")) == null);
+    const keep = (try restored.get(allocator, "keep")).?;
+    defer allocator.free(keep);
+    try std.testing.expectEqualStrings("live", keep);
+    try restored.put("expired-0", "new");
+    try restored.flush();
+    const revived = (try restored.get(allocator, "expired-0")).?;
+    defer allocator.free(revived);
+    try std.testing.expectEqualStrings("new", revived);
+    try restored.put("gone", "old");
+    try restored.flush();
+    try restored.delete("gone");
+    try restored.compact();
+    try std.testing.expectEqual(@as(usize, 2), restored.index.count());
+    try std.testing.expect((try restored.get(allocator, "gone")) == null);
 }
 
 test "recovery discards an incomplete WAL tail and rejects complete corruption" {
