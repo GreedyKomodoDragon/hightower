@@ -60,6 +60,7 @@ Chain:      [Block 0] ───────────────────�
 | Gossipsub | The peer-to-peer protocol that spreads consensus messages through subscribed topics. |
 | Subnet | A numbered gossip topic group used to distribute attestations or data columns. |
 | Req/Resp | The consensus network's request and response streams for fetching peer data. |
+| Response chunk | One item in a Req/Resp reply, with a result code and an encoded payload; block and data-column items also carry a fork digest. |
 | Snappy frame | A checksummed chunk in the streaming form of Snappy compression used by consensus requests and responses. |
 | Authorization list | Signed permissions carried by a set-code transaction to delegate account behavior. |
 | Delegation indicator | The 23-byte code marker that points an account at another address's executable code under EIP-7702. |
