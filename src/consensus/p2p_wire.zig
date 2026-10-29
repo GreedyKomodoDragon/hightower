@@ -1,8 +1,9 @@
 // Consensus gossip carries one SSZ value in a Snappy block. Req/resp streams
 // instead prefix the uncompressed SSZ length and carry Snappy frames, so peers
 // can reject oversized values before allocating. Frames have 64 KiB data
-// limits and masked CRC32C checksums. A response code and fork context are
-// outside this payload layer and must be checked by the protocol handler.
+// limits and masked CRC32C checksums. Response chunks put a result byte and,
+// for block or column data, a fork digest before that payload. The caller
+// checks that digest against the decoded object's slot before using the data.
 //
 // gossip: SSZ -> Snappy block
 // request/response payload: SSZ length -> Snappy stream header -> frames
@@ -38,6 +39,72 @@ pub const Protocol = enum {
 };
 
 pub const Topic = enum { block, attestation, aggregate_attestation, data_column };
+
+pub const ResponseCode = enum(u8) {
+    success = 0,
+    invalid_request = 1,
+    server_error = 2,
+    resource_unavailable = 3,
+};
+
+pub const ResponseChunk = struct {
+    code: ResponseCode,
+    /// Present on successful block and column responses; verify it against the decoded slot.
+    fork_digest: ?[4]u8,
+    /// The caller owns this decoded SSZ payload and must free it.
+    payload: []u8,
+};
+
+/// Return whether a successful response has a four-byte fork context.
+fn hasForkContext(protocol: Protocol) bool {
+    return switch (protocol) {
+        .blocks_by_root, .blocks_by_range, .columns_by_root, .columns_by_range => true,
+        else => false,
+    };
+}
+
+/// Encode one complete response chunk; errors carry at most 256 raw message bytes.
+pub fn encodeResponseChunk(allocator: std.mem.Allocator, protocol: Protocol, code: ResponseCode, fork_digest: ?[4]u8, payload: []const u8, type_max: usize) ![]u8 {
+    const success = code == .success;
+    if (success and (fork_digest != null) != hasForkContext(protocol)) return error.InvalidForkContext;
+    if (!success and fork_digest != null) return error.InvalidForkContext;
+    if (code == .resource_unavailable and protocol != .columns_by_root and protocol != .columns_by_range) return error.InvalidResponseCode;
+    if (!success and payload.len > 256) return error.PayloadTooLarge;
+    const encoded = try encodePayload(allocator, payload, if (success) type_max else 256);
+    defer allocator.free(encoded);
+    const prefix_len: usize = if (fork_digest != null) 5 else 1;
+    const output = try allocator.alloc(u8, prefix_len + encoded.len);
+    output[0] = @intFromEnum(code);
+    if (fork_digest) |digest| @memcpy(output[1..5], &digest);
+    @memcpy(output[prefix_len..], encoded);
+    return output;
+}
+
+/// Decode one complete chunk; a known fork is checked early, otherwise the wire digest is returned.
+pub fn decodeResponseChunk(allocator: std.mem.Allocator, protocol: Protocol, encoded: []const u8, expected_fork_digest: ?[4]u8, type_max: usize) !ResponseChunk {
+    if (encoded.len == 0) return error.InvalidResponseCode;
+    const code: ResponseCode = switch (encoded[0]) {
+        0 => .success,
+        1 => .invalid_request,
+        2 => .server_error,
+        3 => .resource_unavailable,
+        else => return error.InvalidResponseCode,
+    };
+    if (code == .resource_unavailable and protocol != .columns_by_root and protocol != .columns_by_range) return error.InvalidResponseCode;
+    const success = code == .success;
+    var prefix_len: usize = 1;
+    var fork_digest: ?[4]u8 = null;
+    if (success and hasForkContext(protocol)) {
+        if (encoded.len < 5) return error.InvalidForkContext;
+        fork_digest = encoded[1..5].*;
+        if (expected_fork_digest) |expected| {
+            if (!std.mem.eql(u8, encoded[1..5], &expected)) return error.InvalidForkContext;
+        }
+        prefix_len = 5;
+    } else if (expected_fork_digest != null and !hasForkContext(protocol)) return error.InvalidForkContext;
+    const payload = try decodePayload(allocator, encoded[prefix_len..], if (success) type_max else 256);
+    return .{ .code = code, .fork_digest = fork_digest, .payload = payload };
+}
 
 /// Build a Fulu gossip topic, validating the subnet where one is required.
 pub fn topicName(allocator: std.mem.Allocator, digest: [4]u8, kind: Topic, subnet: ?u8) ![]u8 {
@@ -206,4 +273,41 @@ test "Fulu protocol IDs and gossip topic names use exact fork digest and bounds"
     try std.testing.expectEqualStrings("/eth2/1234abcd/data_column_sidecar_127/ssz_snappy", column);
     try std.testing.expectError(error.InvalidSubnet, topicName(allocator, digest, .data_column, 128));
     try std.testing.expectError(error.InvalidSubnet, topicName(allocator, digest, .attestation, 64));
+}
+
+test "response chunks enforce result codes, fork context, and error bounds" {
+    const allocator = std.testing.allocator;
+    const digest = [4]u8{ 1, 2, 3, 4 };
+    const block = try encodeResponseChunk(allocator, .blocks_by_root, .success, digest, "block", 5);
+    defer allocator.free(block);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 1, 2, 3, 4 }, block[0..5]);
+    const decoded = try decodeResponseChunk(allocator, .blocks_by_root, block, digest, 5);
+    defer allocator.free(decoded.payload);
+    try std.testing.expectEqual(ResponseCode.success, decoded.code);
+    try std.testing.expectEqual(digest, decoded.fork_digest.?);
+    try std.testing.expectEqualStrings("block", decoded.payload);
+    const unknown_slot = try decodeResponseChunk(allocator, .blocks_by_root, block, null, 5);
+    defer allocator.free(unknown_slot.payload);
+    try std.testing.expectEqual(digest, unknown_slot.fork_digest.?);
+    const skipped_slots = try decodeResponseChunk(allocator, .blocks_by_range, block, null, 5);
+    defer allocator.free(skipped_slots.payload);
+    try std.testing.expectEqual(digest, skipped_slots.fork_digest.?);
+    const column = try encodeResponseChunk(allocator, .columns_by_root, .success, digest, "column", 6);
+    defer allocator.free(column);
+    const unknown_column_slot = try decodeResponseChunk(allocator, .columns_by_root, column, null, 6);
+    defer allocator.free(unknown_column_slot.payload);
+    try std.testing.expectEqual(digest, unknown_column_slot.fork_digest.?);
+    try std.testing.expectError(error.InvalidForkContext, decodeResponseChunk(allocator, .blocks_by_root, block, [4]u8{ 9, 2, 3, 4 }, 5));
+    try std.testing.expectError(error.InvalidForkContext, encodeResponseChunk(allocator, .blocks_by_root, .success, null, "block", 5));
+
+    const unavailable = try encodeResponseChunk(allocator, .columns_by_root, .resource_unavailable, null, "missing", 0);
+    defer allocator.free(unavailable);
+    const decoded_error = try decodeResponseChunk(allocator, .columns_by_root, unavailable, digest, 0);
+    defer allocator.free(decoded_error.payload);
+    try std.testing.expectEqual(ResponseCode.resource_unavailable, decoded_error.code);
+    try std.testing.expect(decoded_error.fork_digest == null);
+    try std.testing.expectEqualStrings("missing", decoded_error.payload);
+    try std.testing.expectError(error.InvalidResponseCode, decodeResponseChunk(allocator, .blocks_by_root, unavailable, digest, 0));
+    try std.testing.expectError(error.InvalidResponseCode, decodeResponseChunk(allocator, .ping, &.{4}, null, 8));
+    try std.testing.expectError(error.PayloadTooLarge, encodeResponseChunk(allocator, .ping, .invalid_request, null, &([_]u8{0} ** 257), 257));
 }
