@@ -2,7 +2,8 @@
 // instead prefix the uncompressed SSZ length and carry Snappy frames, so peers
 // can reject oversized values before allocating. Frames have 64 KiB data
 // limits and masked CRC32C checksums. Response chunks put a result byte and,
-// for block or column data, the matching fork digest before that payload.
+// for block or column data, a fork digest before that payload. The caller
+// checks that digest against the decoded object's slot before using the data.
 //
 // gossip: SSZ -> Snappy block
 // request/response payload: SSZ length -> Snappy stream header -> frames
@@ -48,6 +49,8 @@ pub const ResponseCode = enum(u8) {
 
 pub const ResponseChunk = struct {
     code: ResponseCode,
+    /// Present on successful block and column responses; verify it against the decoded slot.
+    fork_digest: ?[4]u8,
     /// The caller owns this decoded SSZ payload and must free it.
     payload: []u8,
 };
@@ -77,7 +80,7 @@ pub fn encodeResponseChunk(allocator: std.mem.Allocator, protocol: Protocol, cod
     return output;
 }
 
-/// Decode one complete chunk, checking its result and expected fork before payload allocation.
+/// Decode one complete chunk; a known fork is checked early, otherwise the wire digest is returned.
 pub fn decodeResponseChunk(allocator: std.mem.Allocator, protocol: Protocol, encoded: []const u8, expected_fork_digest: ?[4]u8, type_max: usize) !ResponseChunk {
     if (encoded.len == 0) return error.InvalidResponseCode;
     const code: ResponseCode = switch (encoded[0]) {
@@ -90,13 +93,17 @@ pub fn decodeResponseChunk(allocator: std.mem.Allocator, protocol: Protocol, enc
     if (code == .resource_unavailable and protocol != .columns_by_root and protocol != .columns_by_range) return error.InvalidResponseCode;
     const success = code == .success;
     var prefix_len: usize = 1;
+    var fork_digest: ?[4]u8 = null;
     if (success and hasForkContext(protocol)) {
-        const expected = expected_fork_digest orelse return error.InvalidForkContext;
-        if (encoded.len < 5 or !std.mem.eql(u8, encoded[1..5], &expected)) return error.InvalidForkContext;
+        if (encoded.len < 5) return error.InvalidForkContext;
+        fork_digest = encoded[1..5].*;
+        if (expected_fork_digest) |expected| {
+            if (!std.mem.eql(u8, encoded[1..5], &expected)) return error.InvalidForkContext;
+        }
         prefix_len = 5;
     } else if (expected_fork_digest != null and !hasForkContext(protocol)) return error.InvalidForkContext;
     const payload = try decodePayload(allocator, encoded[prefix_len..], if (success) type_max else 256);
-    return .{ .code = code, .payload = payload };
+    return .{ .code = code, .fork_digest = fork_digest, .payload = payload };
 }
 
 /// Build a Fulu gossip topic, validating the subnet where one is required.
@@ -277,7 +284,19 @@ test "response chunks enforce result codes, fork context, and error bounds" {
     const decoded = try decodeResponseChunk(allocator, .blocks_by_root, block, digest, 5);
     defer allocator.free(decoded.payload);
     try std.testing.expectEqual(ResponseCode.success, decoded.code);
+    try std.testing.expectEqual(digest, decoded.fork_digest.?);
     try std.testing.expectEqualStrings("block", decoded.payload);
+    const unknown_slot = try decodeResponseChunk(allocator, .blocks_by_root, block, null, 5);
+    defer allocator.free(unknown_slot.payload);
+    try std.testing.expectEqual(digest, unknown_slot.fork_digest.?);
+    const skipped_slots = try decodeResponseChunk(allocator, .blocks_by_range, block, null, 5);
+    defer allocator.free(skipped_slots.payload);
+    try std.testing.expectEqual(digest, skipped_slots.fork_digest.?);
+    const column = try encodeResponseChunk(allocator, .columns_by_root, .success, digest, "column", 6);
+    defer allocator.free(column);
+    const unknown_column_slot = try decodeResponseChunk(allocator, .columns_by_root, column, null, 6);
+    defer allocator.free(unknown_column_slot.payload);
+    try std.testing.expectEqual(digest, unknown_column_slot.fork_digest.?);
     try std.testing.expectError(error.InvalidForkContext, decodeResponseChunk(allocator, .blocks_by_root, block, [4]u8{ 9, 2, 3, 4 }, 5));
     try std.testing.expectError(error.InvalidForkContext, encodeResponseChunk(allocator, .blocks_by_root, .success, null, "block", 5));
 
@@ -286,6 +305,7 @@ test "response chunks enforce result codes, fork context, and error bounds" {
     const decoded_error = try decodeResponseChunk(allocator, .columns_by_root, unavailable, digest, 0);
     defer allocator.free(decoded_error.payload);
     try std.testing.expectEqual(ResponseCode.resource_unavailable, decoded_error.code);
+    try std.testing.expect(decoded_error.fork_digest == null);
     try std.testing.expectEqualStrings("missing", decoded_error.payload);
     try std.testing.expectError(error.InvalidResponseCode, decodeResponseChunk(allocator, .blocks_by_root, unavailable, digest, 0));
     try std.testing.expectError(error.InvalidResponseCode, decodeResponseChunk(allocator, .ping, &.{4}, null, 8));
