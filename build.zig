@@ -299,6 +299,12 @@ pub fn build(b: *std.Build) void {
     });
     mod.addImport("ssz", ssz_mod);
     mod.addImport("merkle", merkle_mod);
+    const storage_mod = b.addModule("storage", .{
+        .root_source_file = b.path("src/storage/lsm.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    mod.addImport("storage", storage_mod);
     const consensus_mod = b.createModule(.{
         .root_source_file = b.path("src/consensus/root.zig"),
         .target = target,
@@ -314,6 +320,7 @@ pub fn build(b: *std.Build) void {
     consensus_mod.addImport("blob", blob_mod);
     consensus_mod.addImport("execution", execution_mod);
     consensus_mod.addImport("ckzg", ckzg_mod);
+    consensus_mod.addImport("storage", storage_mod);
     mod.addImport("consensus", consensus_mod);
     const engine_wire_mod = b.createModule(.{
         .root_source_file = b.path("src/engine/wire.zig"),
@@ -471,6 +478,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "blob", .module = blob_mod },
                 .{ .name = "execution", .module = execution_mod },
                 .{ .name = "ckzg", .module = ckzg_mod },
+                .{ .name = "storage", .module = storage_mod },
             },
         }),
     });
@@ -494,6 +502,8 @@ pub fn build(b: *std.Build) void {
     const run_tests_merkle = b.addRunArtifact(merkle_tests);
     const run_fulu_tests = b.addRunArtifact(fulu_tests);
     const run_consensus_tests = b.addRunArtifact(consensus_tests);
+    const storage_tests = b.addTest(.{ .root_module = storage_mod });
+    const run_storage_tests = b.addRunArtifact(storage_tests);
     const engine_client_tests = b.addTest(.{ .root_module = engine_client_mod });
     const run_engine_client_tests = b.addRunArtifact(engine_client_tests);
     const engine_server_tests = b.addTest(.{ .root_module = engine_server_mod });
@@ -505,6 +515,9 @@ pub fn build(b: *std.Build) void {
     // make the two of them run in parallel.
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_tests.step);
+    test_step.dependOn(&run_storage_tests.step);
+    const storage_test_step = b.step("test-storage", "Run durable key-value storage tests");
+    storage_test_step.dependOn(&run_storage_tests.step);
     const run_execution_tests = b.addRunArtifact(execution_tests);
     test_step.dependOn(&run_execution_tests.step);
     test_step.dependOn(&run_engine_client_tests.step);

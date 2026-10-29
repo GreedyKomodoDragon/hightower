@@ -123,6 +123,8 @@ test "gossip and response gates reject wrong fork before callbacks" {
 test "attestation gossip and official column sidecar cross validation gates" {
     const fixture = @import("fixture_runner.zig");
     const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
     const config = Config{ .genesis_validators_root = [_]u8{1} ** 32, .fulu_version = .{ 6, 0, 0, 0 }, .fulu_epoch = 0, .blob_schedule = &helpers.BLOB_SCHEDULE };
     const attestation_bytes = try fixture.decode(allocator, @embedFile("fixtures/fulu_fork_choice/slashing/attestation_0x5172be6898efefa589c2182765c8e7a74272ed2b0004d0577921a4808b364fcf.ssz_snappy"));
     defer allocator.free(attestation_bytes);
@@ -156,13 +158,14 @@ test "attestation gossip and official column sidecar cross validation gates" {
     defer allocator.free(column_gossip);
     var settings = try kzg.loadTrustedSetup("src/execution/trusted_setup.txt");
     defer settings.deinit();
-    var store = try columns.Store.init(allocator, [_]u8{0} ** 32, columns.custody_requirement);
+    var store = try columns.Store.open(allocator, std.testing.io, tmp.dir, "columns", [_]u8{9} ** 32, [_]u8{0} ** 32, columns.custody_requirement);
     defer store.deinit();
     const root = try @import("merkle").HashTreeRoot(allocator, signed.message);
     const block_digest = try config.digestAtSlot(signed.message.slot);
     try std.testing.expectError(error.InvalidDataColumn, receiveColumnGossip(allocator, config, block_digest, 2, column_gossip, &store, &settings, &signed.message, &state));
-    try std.testing.expect(store.get(root, 1) == null);
+    try std.testing.expect((try store.get(root, 1)) == null);
     try receiveColumnGossip(allocator, config, block_digest, 1, column_gossip, &store, &settings, &signed.message, &state);
-    try std.testing.expect(store.get(root, 1) != null);
+    const stored = (try store.get(root, 1)).?;
+    defer allocator.free(stored);
     try std.testing.expectError(error.DuplicateColumn, receiveColumnGossip(allocator, config, block_digest, 1, column_gossip, &store, &settings, &signed.message, &state));
 }

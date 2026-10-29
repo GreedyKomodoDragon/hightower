@@ -14,6 +14,7 @@ pub const consensus = @import("consensus");
 pub const api = @import("api");
 pub const engine_client = @import("engine_client");
 pub const engine_server = @import("engine_server");
+pub const storage = @import("storage");
 
 test "Fulu shared types are exported" {
     _ = @sizeOf(fulu.SyncAggregate);
