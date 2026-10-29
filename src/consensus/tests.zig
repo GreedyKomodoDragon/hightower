@@ -25,6 +25,7 @@ test {
     _ = @import("bls_vectors_test.zig");
     _ = @import("snappy.zig");
     _ = @import("p2p_wire.zig");
+    _ = @import("p2p_ingress.zig");
     _ = @import("fixture_runner.zig");
     _ = @import("transition.zig");
     _ = @import("fork.zig");
