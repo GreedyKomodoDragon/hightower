@@ -122,3 +122,5 @@ cases are used for this wrapper. Run these tests with `zig build test-transition
 Fulu sidecar validation, deterministic custody selection, and the block-aware
 fork-choice availability callback are described in
 [`docs/fulu-data-columns.md`](../../docs/fulu-data-columns.md).
+The bounded SSZ/Snappy payload layer and protocol names are described in
+[`docs/fulu-p2p-wire.md`](../../docs/fulu-p2p-wire.md).
