@@ -4,9 +4,13 @@
 // unchanged so replies can be tied to the right in-flight query.
 //
 //   authenticated packet -> type byte + canonical RLP -> bounded message
-// Packet encryption and the NODES response are handled separately.
+// Packet encryption and discovery scheduling are handled separately.
 const std = @import("std");
 const rlp = @import("rlp");
+const enr = @import("enr.zig");
+
+// 1280-byte UDP packet minus ordinary-packet IV, header, node ID, and GCM tag.
+pub const max_plaintext_size: usize = 1280 - 16 - 23 - 32 - 16;
 
 pub const RequestId = struct {
     bytes: [8]u8 = [_]u8{0} ** 8,
@@ -30,6 +34,12 @@ pub const Ping = struct { request_id: RequestId, enr_sequence: u64 };
 pub const Pong = struct { request_id: RequestId, enr_sequence: u64, recipient_ip: [16]u8, ip_len: u8, recipient_port: u16 };
 pub const FindNode = struct { request_id: RequestId, distances: [16]u16 = [_]u16{0} ** 16, count: u8 = 0 };
 pub const Message = union(enum) { ping: Ping, pong: Pong, findnode: FindNode };
+pub const Nodes = struct {
+    request_id: RequestId,
+    total: u8,
+    records: [16]enr.Record = undefined,
+    count: u8 = 0,
+};
 
 /// Encode one bounded plaintext message for an authenticated discv5 packet.
 pub fn encode(allocator: std.mem.Allocator, message: Message) ![]u8 {
@@ -69,7 +79,7 @@ pub fn encode(allocator: std.mem.Allocator, message: Message) ![]u8 {
     try rlp.encoding.encodeListHeader(&output.writer, payload.written().len);
     try output.writer.writeAll(payload.written());
     const bytes = try output.toOwnedSlice();
-    if (bytes.len > 1280) {
+    if (bytes.len > max_plaintext_size) {
         allocator.free(bytes);
         return error.MessageTooLarge;
     }
@@ -78,7 +88,7 @@ pub fn encode(allocator: std.mem.Allocator, message: Message) ![]u8 {
 
 /// Parse and canonically validate one bounded plaintext discv5 message.
 pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) !Message {
-    if (bytes.len < 2 or bytes.len > 1280) return error.InvalidMessage;
+    if (bytes.len < 2 or bytes.len > max_plaintext_size) return error.InvalidMessage;
     var value = try rlp.decode.decodeAll(allocator, bytes[1..]);
     defer value.deinit(allocator);
     const items = switch (value) {
@@ -121,6 +131,81 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) !Message {
     return message;
 }
 
+/// Encode a NODES reply from signed ENRs, each verified for the current fork.
+pub fn encodeNodes(allocator: std.mem.Allocator, request_id: RequestId, total: u8, records: []const []const u8, fork_digest: [4]u8) ![]u8 {
+    if (total == 0 or total > 16 or records.len > 16) return error.InvalidNodes;
+    var nested = std.Io.Writer.Allocating.init(allocator);
+    defer nested.deinit();
+    for (records) |bytes| {
+        const record = try enr.decode(allocator, bytes);
+        try enr.requireFork(record, fork_digest);
+        try nested.writer.writeAll(bytes);
+    }
+    var payload = std.Io.Writer.Allocating.init(allocator);
+    defer payload.deinit();
+    try rlp.encoding.encodeString(&payload.writer, request_id.slice());
+    try writeInt(&payload.writer, total);
+    try rlp.encoding.encodeListHeader(&payload.writer, nested.written().len);
+    try payload.writer.writeAll(nested.written());
+    var output = std.Io.Writer.Allocating.init(allocator);
+    errdefer output.deinit();
+    try output.writer.writeByte(4);
+    try rlp.encoding.encodeListHeader(&output.writer, payload.written().len);
+    try output.writer.writeAll(payload.written());
+    const bytes = try output.toOwnedSlice();
+    if (bytes.len > max_plaintext_size) {
+        allocator.free(bytes);
+        return error.MessageTooLarge;
+    }
+    return bytes;
+}
+
+/// Verify a canonical NODES reply and its signed ENRs before exposing peers.
+pub fn decodeNodes(allocator: std.mem.Allocator, bytes: []const u8, fork_digest: [4]u8) !Nodes {
+    if (bytes.len < 2 or bytes.len > max_plaintext_size or bytes[0] != 4) return error.InvalidNodes;
+    var value = try rlp.decode.decodeAll(allocator, bytes[1..]);
+    defer value.deinit(allocator);
+    const items = switch (value) {
+        .list => |list| list,
+        else => return error.InvalidNodes,
+    };
+    if (items.len != 3) return error.InvalidNodes;
+    var canonical = std.Io.Writer.Allocating.init(allocator);
+    defer canonical.deinit();
+    try writeValue(allocator, &canonical.writer, value);
+    if (!std.mem.eql(u8, bytes[1..], canonical.written())) return error.InvalidNodes;
+    const records = switch (items[2]) {
+        .list => |list| list,
+        else => return error.InvalidNodes,
+    };
+    if (records.len > 16) return error.InvalidNodes;
+    var result = Nodes{ .request_id = try RequestId.init(try string(items[0])), .total = try integer(u8, try string(items[1])) };
+    if (result.total == 0 or result.total > 16) return error.InvalidNodes;
+    for (records, 0..) |item, index| {
+        var encoded_record = std.Io.Writer.Allocating.init(allocator);
+        defer encoded_record.deinit();
+        try writeValue(allocator, &encoded_record.writer, item);
+        result.records[index] = try enr.decode(allocator, encoded_record.written());
+        try enr.requireFork(result.records[index], fork_digest);
+    }
+    result.count = @intCast(records.len);
+    return result;
+}
+
+/// Re-encode a bounded RLP value so altered noncanonical bytes can be rejected.
+fn writeValue(allocator: std.mem.Allocator, writer: *std.Io.Writer, value: rlp.decode.Value) !void {
+    switch (value) {
+        .string => |data| return rlp.encoding.encodeString(writer, data),
+        .list => |items| {
+            var payload = std.Io.Writer.Allocating.init(allocator);
+            defer payload.deinit();
+            for (items) |item| try writeValue(allocator, &payload.writer, item);
+            try rlp.encoding.encodeListHeader(writer, payload.written().len);
+            return writer.writeAll(payload.written());
+        },
+    }
+}
+
 /// Return an RLP byte string without accepting a nested list.
 fn string(value: rlp.decode.Value) ![]const u8 {
     return switch (value) {
@@ -132,9 +217,9 @@ fn string(value: rlp.decode.Value) ![]const u8 {
 /// Read a minimal big-endian RLP integer into a bounded Zig type.
 fn integer(comptime T: type, bytes: []const u8) !T {
     if (bytes.len > @sizeOf(T) or (bytes.len > 0 and bytes[0] == 0)) return error.InvalidMessage;
-    var result: T = 0;
+    var result: u64 = 0;
     for (bytes) |byte| result = (result << 8) | byte;
-    return result;
+    return @intCast(result);
 }
 
 /// Write one minimal big-endian RLP integer.
@@ -161,4 +246,28 @@ test "discv5 ping, pong, and findnode plaintext is canonical and bounded" {
     try std.testing.expectEqual(@as(u16, 256), (try decode(allocator, find_bytes)).findnode.distances[1]);
     try std.testing.expectError(error.InvalidMessage, decode(allocator, &.{ 1, 0xc3, 0x81, 0x01, 0x01 }));
     try std.testing.expectError(error.InvalidRequestId, RequestId.init(&.{ 0, 1, 2, 3, 4, 5, 6, 7, 8 }));
+}
+
+test "discv5 nodes reply verifies embedded ENRs and fork before admission" {
+    const allocator = std.testing.allocator;
+    const Ecdsa = std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
+    const key = try Ecdsa.KeyPair.generateDeterministic([_]u8{7} ** 32);
+    const fork_digest = [4]u8{ 1, 2, 3, 4 };
+    const local = enr.Local{ .sequence = 1, .ip = .{ 127, 0, 0, 1 }, .udp_port = 9000, .tcp_port = 9001, .fork_id = .{ 1, 2, 3, 4, 6, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255 }, .next_fork_digest = .{0} ** 4, .custody_group_count = 4 };
+    const record = try enr.encode(allocator, key, local);
+    defer allocator.free(record);
+    const request_id = try RequestId.init(&.{ 9, 8, 7 });
+    const message = try encodeNodes(allocator, request_id, 1, &.{record}, fork_digest);
+    defer allocator.free(message);
+    const parsed = try decodeNodes(allocator, message, fork_digest);
+    try std.testing.expectEqual(@as(u8, 1), parsed.count);
+    try std.testing.expectEqualSlices(u8, request_id.slice(), parsed.request_id.slice());
+    try std.testing.expectEqual(@as(u16, 9000), parsed.records[0].udp_port);
+    try std.testing.expectError(error.InvalidForkContext, decodeNodes(allocator, message, .{ 9, 2, 3, 4 }));
+    const tampered = try allocator.dupe(u8, message);
+    defer allocator.free(tampered);
+    tampered[tampered.len - 1] ^= 1;
+    try std.testing.expectError(error.SignatureVerificationFailed, decodeNodes(allocator, tampered, fork_digest));
+    try std.testing.expectError(error.InvalidNodes, decodeNodes(allocator, &.{ 4, 0xc0 }, fork_digest));
+    try std.testing.expectError(error.InvalidNodes, decodeNodes(allocator, &.{ 4, 0xc4, 0x80, 0x81, 0x01, 0xc0 }, fork_digest));
 }
