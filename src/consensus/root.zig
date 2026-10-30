@@ -41,5 +41,6 @@ pub const ENR = @import("enr.zig");
 pub const DiscoveryBootstrap = @import("discovery_bootstrap.zig");
 pub const P2PAdmission = @import("p2p_admission.zig");
 pub const Discv5Messages = @import("discv5_messages.zig");
+pub const Discv5Packets = @import("discv5_packets.zig");
 pub const computeWeakSubjectivityPeriod = @import("helpers.zig").computeWeakSubjectivityPeriod;
 pub const isWithinWeakSubjectivityPeriod = @import("fork_choice.zig").isWithinWeakSubjectivityPeriod;
