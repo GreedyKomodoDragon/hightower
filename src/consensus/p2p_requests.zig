@@ -175,8 +175,9 @@ test "blocks by root returns only a matching retained signed block" {
     var signed = try fixture.decodeBlock(allocator, @embedFile("fixtures/fulu_fork_choice/availability/block.ssz_snappy"));
     defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, signed);
     const root = try merkle.HashTreeRoot(allocator, signed.message);
+    const unknown_root: fulu.Root = [_]u8{0xff} ** 32;
     const config = ingress.Config{ .genesis_validators_root = [_]u8{1} ** 32, .fulu_version = .{ 6, 0, 0, 0 }, .fulu_epoch = 0, .blob_schedule = &@import("helpers.zig").BLOB_SCHEDULE };
-    const request = BlockRootsRequest{ .data = &.{ root, [_]u8{0xff} ** 32 } };
+    const request = BlockRootsRequest{ .data = &.{ root, unknown_root } };
     const request_ssz = try ssz.serializeAlloc(allocator, request);
     defer allocator.free(request_ssz);
     const request_wire = try wire.encodePayload(allocator, request_ssz, wire.max_payload_size);
