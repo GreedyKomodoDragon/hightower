@@ -175,10 +175,9 @@ fn integer(comptime T: type, bytes: []const u8) !T {
 fn writePair(writer: *std.Io.Writer, key: []const u8, value: anytype) !void {
     try rlp.encoding.encodeString(writer, key);
     if (@typeInfo(@TypeOf(value)) == .int) {
-        try writeInt(writer, value);
-    } else {
-        try rlp.encoding.encodeString(writer, value);
+        return writeInt(writer, value);
     }
+    return rlp.encoding.encodeString(writer, value);
 }
 
 /// Write one minimal big-endian RLP integer.
