@@ -10,6 +10,7 @@ const columns = @import("data_columns.zig");
 
 const Ecdsa = std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
 const Keccak = std.crypto.hash.sha3.Keccak256;
+const Field = enum { cgc, eth2, id, ip, nfd, secp256k1, tcp, udp, unknown };
 
 pub const Local = struct {
     sequence: u64,
@@ -36,9 +37,11 @@ pub const Record = struct {
 /// Encode a locally signed, IPv4 Fulu ENR; the caller owns the returned bytes.
 pub fn encode(allocator: std.mem.Allocator, key_pair: Ecdsa.KeyPair, record: Local) ![]u8 {
     if (record.custody_group_count < columns.custody_requirement or record.custody_group_count > columns.column_count) return error.InvalidCustodyCount;
+    if (record.udp_port == 0 or record.tcp_port == 0) return error.InvalidEndpoint;
     var payload = std.Io.Writer.Allocating.init(allocator);
     defer payload.deinit();
     try writeInt(&payload.writer, record.sequence);
+    // ENR cgc is minimal big-endian; SSZ's fixed little-endian uint64 does not apply here.
     try writePair(&payload.writer, "cgc", record.custody_group_count);
     try writePair(&payload.writer, "eth2", &record.fork_id);
     try writePair(&payload.writer, "id", "v4");
@@ -86,42 +89,58 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) !Record {
         const data = try string(items[pair_index * 2 + 1]);
         if (key.len == 0 or (pair_index > 1 and std.mem.order(u8, prior, key) != .lt)) return error.InvalidRecord;
         prior = key;
-        if (std.mem.eql(u8, key, "cgc")) {
-            record.custody_group_count = try integer(u64, data);
-            seen |= 1;
-        } else if (std.mem.eql(u8, key, "eth2")) {
-            if (data.len != 16) return error.InvalidForkContext;
-            record.fork_id = data[0..16].*;
-            seen |= 2;
-        } else if (std.mem.eql(u8, key, "id")) {
-            if (!std.mem.eql(u8, data, "v4")) return error.InvalidIdentity;
-            seen |= 4;
-        } else if (std.mem.eql(u8, key, "ip")) {
-            if (data.len != 4) return error.InvalidEndpoint;
-            record.ip = data[0..4].*;
-            seen |= 8;
-        } else if (std.mem.eql(u8, key, "nfd")) {
-            if (data.len != 4) return error.InvalidForkContext;
-            record.next_fork_digest = data[0..4].*;
-            seen |= 16;
-        } else if (std.mem.eql(u8, key, "secp256k1")) {
-            if (data.len != 33) return error.InvalidIdentity;
-            record.public_key = data[0..33].*;
-            seen |= 32;
-        } else if (std.mem.eql(u8, key, "tcp")) {
-            record.tcp_port = try integer(u16, data);
-            seen |= 64;
-        } else if (std.mem.eql(u8, key, "udp")) {
-            record.udp_port = try integer(u16, data);
-            seen |= 128;
+        switch (std.meta.stringToEnum(Field, key) orelse .unknown) {
+            .cgc => {
+                record.custody_group_count = try integer(u64, data);
+                seen |= 1;
+            },
+            .eth2 => {
+                if (data.len != 16) return error.InvalidForkContext;
+                record.fork_id = data[0..16].*;
+                seen |= 2;
+            },
+            .id => {
+                if (!std.mem.eql(u8, data, "v4")) return error.InvalidIdentity;
+                seen |= 4;
+            },
+            .ip => {
+                if (data.len != 4) return error.InvalidEndpoint;
+                record.ip = data[0..4].*;
+                seen |= 8;
+            },
+            .nfd => {
+                if (data.len != 4) return error.InvalidForkContext;
+                record.next_fork_digest = data[0..4].*;
+                seen |= 16;
+            },
+            .secp256k1 => {
+                if (data.len != 33) return error.InvalidIdentity;
+                record.public_key = data[0..33].*;
+                seen |= 32;
+            },
+            .tcp => {
+                record.tcp_port = try integer(u16, data);
+                seen |= 64;
+            },
+            .udp => {
+                record.udp_port = try integer(u16, data);
+                seen |= 128;
+            },
+            .unknown => {},
         }
     }
     if (seen != 255 or record.custody_group_count < columns.custody_requirement or record.custody_group_count > columns.column_count or record.udp_port == 0 or record.tcp_port == 0) return error.InvalidRecord;
     const public_key = try Ecdsa.PublicKey.fromSec1(&record.public_key);
     var payload = std.Io.Writer.Allocating.init(allocator);
     defer payload.deinit();
-    for (items[1..]) |item| try rlp.encoding.encodeString(&payload.writer, try string(item));
-    const content = try wrapList(allocator, payload.written());
+    for (items) |item| try rlp.encoding.encodeString(&payload.writer, try string(item));
+    const canonical = try wrapList(allocator, payload.written());
+    defer allocator.free(canonical);
+    if (!std.mem.eql(u8, bytes, canonical)) return error.InvalidRecord;
+    var signed_payload = std.Io.Writer.Allocating.init(allocator);
+    defer signed_payload.deinit();
+    for (items[1..]) |item| try rlp.encoding.encodeString(&signed_payload.writer, try string(item));
+    const content = try wrapList(allocator, signed_payload.written());
     defer allocator.free(content);
     var digest: [32]u8 = undefined;
     Keccak.hash(content, &digest, .{});
@@ -190,9 +209,25 @@ test "signed Fulu ENR verifies its identity, fork, and custody promise" {
     var invalid_custody = record;
     invalid_custody.custody_group_count = columns.custody_requirement - 1;
     try std.testing.expectError(error.InvalidCustodyCount, encode(allocator, key_pair, invalid_custody));
+    var invalid_endpoint = record;
+    invalid_endpoint.tcp_port = 0;
+    try std.testing.expectError(error.InvalidEndpoint, encode(allocator, key_pair, invalid_endpoint));
     try std.testing.expectError(error.RecordTooLarge, decode(allocator, &([_]u8{0} ** 301)));
     const tampered = try allocator.dupe(u8, bytes);
     defer allocator.free(tampered);
     tampered[5] ^= 1;
     try std.testing.expectError(error.SignatureVerificationFailed, decode(allocator, tampered));
+
+    var decoded = try rlp.decode.decodeAll(allocator, bytes);
+    defer decoded.deinit(allocator);
+    const items = decoded.list;
+    try std.testing.expectEqualSlices(u8, &.{columns.custody_requirement}, try string(items[3]));
+    var malformed_payload = std.Io.Writer.Allocating.init(allocator);
+    defer malformed_payload.deinit();
+    try rlp.encoding.encodeString(&malformed_payload.writer, try string(items[0]));
+    try malformed_payload.writer.writeAll(&.{ 0x81, 0x01 }); // non-canonical sequence 1
+    for (items[2..]) |item| try rlp.encoding.encodeString(&malformed_payload.writer, try string(item));
+    const malformed = try wrapList(allocator, malformed_payload.written());
+    defer allocator.free(malformed);
+    try std.testing.expectError(error.InvalidRecord, decode(allocator, malformed));
 }
