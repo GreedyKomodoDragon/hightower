@@ -48,6 +48,7 @@ pub const Store = struct {
     proposer_boost_root: fulu.Root,
     equivocating_indices: std.AutoHashMap(fulu.ValidatorIndex, void),
     blocks: std.AutoHashMap(fulu.Root, fulu.BeaconBlock),
+    signed_block_signatures: std.AutoHashMap(fulu.Root, fulu.BLSSignature),
     block_states: std.AutoHashMap(fulu.Root, fulu.BeaconState),
     block_timeliness: std.AutoHashMap(fulu.Root, bool),
     checkpoint_states: std.AutoHashMap(fulu.Checkpoint, fulu.BeaconState),
@@ -65,6 +66,7 @@ pub const Store = struct {
         while (checkpoint_states.next()) |state| ssz.freeDecoded(allocator, fulu.BeaconState, state.*);
         self.equivocating_indices.deinit();
         self.blocks.deinit();
+        self.signed_block_signatures.deinit();
         self.block_states.deinit();
         self.block_timeliness.deinit();
         self.checkpoint_states.deinit();
@@ -75,6 +77,13 @@ pub const Store = struct {
     /// Return the slot represented by the store's explicit timestamp.
     pub fn currentSlot(self: *const Store) u64 {
         return (self.time - self.genesis_time) / preset.SECONDS_PER_SLOT;
+    }
+
+    /// Return the stored block with its signature when it was imported from a peer.
+    pub fn signedBlock(self: *const Store, root: fulu.Root) ?fulu.SignedBeaconBlock {
+        const block = self.blocks.get(root) orelse return null;
+        const signature = self.signed_block_signatures.get(root) orelse return null;
+        return .{ .message = block, .signature = signature };
     }
 };
 
@@ -103,6 +112,7 @@ pub fn initStore(
         .proposer_boost_root = [_]u8{0} ** 32,
         .equivocating_indices = .init(allocator),
         .blocks = .init(allocator),
+        .signed_block_signatures = .init(allocator),
         .block_states = .init(allocator),
         .block_timeliness = .init(allocator),
         .checkpoint_states = .init(allocator),
@@ -200,6 +210,8 @@ pub fn onBlock(store: *Store, signed_block: fulu.SignedBeaconBlock, engine: engi
     // Roll back each owned insertion if a later allocation fails.
     try putBlock(store, block_root, block);
     errdefer if (store.blocks.fetchRemove(block_root)) |entry| ssz.freeDecoded(store.allocator, fulu.BeaconBlock, entry.value);
+    try store.signed_block_signatures.put(block_root, signed_block.signature);
+    errdefer _ = store.signed_block_signatures.remove(block_root);
     try putState(store, block_root, state);
     errdefer if (store.block_states.fetchRemove(block_root)) |entry| ssz.freeDecoded(store.allocator, fulu.BeaconState, entry.value);
     const seconds_into_slot = (store.time - store.genesis_time) % preset.SECONDS_PER_SLOT;
@@ -605,6 +617,8 @@ test "fork-choice stores an available block and assigns timely proposer boost" {
     try std.testing.expectEqual(@as(usize, 2), store.block_states.count());
     try std.testing.expectEqual(@as(usize, 1), store.block_timeliness.count());
     const block_root = try merkle.HashTreeRoot(allocator, fixture[2].message);
+    const served_signed = store.signedBlock(block_root).?;
+    try std.testing.expectEqualSlices(u8, &fixture[2].signature, &served_signed.signature);
     try std.testing.expectEqual(block_root, store.proposer_boost_root);
     try std.testing.expectEqual(@as(u64, 0), store.justified_checkpoint.epoch);
     try std.testing.expectEqual(@as(u64, 0), store.finalized_checkpoint.epoch);

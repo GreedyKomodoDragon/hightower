@@ -11,7 +11,8 @@ const merkle = @import("merkle");
 const ssz = @import("ssz");
 const fork_choice = @import("fork_choice.zig");
 
-const magic = "HTFC0001";
+const magic = "HTFC0002";
+const legacy_magic = "HTFC0001";
 const max_bytes = 256 * 1024 * 1024;
 const max_records = 4096;
 const header_len = magic.len + 8 + 32;
@@ -36,6 +37,12 @@ pub fn saveForkChoiceStore(allocator: std.mem.Allocator, io: std.Io, dir: std.Io
     while (blocks.next()) |entry| {
         try payload.appendSlice(allocator, entry.key_ptr);
         try value(&payload, allocator, entry.value_ptr.*);
+    }
+    try count(&payload, allocator, store.signed_block_signatures.count());
+    var signatures = store.signed_block_signatures.iterator();
+    while (signatures.next()) |entry| {
+        try payload.appendSlice(allocator, entry.key_ptr);
+        try payload.appendSlice(allocator, &entry.value_ptr.*);
     }
     try count(&payload, allocator, store.block_states.count());
     var states = store.block_states.iterator();
@@ -94,7 +101,8 @@ pub fn loadForkChoiceStore(allocator: std.mem.Allocator, io: std.Io, dir: std.Io
     };
     defer allocator.free(bytes);
     if (bytes.len < header_len) return error.TruncatedSnapshot;
-    if (!std.mem.eql(u8, bytes[0..magic.len], magic)) return error.UnsupportedSnapshotVersion;
+    const has_signatures = std.mem.eql(u8, bytes[0..magic.len], magic);
+    if (!has_signatures and !std.mem.eql(u8, bytes[0..magic.len], legacy_magic)) return error.UnsupportedSnapshotVersion;
     const length = std.mem.readInt(u64, bytes[magic.len..][0..8], .little);
     if (length > max_bytes - header_len) return error.SnapshotTooLarge;
     if (length != bytes.len - header_len) return error.TruncatedSnapshot;
@@ -115,6 +123,7 @@ pub fn loadForkChoiceStore(allocator: std.mem.Allocator, io: std.Io, dir: std.Io
         .proposer_boost_root = try cursor.root(),
         .equivocating_indices = .init(allocator),
         .blocks = .init(allocator),
+        .signed_block_signatures = .init(allocator),
         .block_states = .init(allocator),
         .block_timeliness = .init(allocator),
         .checkpoint_states = .init(allocator),
@@ -131,6 +140,13 @@ pub fn loadForkChoiceStore(allocator: std.mem.Allocator, io: std.Io, dir: std.Io
             ssz.freeDecoded(allocator, fulu.BeaconBlock, block);
             return err;
         };
+    }
+    if (has_signatures) {
+        for (0..try cursor.count()) |_| {
+            const root = try cursor.root();
+            if (store.signed_block_signatures.contains(root) or !store.blocks.contains(root)) return error.InconsistentSnapshot;
+            try store.signed_block_signatures.put(root, try cursor.signature());
+        }
     }
     for (0..try cursor.count()) |_| {
         const root = try cursor.root();
@@ -203,6 +219,8 @@ fn validate(allocator: std.mem.Allocator, store: *const fork_choice.Store, expec
         } else anchors += 1;
         if (!store.unrealized_justifications.contains(root)) return error.InconsistentSnapshot;
     }
+    var signed_roots = store.signed_block_signatures.keyIterator();
+    while (signed_roots.next()) |root| if (!store.blocks.contains(root.*)) return error.InconsistentSnapshot;
     if (anchors != 1) return error.InconsistentSnapshot;
     var states = store.checkpoint_states.iterator();
     while (states.next()) |entry| if (!store.blocks.contains(entry.key_ptr.root)) return error.InconsistentSnapshot;
@@ -271,6 +289,11 @@ const Cursor = struct {
     /// Decode a fixed-size root.
     fn root(self: *Cursor) !fulu.Root {
         return (try self.take(32))[0..32].*;
+    }
+
+    /// Read a fixed-width proposer signature from the bounded snapshot.
+    fn signature(self: *Cursor) !fulu.BLSSignature {
+        return (try self.take(@sizeOf(fulu.BLSSignature)))[0..@sizeOf(fulu.BLSSignature)].*;
     }
 
     /// Decode a checkpoint record.
@@ -385,9 +408,12 @@ test "forked chain restores head votes and post-state roots" {
     try std.testing.expectEqual(store.justified_checkpoint, restored.justified_checkpoint);
     try std.testing.expectEqual(store.finalized_checkpoint, restored.finalized_checkpoint);
     try std.testing.expectEqual(store.proposer_boost_root, restored.proposer_boost_root);
+    try std.testing.expectEqual(store.signed_block_signatures.count(), restored.signed_block_signatures.count());
     try std.testing.expectEqual(store.latest_messages.count(), restored.latest_messages.count());
     var votes = store.latest_messages.iterator();
     while (votes.next()) |entry| try std.testing.expectEqual(entry.value_ptr.*, restored.latest_messages.get(entry.key_ptr.*).?);
     var states = store.block_states.iterator();
     while (states.next()) |entry| try std.testing.expectEqual(try merkle.HashTreeRoot(allocator, entry.value_ptr.*), try merkle.HashTreeRoot(allocator, restored.block_states.get(entry.key_ptr.*).?));
+    var signatures = store.signed_block_signatures.iterator();
+    while (signatures.next()) |entry| try std.testing.expectEqualSlices(u8, &entry.value_ptr.*, &restored.signed_block_signatures.get(entry.key_ptr.*).?);
 }

@@ -44,17 +44,28 @@ method generation's empty builder flow, JWT rejection, transport failure,
 malformed requests and transactions, payload status distinctions, invalid
 attributes, canonical head changes, and V1/V2 blob bundle conversion.
 
-For Geth interoperability, CI tests v1.17.7 through v1.17.10 with pinned
-image digests in [the workflow](../.github/workflows/ci.yml). The script
-defaults to v1.17.7 and accepts a pinned image reference as its argument.
-The [Osaka genesis](engine/osaka-genesis.json) comes from Geth's
-`--dev dumpgenesis` output with `bogotaTime` removed; its system contracts are
-needed for Osaka payload building. CI and local runs use the same command from
-the repository root:
+For Geth interoperability, CI tests v1.17.7 through v1.17.10 using official
+Linux binaries with pinned SHA-256 hashes in [the workflow](../.github/workflows/ci.yml).
+The same script runs locally with an installed Geth binary; install Geth for
+your platform (for example, `brew install ethereum` on macOS) and invoke it
+from the repository root:
 
 ```sh
-bash scripts/test_engine_interop.sh
+bash scripts/test_engine_interop.sh v1.17.10
 ```
+
+Set `GETH_BIN=/path/to/geth` if the binary is not on `PATH`. The script checks
+that the selected binary matches the requested version, creates a fresh
+temporary chain, and removes its processes and data on exit. It needs `curl`,
+`openssl`, and free loopback ports 18551 and 18552; Docker is not required.
+The [Osaka genesis](engine/osaka-genesis.json) comes from Geth's
+`--dev dumpgenesis` output with `bogotaTime` removed; its system contracts are
+needed for Osaka payload building. Both CI and local runs use the same script
+from the repository root:
+
+Geth validates the Engine API boundary only. It is an execution client and
+does not provide the beacon consensus peer network, so this check does not
+exercise FULU-024/025 gossip, discovery, or data-column Req/Resp.
 
 Fresh-chain runs against all four pinned versions initialized the Osaka
 genesis. Hightower computed

@@ -36,17 +36,33 @@ jobs:
       matrix:
         include:
           - version: v1.17.7
-            digest: 6e9669cca5359cdb2c5571198d51e78fc18128b56bff50a1f8422d1c2946fd64
+            commit: 3d858f85
+            sha256: d9973f609e44e97f4d55f8cb644586cabc2542096e1fcb1c7334a0cba00a89e8
           - version: v1.17.8
-            digest: abf3605177f8bdcfce436985a8054cca4ae59256323a4ffb72c56c04f3d1fadd
+            commit: a5790770
+            sha256: eb864b9ce79afac5e6f57ca10866eb65477b41be62cc8843b219c2ff11d49557
           - version: v1.17.9
-            digest: 1ae3571b074ccda207808fd228ade023f62ebdeb1dab6b393093dcc8b5293109
+            commit: 9dffe6e9
+            sha256: 8d31b66ac0a7e23bc2dd7d220452b209aee4123bf2677d5d4cde4aead5480a25
           - version: v1.17.10
-            digest: 5015dcab74ec5c9ef6584ada930ea353264a1c4e72383f256802e3178e10918c
+            commit: 1df30b18
+            sha256: e016aca8cc391c8d5d14dc17c9af589488d99c37ed71d892213c80757935ba64
     steps:
       - uses: actions/checkout@v7
       - uses: vercel-labs/setup-zig@v1
         with:
           version: 0.16.0
+      - name: Install verified Geth binary
+        run: |
+          release="${{ matrix.version }}"
+          release="${release#v}"
+          archive="geth-linux-amd64-${release}-${{ matrix.commit }}.tar.gz"
+          curl --fail --location --silent --show-error "https://gethstore.blob.core.windows.net/builds/$archive" --output "$RUNNER_TEMP/$archive"
+          echo "${{ matrix.sha256 }}  $RUNNER_TEMP/$archive" | sha256sum --check
+          mkdir "$RUNNER_TEMP/geth"
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/geth"
+          find "$RUNNER_TEMP/geth" -type f -name geth -exec cp {} "$RUNNER_TEMP/geth-bin" \;
+          chmod +x "$RUNNER_TEMP/geth-bin"
+          echo "GETH_BIN=$RUNNER_TEMP/geth-bin" >> "$GITHUB_ENV"
       - name: Geth ${{ matrix.version }} Engine API interoperability
-        run: bash scripts/test_engine_interop.sh ethereum/client-go@sha256:${{ matrix.digest }}
+        run: bash scripts/test_engine_interop.sh ${{ matrix.version }}
