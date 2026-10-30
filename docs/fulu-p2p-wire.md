@@ -8,4 +8,6 @@
 
 `ResponseStream` accepts arbitrarily split network reads, bounds its pending bytes to 16 MiB, and yields one response chunk at a time. The caller frees each returned payload. `consensus.P2PIngress` decodes Fulu block and attestation gossip, checks the topic digest against the decoded slot, and then calls the caller's consensus validator. It also checks a column's topic digest, subnet, and known block before using the verified column store. `decodeBlockResponse` checks a returned block's decoded slot against the wire digest. The caller must validate consensus rules before forwarding gossip or importing blocks.
 
+`consensus.P2PRequests` decodes bounded columns-by-root and columns-by-range requests, delegates lookups to the verified column store, and returns one fork-scoped response chunk per served sidecar. Unknown or uncustodied roots are omitted according to the protocol. The caller owns and must free each item in `EncodedChunks` with `deinit`.
+
 The transport must enforce read timeouts, append `/ssz_snappy` to protocol prefixes, and handle peer scoring. The Snappy block writer currently emits literals, so a near-limit gossip message can exceed its encoded-size cap and be rejected by `encodeGossip`. The peer transport, discovery, and two-node test are not implemented by these modules.

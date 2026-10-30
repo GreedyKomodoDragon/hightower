@@ -76,6 +76,20 @@ pub fn receiveColumnGossip(allocator: std.mem.Allocator, config: Config, topic_d
     try store.put(settings, &sidecar, block, parent_state);
 }
 
+/// Validate a data-column response chunk before retaining its verified sidecar.
+pub fn receiveColumnResponse(allocator: std.mem.Allocator, config: Config, chunk: *const wire.ResponseChunk, store: *columns.Store, settings: *const kzg.Settings, block: *const fulu.BeaconBlock, parent_state: *const fulu.BeaconState) !void {
+    if (chunk.code != .success or chunk.fork_digest == null) return error.InvalidResponseCode;
+    if (chunk.payload.len > wire.max_payload_size) return error.PayloadTooLarge;
+    var reader: std.Io.Reader = .fixed(chunk.payload);
+    const sidecar = try ssz.deserialize(allocator, fulu.DataColumnSidecar, &reader);
+    defer ssz.freeDecoded(allocator, fulu.DataColumnSidecar, sidecar);
+    if (sidecar.signed_block_header.message.slot != block.slot) return error.InvalidDataColumn;
+    const expected = try config.digestAtSlot(sidecar.signed_block_header.message.slot);
+    const got = chunk.fork_digest.?;
+    if (!std.mem.eql(u8, &got, &expected)) return error.InvalidForkContext;
+    try store.put(settings, &sidecar, block, parent_state);
+}
+
 /// Decode a successful block response, checking its unknown slot against the wire digest.
 pub fn decodeBlockResponse(allocator: std.mem.Allocator, config: Config, chunk: *const wire.ResponseChunk) !fulu.SignedBeaconBlock {
     if (chunk.code != .success or chunk.fork_digest == null) return error.InvalidResponseCode;
@@ -167,5 +181,9 @@ test "attestation gossip and official column sidecar cross validation gates" {
     try receiveColumnGossip(allocator, config, block_digest, 1, column_gossip, &store, &settings, &signed.message, &state);
     const stored = (try store.get(root, 1)).?;
     defer allocator.free(stored);
+    var wrong_digest = block_digest;
+    wrong_digest[0] ^= 1;
+    try std.testing.expectError(error.InvalidForkContext, receiveColumnResponse(allocator, config, &.{ .code = .success, .fork_digest = wrong_digest, .payload = column_bytes }, &store, &settings, &signed.message, &state));
+    try std.testing.expectError(error.DuplicateColumn, receiveColumnResponse(allocator, config, &.{ .code = .success, .fork_digest = block_digest, .payload = column_bytes }, &store, &settings, &signed.message, &state));
     try std.testing.expectError(error.DuplicateColumn, receiveColumnGossip(allocator, config, block_digest, 1, column_gossip, &store, &settings, &signed.message, &state));
 }

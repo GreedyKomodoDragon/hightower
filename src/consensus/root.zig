@@ -36,5 +36,6 @@ pub const DataAvailabilityCheck = @import("fork_choice.zig").DataAvailabilityChe
 pub const DataColumns = @import("data_columns.zig");
 pub const P2PWire = @import("p2p_wire.zig");
 pub const P2PIngress = @import("p2p_ingress.zig");
+pub const P2PRequests = @import("p2p_requests.zig");
 pub const computeWeakSubjectivityPeriod = @import("helpers.zig").computeWeakSubjectivityPeriod;
 pub const isWithinWeakSubjectivityPeriod = @import("fork_choice.zig").isWithinWeakSubjectivityPeriod;

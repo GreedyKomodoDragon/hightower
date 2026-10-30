@@ -475,6 +475,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "ssz", .module = ssz_mod },
                 .{ .name = "merkle", .module = merkle_mod },
                 .{ .name = "consensus_preset", .module = consensus_preset_mod },
+                .{ .name = "types", .module = types_mod },
                 .{ .name = "blob", .module = blob_mod },
                 .{ .name = "execution", .module = execution_mod },
                 .{ .name = "ckzg", .module = ckzg_mod },
