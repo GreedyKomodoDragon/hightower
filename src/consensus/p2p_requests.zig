@@ -175,8 +175,9 @@ test "blocks by root returns only a matching retained signed block" {
     var signed = try fixture.decodeBlock(allocator, @embedFile("fixtures/fulu_fork_choice/availability/block.ssz_snappy"));
     defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, signed);
     const root = try merkle.HashTreeRoot(allocator, signed.message);
+    const unknown_root: fulu.Root = [_]u8{0xff} ** 32;
     const config = ingress.Config{ .genesis_validators_root = [_]u8{1} ** 32, .fulu_version = .{ 6, 0, 0, 0 }, .fulu_epoch = 0, .blob_schedule = &@import("helpers.zig").BLOB_SCHEDULE };
-    const request = BlockRootsRequest{ .data = &.{root} };
+    const request = BlockRootsRequest{ .data = &.{ root, unknown_root } };
     const request_ssz = try ssz.serializeAlloc(allocator, request);
     defer allocator.free(request_ssz);
     const request_wire = try wire.encodePayload(allocator, request_ssz, wire.max_payload_size);
@@ -195,8 +196,9 @@ test "blocks by root returns only a matching retained signed block" {
             }
         }.get,
         .root_at_slot = struct {
-            fn at(_: *anyopaque, _: u64) ?fulu.Root {
-                return null;
+            fn at(context: *anyopaque, slot: u64) ?fulu.Root {
+                const source: *LookupContext = @ptrCast(@alignCast(context));
+                return if (source.block.message.slot == slot) source.root else null;
             }
         }.at,
     };
@@ -208,6 +210,22 @@ test "blocks by root returns only a matching retained signed block" {
     const expected = try ssz.serializeAlloc(allocator, signed);
     defer allocator.free(expected);
     try std.testing.expectEqualSlices(u8, expected, decoded.payload);
+
+    const range = BlockRangeRequest{ .start_slot = signed.message.slot, .count = 1, .step = 1 };
+    const range_ssz = try ssz.serializeAlloc(allocator, range);
+    defer allocator.free(range_ssz);
+    const range_wire = try wire.encodePayload(allocator, range_ssz, wire.max_payload_size);
+    defer allocator.free(range_wire);
+    var range_chunks = try serveBlocksByRange(allocator, config, range_wire, lookup);
+    defer range_chunks.deinit();
+    try std.testing.expectEqual(@as(usize, 1), range_chunks.items.items.len);
+
+    const invalid_range = BlockRangeRequest{ .start_slot = std.math.maxInt(u64), .count = 2, .step = 1 };
+    const invalid_ssz = try ssz.serializeAlloc(allocator, invalid_range);
+    defer allocator.free(invalid_ssz);
+    const invalid_wire = try wire.encodePayload(allocator, invalid_ssz, wire.max_payload_size);
+    defer allocator.free(invalid_wire);
+    try std.testing.expectError(error.Overflow, serveBlocksByRange(allocator, config, invalid_wire, lookup));
 }
 
 test "columns by root serves only verified custodied sidecars" {
