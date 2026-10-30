@@ -27,6 +27,7 @@ test {
     _ = @import("p2p_wire.zig");
     _ = @import("p2p_ingress.zig");
     _ = @import("p2p_requests.zig");
+    _ = @import("enr.zig");
     _ = @import("fixture_runner.zig");
     _ = @import("transition.zig");
     _ = @import("fork.zig");
