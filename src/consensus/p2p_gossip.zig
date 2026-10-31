@@ -14,6 +14,26 @@ const wire = @import("p2p_wire.zig");
 pub const max_rpc_size: usize = 16 * 1024 * 1024;
 const max_publishes: usize = 16;
 const seen_capacity: usize = 1024;
+const max_topic_size: usize = 128;
+const field_shift = 3;
+const wire_mask = 0b111;
+const RpcField = struct {
+    const publish = 2;
+};
+const MessageField = struct {
+    const from = 1;
+    const data = 2;
+    const seqno = 3;
+    const topic = 4;
+    const signature = 5;
+    const key = 6;
+};
+const WireType = struct {
+    const varint = 0;
+    const fixed64 = 1;
+    const bytes = 2;
+    const fixed32 = 5;
+};
 
 const Publish = struct { topic: []const u8, data: []const u8 };
 const Parsed = struct { items: [max_publishes]Publish = undefined, len: usize = 0 };
@@ -107,14 +127,14 @@ pub const Service = struct {
 
 /// Encode a StrictNoSign publish as one libp2p Gossipsub protobuf RPC.
 pub fn encodePublish(allocator: std.mem.Allocator, topic: []const u8, data: []const u8) ![]u8 {
-    if (topic.len == 0 or topic.len > 128 or data.len > wire.max_payload_size) return error.PayloadTooLarge;
+    if (topic.len == 0 or topic.len > max_topic_size or data.len > wire.max_payload_size) return error.PayloadTooLarge;
     var message: std.ArrayList(u8) = .empty;
     defer message.deinit(allocator);
-    try appendBytes(allocator, &message, 2, data);
-    try appendBytes(allocator, &message, 4, topic);
+    try appendBytes(allocator, &message, MessageField.data, data);
+    try appendBytes(allocator, &message, MessageField.topic, topic);
     var rpc: std.ArrayList(u8) = .empty;
     errdefer rpc.deinit(allocator);
-    try appendBytes(allocator, &rpc, 2, message.items);
+    try appendBytes(allocator, &rpc, RpcField.publish, message.items);
     return rpc.toOwnedSlice(allocator);
 }
 
@@ -125,12 +145,12 @@ fn decodeRpc(bytes: []const u8, max_data: usize) !Parsed {
     var cursor: usize = 0;
     while (cursor < bytes.len) {
         const key = try readVarint(bytes, &cursor);
-        if (key >> 3 == 0) return error.InvalidGossipRpc;
-        if (key >> 3 != 2) {
-            try skipField(bytes, &cursor, @truncate(key & 7));
+        if (key >> field_shift == 0) return error.InvalidGossipRpc;
+        if (key >> field_shift != RpcField.publish) {
+            try skipField(bytes, &cursor, @truncate(key & wire_mask));
             continue;
         }
-        if (key & 7 != 2 or result.len == max_publishes) return error.InvalidGossipRpc;
+        if (key & wire_mask != WireType.bytes or result.len == max_publishes) return error.InvalidGossipRpc;
         result.items[result.len] = try decodeMessage(try readBytes(bytes, &cursor), max_data);
         result.len += 1;
     }
@@ -144,21 +164,21 @@ fn decodeMessage(bytes: []const u8, max_data: usize) !Publish {
     var data: ?[]const u8 = null;
     while (cursor < bytes.len) {
         const key = try readVarint(bytes, &cursor);
-        const field = key >> 3;
+        const field = key >> field_shift;
         if (field == 0) return error.InvalidGossipRpc;
         switch (field) {
-            2 => {
-                if (key & 7 != 2 or data != null) return error.InvalidGossipRpc;
+            MessageField.data => {
+                if (key & wire_mask != WireType.bytes or data != null) return error.InvalidGossipRpc;
                 data = try readBytes(bytes, &cursor);
                 if (data.?.len > max_data) return error.PayloadTooLarge;
             },
-            4 => {
-                if (key & 7 != 2 or topic != null) return error.InvalidGossipRpc;
+            MessageField.topic => {
+                if (key & wire_mask != WireType.bytes or topic != null) return error.InvalidGossipRpc;
                 topic = try readBytes(bytes, &cursor);
-                if (topic.?.len == 0 or topic.?.len > 128) return error.InvalidGossipRpc;
+                if (topic.?.len == 0 or topic.?.len > max_topic_size) return error.InvalidGossipRpc;
             },
-            1, 3, 5, 6 => return error.InvalidSignaturePolicy,
-            else => try skipField(bytes, &cursor, @truncate(key & 7)),
+            MessageField.from, MessageField.seqno, MessageField.signature, MessageField.key => return error.InvalidSignaturePolicy,
+            else => try skipField(bytes, &cursor, @truncate(key & wire_mask)),
         }
     }
     return .{ .topic = topic orelse return error.InvalidGossipRpc, .data = data orelse return error.InvalidGossipRpc };
@@ -193,15 +213,17 @@ fn readBytes(bytes: []const u8, cursor: *usize) ![]const u8 {
 /// Skip a protobuf field outside the publish payload without allocating.
 fn skipField(bytes: []const u8, cursor: *usize, wire_type: u3) !void {
     switch (wire_type) {
-        0 => _ = try readVarint(bytes, cursor),
-        1 => {
-            if (bytes.len - cursor.* < 8) return error.InvalidGossipRpc;
-            cursor.* += 8;
+        WireType.varint => _ = try readVarint(bytes, cursor),
+        WireType.fixed64 => {
+            const size = @sizeOf(u64);
+            if (bytes.len - cursor.* < size) return error.InvalidGossipRpc;
+            cursor.* += size;
         },
-        2 => _ = try readBytes(bytes, cursor),
-        5 => {
-            if (bytes.len - cursor.* < 4) return error.InvalidGossipRpc;
-            cursor.* += 4;
+        WireType.bytes => _ = try readBytes(bytes, cursor),
+        WireType.fixed32 => {
+            const size = @sizeOf(u32);
+            if (bytes.len - cursor.* < size) return error.InvalidGossipRpc;
+            cursor.* += size;
         },
         else => return error.InvalidGossipRpc,
     }
@@ -209,7 +231,7 @@ fn skipField(bytes: []const u8, cursor: *usize, wire_type: u3) !void {
 
 /// Append one length-delimited protobuf field to the caller's list.
 fn appendBytes(allocator: std.mem.Allocator, output: *std.ArrayList(u8), field: u8, bytes: []const u8) !void {
-    try appendVarint(allocator, output, @as(u64, field) << 3 | 2);
+    try appendVarint(allocator, output, @as(u64, field) << field_shift | WireType.bytes);
     try appendVarint(allocator, output, bytes.len);
     try output.appendSlice(allocator, bytes);
 }
@@ -245,13 +267,36 @@ test "publish RPC accepts canonical unsigned fields and rejects malformed envelo
     try std.testing.expectError(error.PayloadTooLarge, decodeRpc(encoded, 3));
     var signed_message: std.ArrayList(u8) = .empty;
     defer signed_message.deinit(allocator);
-    try appendBytes(allocator, &signed_message, 1, "sender");
-    try appendBytes(allocator, &signed_message, 2, "data");
-    try appendBytes(allocator, &signed_message, 4, "topic");
+    try appendBytes(allocator, &signed_message, MessageField.from, "sender");
+    try appendBytes(allocator, &signed_message, MessageField.data, "data");
+    try appendBytes(allocator, &signed_message, MessageField.topic, "topic");
     var signed_rpc: std.ArrayList(u8) = .empty;
     defer signed_rpc.deinit(allocator);
-    try appendBytes(allocator, &signed_rpc, 2, signed_message.items);
+    try appendBytes(allocator, &signed_rpc, RpcField.publish, signed_message.items);
     try std.testing.expectError(error.InvalidSignaturePolicy, decodeRpc(signed_rpc.items, 16));
+
+    const unknown_field: u8 = 7;
+    var extended: std.ArrayList(u8) = .empty;
+    defer extended.deinit(allocator);
+    try appendVarint(allocator, &extended, @as(u64, unknown_field) << field_shift | WireType.varint);
+    try appendVarint(allocator, &extended, 300);
+    try appendVarint(allocator, &extended, @as(u64, unknown_field) << field_shift | WireType.fixed64);
+    try extended.appendSlice(allocator, &([_]u8{0} ** @sizeOf(u64)));
+    try appendVarint(allocator, &extended, @as(u64, unknown_field) << field_shift | WireType.fixed32);
+    try extended.appendSlice(allocator, &([_]u8{0} ** @sizeOf(u32)));
+    try appendBytes(allocator, &extended, unknown_field, "ignored");
+    try extended.appendSlice(allocator, encoded);
+    try std.testing.expectEqual(@as(usize, 1), (try decodeRpc(extended.items, 16)).len);
+
+    var extended_message: std.ArrayList(u8) = .empty;
+    defer extended_message.deinit(allocator);
+    try appendBytes(allocator, &extended_message, MessageField.data, "data");
+    try appendBytes(allocator, &extended_message, MessageField.topic, "topic");
+    try appendBytes(allocator, &extended_message, unknown_field, "ignored");
+    var extended_rpc: std.ArrayList(u8) = .empty;
+    defer extended_rpc.deinit(allocator);
+    try appendBytes(allocator, &extended_rpc, RpcField.publish, extended_message.items);
+    try std.testing.expectEqual(@as(usize, 1), (try decodeRpc(extended_rpc.items, 16)).len);
 }
 
 test "gossip RPC validates blocks and attestations before delivery and retains peer scores" {
