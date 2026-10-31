@@ -35,6 +35,7 @@ test {
     _ = @import("discv5_session.zig");
     _ = @import("discv5_handshake.zig");
     _ = @import("discv5_udp.zig");
+    _ = @import("discv5_discovery.zig");
     _ = @import("fixture_runner.zig");
     _ = @import("transition.zig");
     _ = @import("fork.zig");

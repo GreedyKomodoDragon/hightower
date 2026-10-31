@@ -36,6 +36,11 @@ pub const Candidates = struct {
         defer self.allocator.free(bytes);
         std.base64.url_safe_no_pad.Decoder.decode(bytes, encoded) catch return error.InvalidEnrUri;
         const record = try enr.decode(self.allocator, bytes);
+        return self.addVerified(record);
+    }
+
+    /// Admit a record already authenticated by ENR decoding or a discv5 handshake.
+    pub fn addVerified(self: *Candidates, record: enr.Record) !void {
         try enr.requireFork(record, self.fork_digest);
         for (self.items.items) |*existing| {
             if (!std.mem.eql(u8, &existing.node_id, &record.node_id)) continue;
