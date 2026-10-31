@@ -321,6 +321,7 @@ pub fn build(b: *std.Build) void {
     consensus_mod.addImport("execution", execution_mod);
     consensus_mod.addImport("ckzg", ckzg_mod);
     consensus_mod.addImport("storage", storage_mod);
+    consensus_mod.addImport("rlp", rlp_mod);
     mod.addImport("consensus", consensus_mod);
     const engine_wire_mod = b.createModule(.{
         .root_source_file = b.path("src/engine/wire.zig"),
@@ -480,6 +481,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "execution", .module = execution_mod },
                 .{ .name = "ckzg", .module = ckzg_mod },
                 .{ .name = "storage", .module = storage_mod },
+                .{ .name = "rlp", .module = rlp_mod },
             },
         }),
     });

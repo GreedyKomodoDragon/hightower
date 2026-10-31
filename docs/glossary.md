@@ -55,6 +55,7 @@ Chain:      [Block 0] ───────────────────�
 | Custody group | A public, deterministic assignment of columns a node retains and serves. |
 | Data availability sampling | Checking selected, verified columns before treating a blob-carrying block as available. |
 | Node ID | A 32-byte discovery identity used to select a node's custody groups. |
+| Ethereum Node Record (ENR) | A signed record that advertises a node's discovery identity, network address, fork, and custody commitment. |
 | discv5 | Ethereum's peer discovery protocol, which uses node records and UDP messages to find other nodes. |
 | Fork digest | Four bytes that identify a chain's current consensus fork for network messages. |
 | Gossipsub | The peer-to-peer protocol that spreads consensus messages through subscribed topics. |
