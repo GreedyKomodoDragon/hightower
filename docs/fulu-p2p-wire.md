@@ -22,6 +22,8 @@ The transport must enforce read timeouts, append `/ssz_snappy` to protocol prefi
 
 `consensus.P2PGossip.Stream` handles the [libp2p unsigned-varint message delimiter](https://github.com/libp2p/go-libp2p-pubsub/blob/master/gossipsub_peer_lifecycle_test.go) around each protobuf RPC. It buffers only one bounded RPC, accepts split or combined transport reads, and passes complete messages to `Service`. Create one stream per authenticated connection and discard it on disconnect. Invalid length prefixes count against the peer. The transport still needs authenticated connections, protocol negotiation, read timeouts, and live stream dispatch.
 
+Send `Service.localSubscriptionFrame()` when a gossip stream opens, including after reconnect. It announces the local block topic and selected attestation subnets in one framed RPC. Remote peers can then select this node for those topics; no unselected subnet is announced. Local recipient selection excludes disconnected and banned peers.
+
 `consensus.Discv5Messages` encodes and checks bounded, canonical PING, PONG, FINDNODE, and NODES plaintext messages. NODES replies verify every signed ENR and its current fork before exposing peers. Ordinary packet plaintext is capped at 1,193 bytes so the discv5 header and GCM tag fit the 1,280-byte UDP packet limit.
 
 `consensus.Discv5Packets` masks and checks discv5 static packet headers and encodes/decodes the exact 63-byte WHOAREYOU challenge. Header inspection is unauthenticated; ordinary and handshake payloads require session cryptography before any message is trusted.
