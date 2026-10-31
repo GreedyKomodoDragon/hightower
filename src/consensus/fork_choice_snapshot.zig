@@ -19,76 +19,84 @@ const header_len = magic.len + 8 + 32;
 const zero_root: fulu.Root = [_]u8{0} ** 32;
 
 /// Atomically replace a snapshot after syncing its complete contents.
+/// Payload bytes stream into the temporary file while a running digest is
+/// computed; only the fixed-size header is retained in memory.
 pub fn saveForkChoiceStore(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8, store: *const fork_choice.Store) !void {
-    var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(allocator);
-    try number(&payload, allocator, store.time);
-    try number(&payload, allocator, store.genesis_time);
-    try checkpoint(&payload, allocator, store.justified_checkpoint);
-    try checkpoint(&payload, allocator, store.finalized_checkpoint);
-    try checkpoint(&payload, allocator, store.unrealized_justified_checkpoint);
-    try checkpoint(&payload, allocator, store.unrealized_finalized_checkpoint);
-    try payload.appendSlice(allocator, &store.proposer_boost_root);
-    const head = try fork_choice.getHead(store);
-    try payload.appendSlice(allocator, &head);
-
-    try count(&payload, allocator, store.blocks.count());
-    var blocks = store.blocks.iterator();
-    while (blocks.next()) |entry| {
-        try payload.appendSlice(allocator, entry.key_ptr);
-        try value(&payload, allocator, entry.value_ptr.*);
-    }
-    try count(&payload, allocator, store.signed_block_signatures.count());
-    var signatures = store.signed_block_signatures.iterator();
-    while (signatures.next()) |entry| {
-        try payload.appendSlice(allocator, entry.key_ptr);
-        try payload.appendSlice(allocator, &entry.value_ptr.*);
-    }
-    try count(&payload, allocator, store.block_states.count());
-    var states = store.block_states.iterator();
-    while (states.next()) |entry| {
-        try payload.appendSlice(allocator, entry.key_ptr);
-        try value(&payload, allocator, entry.value_ptr.*);
-    }
-    try count(&payload, allocator, store.checkpoint_states.count());
-    var checkpoint_states = store.checkpoint_states.iterator();
-    while (checkpoint_states.next()) |entry| {
-        try checkpoint(&payload, allocator, entry.key_ptr.*);
-        try value(&payload, allocator, entry.value_ptr.*);
-    }
-    try count(&payload, allocator, store.block_timeliness.count());
-    var timeliness = store.block_timeliness.iterator();
-    while (timeliness.next()) |entry| {
-        try payload.appendSlice(allocator, entry.key_ptr);
-        try payload.append(allocator, @intFromBool(entry.value_ptr.*));
-    }
-    try count(&payload, allocator, store.latest_messages.count());
-    var messages = store.latest_messages.iterator();
-    while (messages.next()) |entry| {
-        try number(&payload, allocator, entry.key_ptr.*);
-        try number(&payload, allocator, entry.value_ptr.epoch);
-        try payload.appendSlice(allocator, &entry.value_ptr.root);
-    }
-    try count(&payload, allocator, store.equivocating_indices.count());
-    var equivocators = store.equivocating_indices.keyIterator();
-    while (equivocators.next()) |index| try number(&payload, allocator, index.*);
-    try count(&payload, allocator, store.unrealized_justifications.count());
-    var justifications = store.unrealized_justifications.iterator();
-    while (justifications.next()) |entry| {
-        try payload.appendSlice(allocator, entry.key_ptr);
-        try checkpoint(&payload, allocator, entry.value_ptr.*);
-    }
-    if (payload.items.len > max_bytes - header_len) return error.SnapshotTooLarge;
-    var digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(payload.items, &digest, .{});
     var atomic = try dir.createFileAtomic(io, path, .{ .replace = true });
     defer atomic.deinit(io);
-    try atomic.file.writeStreamingAll(io, magic);
+    const buffer = try allocator.alloc(u8, 1024 * 1024);
+    defer allocator.free(buffer);
+    var header: [header_len]u8 = [_]u8{0} ** header_len;
+    @memcpy(header[0..magic.len], magic);
+    try atomic.file.writeStreamingAll(io, &header);
+    var writer = SnapshotWriter{
+        .file = atomic.file,
+        .io = io,
+        .hasher = std.crypto.hash.sha2.Sha256.init(.{}),
+        .buffer = buffer,
+    };
+    try writer.number(store.time);
+    try writer.number(store.genesis_time);
+    try writer.checkpoint(store.justified_checkpoint);
+    try writer.checkpoint(store.finalized_checkpoint);
+    try writer.checkpoint(store.unrealized_justified_checkpoint);
+    try writer.checkpoint(store.unrealized_finalized_checkpoint);
+    try writer.append(&store.proposer_boost_root);
+    const head = try fork_choice.getHead(store);
+    try writer.append(&head);
+
+    try writer.count(store.blocks.count());
+    var blocks = store.blocks.iterator();
+    while (blocks.next()) |entry| {
+        try writer.append(entry.key_ptr);
+        try writer.value(allocator, entry.value_ptr.*);
+    }
+    try writer.count(store.signed_block_signatures.count());
+    var signatures = store.signed_block_signatures.iterator();
+    while (signatures.next()) |entry| {
+        try writer.append(entry.key_ptr);
+        try writer.append(&entry.value_ptr.*);
+    }
+    try writer.count(store.block_states.count());
+    var states = store.block_states.iterator();
+    while (states.next()) |entry| {
+        try writer.append(entry.key_ptr);
+        try writer.value(allocator, entry.value_ptr.*);
+    }
+    try writer.count(store.checkpoint_states.count());
+    var checkpoint_states = store.checkpoint_states.iterator();
+    while (checkpoint_states.next()) |entry| {
+        try writer.checkpoint(entry.key_ptr.*);
+        try writer.value(allocator, entry.value_ptr.*);
+    }
+    try writer.count(store.block_timeliness.count());
+    var timeliness = store.block_timeliness.iterator();
+    while (timeliness.next()) |entry| {
+        try writer.append(entry.key_ptr);
+        try writer.append(&.{@intFromBool(entry.value_ptr.*)});
+    }
+    try writer.count(store.latest_messages.count());
+    var messages = store.latest_messages.iterator();
+    while (messages.next()) |entry| {
+        try writer.number(entry.key_ptr.*);
+        try writer.number(entry.value_ptr.epoch);
+        try writer.append(&entry.value_ptr.root);
+    }
+    try writer.count(store.equivocating_indices.count());
+    var equivocators = store.equivocating_indices.keyIterator();
+    while (equivocators.next()) |index| try writer.number(index.*);
+    try writer.count(store.unrealized_justifications.count());
+    var justifications = store.unrealized_justifications.iterator();
+    while (justifications.next()) |entry| {
+        try writer.append(entry.key_ptr);
+        try writer.checkpoint(entry.value_ptr.*);
+    }
+    try writer.flush();
     var length: [8]u8 = undefined;
-    std.mem.writeInt(u64, &length, payload.items.len, .little);
-    try atomic.file.writeStreamingAll(io, &length);
-    try atomic.file.writeStreamingAll(io, &digest);
-    try atomic.file.writeStreamingAll(io, payload.items);
+    std.mem.writeInt(u64, &length, writer.written, .little);
+    @memcpy(header[magic.len..][0..8], &length);
+    writer.hasher.final(header[magic.len + 8 ..][0..32]);
+    try atomic.file.writePositionalAll(io, &header, 0);
     try atomic.file.sync(io);
     try atomic.replace(io);
 }
@@ -234,34 +242,63 @@ fn validate(allocator: std.mem.Allocator, store: *const fork_choice.Store, expec
     if (!std.mem.eql(u8, &head, &expected_head)) return error.InconsistentSnapshot;
 }
 
-/// Append a little-endian integer to the snapshot body.
-fn number(out: *std.ArrayList(u8), allocator: std.mem.Allocator, n: u64) !void {
-    if (out.items.len > max_bytes - header_len - 8) return error.SnapshotTooLarge;
-    var bytes: [8]u8 = undefined;
-    std.mem.writeInt(u64, &bytes, n, .little);
-    try out.appendSlice(allocator, &bytes);
-}
+const SnapshotWriter = struct {
+    file: std.Io.File,
+    io: std.Io,
+    hasher: std.crypto.hash.sha2.Sha256,
+    buffer: []u8,
+    buffered: usize = 0,
+    written: usize = 0,
 
-/// Append a bounded map count.
-fn count(out: *std.ArrayList(u8), allocator: std.mem.Allocator, n: usize) !void {
-    if (n > max_records) return error.SnapshotTooLarge;
-    try number(out, allocator, n);
-}
+    /// Append bytes while advancing the running checksum and size cap.
+    fn append(self: *SnapshotWriter, bytes: []const u8) !void {
+        if (self.written > max_bytes - header_len or bytes.len > max_bytes - header_len - self.written) return error.SnapshotTooLarge;
+        self.hasher.update(bytes);
+        self.written += bytes.len;
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            if (self.buffered == self.buffer.len) try self.flush();
+            const n = @min(bytes.len - offset, self.buffer.len - self.buffered);
+            @memcpy(self.buffer[self.buffered..][0..n], bytes[offset..][0..n]);
+            self.buffered += n;
+            offset += n;
+        }
+    }
 
-/// Append an epoch and block root.
-fn checkpoint(out: *std.ArrayList(u8), allocator: std.mem.Allocator, cp: fulu.Checkpoint) !void {
-    try number(out, allocator, cp.epoch);
-    try out.appendSlice(allocator, &cp.root);
-}
+    /// Write buffered payload bytes before the header and directory sync.
+    fn flush(self: *SnapshotWriter) !void {
+        if (self.buffered == 0) return;
+        try self.file.writeStreamingAll(self.io, self.buffer[0..self.buffered]);
+        self.buffered = 0;
+    }
 
-/// Append one SSZ value with an explicit byte length.
-fn value(out: *std.ArrayList(u8), allocator: std.mem.Allocator, item: anytype) !void {
-    const bytes = try ssz.serializeAlloc(allocator, item);
-    defer allocator.free(bytes);
-    if (bytes.len > max_bytes - header_len - 8 or out.items.len > max_bytes - header_len - 8 - bytes.len) return error.SnapshotTooLarge;
-    try number(out, allocator, bytes.len);
-    try out.appendSlice(allocator, bytes);
-}
+    /// Append a little-endian integer to the snapshot body.
+    fn number(self: *SnapshotWriter, n: u64) !void {
+        var bytes: [8]u8 = undefined;
+        std.mem.writeInt(u64, &bytes, n, .little);
+        try self.append(&bytes);
+    }
+
+    /// Append a bounded map count.
+    fn count(self: *SnapshotWriter, n: usize) !void {
+        if (n > max_records) return error.SnapshotTooLarge;
+        try self.number(n);
+    }
+
+    /// Append an epoch and block root.
+    fn checkpoint(self: *SnapshotWriter, cp: fulu.Checkpoint) !void {
+        try self.number(cp.epoch);
+        try self.append(&cp.root);
+    }
+
+    /// Append one SSZ value with an explicit byte length.
+    fn value(self: *SnapshotWriter, allocator: std.mem.Allocator, item: anytype) !void {
+        const bytes = try ssz.serializeAlloc(allocator, item);
+        defer allocator.free(bytes);
+        try self.number(bytes.len);
+        try self.append(bytes);
+    }
+};
 
 const Cursor = struct {
     bytes: []const u8,
