@@ -5,7 +5,8 @@
 //
 //   peer RPC -> bounded protobuf -> topic -> SSZ/consensus gate -> delivery
 // One RPC carries at most 128 subscription updates and 16 publishes in 16 MiB.
-// Connection security, mesh control, and stream framing are separate work.
+// A stream prefixes each RPC with its unsigned varint byte length. Connection
+// security and mesh control are separate work.
 const std = @import("std");
 const ingress = @import("p2p_ingress.zig");
 const admission = @import("p2p_admission.zig");
@@ -16,6 +17,7 @@ const max_publishes: usize = 16;
 const max_subscriptions: usize = 128;
 const seen_capacity: usize = 1024;
 const max_topic_size: usize = 128;
+const max_frame_prefix: usize = 4;
 const field_shift = 3;
 const wire_mask = 0b111;
 const RpcField = struct {
@@ -179,6 +181,83 @@ pub const Service = struct {
         return null;
     }
 };
+
+/// Assemble varint-delimited RPCs from one authenticated peer's gossip stream.
+/// The caller owns one Stream per connection and releases it on disconnect.
+pub const Stream = struct {
+    allocator: std.mem.Allocator,
+    peer_id: [32]u8,
+    pending: std.ArrayList(u8) = .empty,
+    prefix_len: u8 = 0,
+    declared: usize = 0,
+    have_length: bool = false,
+
+    /// Bind a new stream to the transport-authenticated peer identity.
+    pub fn init(allocator: std.mem.Allocator, peer_id: [32]u8) Stream {
+        return .{ .allocator = allocator, .peer_id = peer_id };
+    }
+
+    /// Release any incomplete RPC when the connection closes.
+    pub fn deinit(self: *Stream) void {
+        self.pending.deinit(self.allocator);
+    }
+
+    /// Decode complete RPCs from arbitrarily split or coalesced transport reads.
+    /// Framing faults count against the peer; Service scores invalid RPC bodies.
+    pub fn feed(self: *Stream, service: *Service, bytes: []const u8) !void {
+        try service.peers.requirePeer(self.peer_id);
+        errdefer self.reset();
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            if (!self.have_length) {
+                const byte = bytes[offset];
+                offset += 1;
+                if (self.prefix_len == max_frame_prefix) {
+                    service.peers.noteInvalid(self.peer_id);
+                    return error.InvalidGossipFrame;
+                }
+                self.declared |= @as(usize, byte & 0x7f) << @intCast(self.prefix_len * 7);
+                self.prefix_len += 1;
+                if (byte & 0x80 != 0) {
+                    if (self.prefix_len == max_frame_prefix) {
+                        service.peers.noteInvalid(self.peer_id);
+                        return error.InvalidGossipFrame;
+                    }
+                    continue;
+                }
+                if ((self.prefix_len > 1 and byte == 0) or self.declared > max_rpc_size) {
+                    service.peers.noteInvalid(self.peer_id);
+                    return error.InvalidGossipFrame;
+                }
+                self.have_length = true;
+            }
+            const take = @min(self.declared - self.pending.items.len, bytes.len - offset);
+            try self.pending.appendSlice(self.allocator, bytes[offset..][0..take]);
+            offset += take;
+            if (self.pending.items.len != self.declared) continue;
+            try service.receive(self.peer_id, self.pending.items);
+            self.reset();
+        }
+    }
+
+    /// Discard a partial frame after an error or connection loss.
+    pub fn reset(self: *Stream) void {
+        self.pending.clearRetainingCapacity();
+        self.prefix_len = 0;
+        self.declared = 0;
+        self.have_length = false;
+    }
+};
+
+/// Prefix one bounded protobuf RPC for a Gossipsub stream write.
+pub fn encodeFrame(allocator: std.mem.Allocator, rpc: []const u8) ![]u8 {
+    if (rpc.len > max_rpc_size) return error.PayloadTooLarge;
+    var frame: std.ArrayList(u8) = .empty;
+    errdefer frame.deinit(allocator);
+    try appendVarint(allocator, &frame, rpc.len);
+    try frame.appendSlice(allocator, rpc);
+    return frame.toOwnedSlice(allocator);
+}
 
 /// Encode a StrictNoSign publish as one libp2p Gossipsub protobuf RPC.
 pub fn encodePublish(allocator: std.mem.Allocator, topic: []const u8, data: []const u8) ![]u8 {
@@ -426,6 +505,74 @@ test "subscription RPC requires a bounded topic and canonical boolean" {
     try std.testing.expectError(error.InvalidGossipRpc, decodeRpc(excessive.items, 16));
 }
 
+test "gossip stream assembles split RPCs and rejects bad length prefixes" {
+    const allocator = std.testing.allocator;
+    const fulu = @import("fulu");
+    const config = ingress.Config{ .genesis_validators_root = [_]u8{1} ** 32, .fulu_version = .{ 6, 0, 0, 0 }, .fulu_epoch = 0, .blob_schedule = &@import("helpers.zig").BLOB_SCHEDULE };
+    const peer_id = [_]u8{2} ** 32;
+    var unused: u8 = 0;
+    const block_gate = ingress.BlockValidation{ .context = &unused, .validate = struct {
+        /// Reject unexpected block delivery in this framing test.
+        fn reject(_: *anyopaque, _: *const fulu.SignedBeaconBlock) !void {
+            return error.UnexpectedBlock;
+        }
+    }.reject };
+    const att_gate = ingress.AttestationValidation{ .context = &unused, .validate = struct {
+        /// Reject unexpected attestation delivery in this framing test.
+        fn reject(_: *anyopaque, _: *const fulu.Attestation) !void {
+            return error.UnexpectedAttestation;
+        }
+    }.reject };
+    var service = try Service.init(allocator, config, .{ 1, 2, 3, 4 }, &.{}, 1, 4, block_gate, att_gate);
+    defer service.deinit();
+    try service.connect(peer_id);
+    var stream = Stream.init(allocator, peer_id);
+    defer stream.deinit();
+    const subscribe_rpc = try encodeSubscription(allocator, service.block_topic, true);
+    defer allocator.free(subscribe_rpc);
+    const subscribe_frame = try encodeFrame(allocator, subscribe_rpc);
+    defer allocator.free(subscribe_frame);
+    var recipients: [1][32]u8 = undefined;
+    try stream.feed(&service, subscribe_frame[0..1]);
+    try stream.feed(&service, subscribe_frame[1..3]);
+    try std.testing.expectEqual(@as(usize, 0), try service.recipients(service.block_topic, &recipients));
+    try stream.feed(&service, subscribe_frame[3..]);
+    try std.testing.expectEqual(@as(usize, 1), try service.recipients(service.block_topic, &recipients));
+
+    const unsubscribe_rpc = try encodeSubscription(allocator, service.block_topic, false);
+    defer allocator.free(unsubscribe_rpc);
+    const unsubscribe_frame = try encodeFrame(allocator, unsubscribe_rpc);
+    defer allocator.free(unsubscribe_frame);
+    var combined: std.ArrayList(u8) = .empty;
+    defer combined.deinit(allocator);
+    try combined.appendSlice(allocator, unsubscribe_frame);
+    try combined.appendSlice(allocator, subscribe_frame);
+    try stream.feed(&service, combined.items);
+    try std.testing.expectEqual(@as(usize, 1), try service.recipients(service.block_topic, &recipients));
+
+    const long_topic = [_]u8{'x'} ** max_topic_size;
+    const long_rpc = try encodeSubscription(allocator, &long_topic, true);
+    defer allocator.free(long_rpc);
+    const long_frame = try encodeFrame(allocator, long_rpc);
+    defer allocator.free(long_frame);
+    try std.testing.expect(long_frame[0] & 0x80 != 0);
+    try stream.feed(&service, long_frame[0..1]);
+    try stream.feed(&service, long_frame[1..]);
+    try std.testing.expectEqual(@as(usize, 1), try service.recipients(service.block_topic, &recipients));
+
+    try std.testing.expectError(error.InvalidGossipFrame, stream.feed(&service, &.{ 0x80, 0x00 }));
+    var oversized: std.ArrayList(u8) = .empty;
+    defer oversized.deinit(allocator);
+    try appendVarint(allocator, &oversized, max_rpc_size + 1);
+    try std.testing.expectError(error.InvalidGossipFrame, stream.feed(&service, oversized.items));
+    const malformed = try encodeFrame(allocator, &.{ 0x12, 0x80 });
+    defer allocator.free(malformed);
+    try std.testing.expectError(error.InvalidGossipRpc, stream.feed(&service, malformed));
+    try std.testing.expectEqual(@as(u8, 3), service.peers.state(peer_id).?.invalid_messages);
+    try stream.feed(&service, unsubscribe_frame);
+    try std.testing.expectEqual(@as(usize, 0), try service.recipients(service.block_topic, &recipients));
+}
+
 test "gossip RPC validates blocks and attestations before delivery and retains peer scores" {
     const fixture = @import("fixture_runner.zig");
     const fulu = @import("fulu");
@@ -489,7 +636,13 @@ test "gossip RPC validates blocks and attestations before delivery and retains p
     defer allocator.free(block_data);
     const block_rpc = try encodePublish(allocator, service.block_topic, block_data);
     defer allocator.free(block_rpc);
-    try service.receive(good_peer, block_rpc);
+    const block_frame = try encodeFrame(allocator, block_rpc);
+    defer allocator.free(block_frame);
+    var block_stream = Stream.init(allocator, good_peer);
+    defer block_stream.deinit();
+    try block_stream.feed(&service, block_frame[0 .. block_frame.len / 2]);
+    try std.testing.expectEqual(@as(usize, 0), counts.blocks);
+    try block_stream.feed(&service, block_frame[block_frame.len / 2 ..]);
     try service.receive(good_peer, block_rpc);
     try std.testing.expectEqual(@as(usize, 1), counts.blocks);
     const att_data = try wire.encodeGossip(allocator, raw_attestation, config.max_encoded_size);
@@ -500,7 +653,9 @@ test "gossip RPC validates blocks and attestations before delivery and retains p
     try std.testing.expectEqual(@as(usize, 1), try publisher.recipients(publisher.attestation_topics[3].?, &recipients));
     const att_rpc = try encodePublish(allocator, service.attestation_topics[3].?, att_data);
     defer allocator.free(att_rpc);
-    try service.receive(good_peer, att_rpc);
+    const att_frame = try encodeFrame(allocator, att_rpc);
+    defer allocator.free(att_frame);
+    try block_stream.feed(&service, att_frame);
     try std.testing.expectEqual(@as(usize, 1), counts.attestations);
     const other_topic = try wire.topicName(allocator, digest, .attestation, 4);
     defer allocator.free(other_topic);
