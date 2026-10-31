@@ -38,7 +38,15 @@ pub const Nodes = struct {
     request_id: RequestId,
     total: u8,
     records: [16]enr.Record = undefined,
+    encoded: [16][300]u8 = undefined,
+    encoded_len: [16]u16 = undefined,
     count: u8 = 0,
+
+    /// Return the canonical signed ENR bytes at a validated reply index.
+    pub fn raw(self: *const Nodes, index: usize) []const u8 {
+        std.debug.assert(index < self.count);
+        return self.encoded[index][0..self.encoded_len[index]];
+    }
 };
 
 /// Encode one bounded plaintext message for an authenticated discv5 packet.
@@ -187,6 +195,8 @@ pub fn decodeNodes(allocator: std.mem.Allocator, bytes: []const u8, fork_digest:
         try writeValue(allocator, &encoded_record.writer, item);
         result.records[index] = try enr.decode(allocator, encoded_record.written());
         try enr.requireFork(result.records[index], fork_digest);
+        result.encoded_len[index] = @intCast(encoded_record.written().len);
+        @memcpy(result.encoded[index][0..result.encoded_len[index]], encoded_record.written());
     }
     result.count = @intCast(records.len);
     return result;

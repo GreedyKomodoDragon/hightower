@@ -36,6 +36,7 @@ pub const SentPacket = struct {
 };
 pub const ReceivedPacket = struct {
     record: enr.Record,
+    enr_bytes: ?[]u8,
     nonce: [12]u8,
     plaintext: []u8,
     keys: Keys,
@@ -43,6 +44,7 @@ pub const ReceivedPacket = struct {
     /// Release the authenticated plaintext after processing the first message.
     pub fn deinit(self: ReceivedPacket, allocator: std.mem.Allocator) void {
         allocator.free(self.plaintext);
+        if (self.enr_bytes) |bytes| allocator.free(bytes);
     }
 };
 
@@ -109,7 +111,8 @@ pub fn decodePacket(allocator: std.mem.Allocator, recipient_id: [32]u8, recipien
     const plaintext = try allocator.alloc(u8, ciphertext.len);
     errdefer allocator.free(plaintext);
     try AesGcm.decrypt(plaintext, ciphertext, datagram[datagram.len - tag_size ..][0..tag_size].*, associated_data[0 .. 16 + header_size], summary.nonce, keys.initiator);
-    return .{ .record = record, .nonce = summary.nonce, .plaintext = plaintext, .keys = keys };
+    const enr_bytes = if (record_bytes.len > 0) try allocator.dupe(u8, record_bytes) else null;
+    return .{ .record = record, .enr_bytes = enr_bytes, .nonce = summary.nonce, .plaintext = plaintext, .keys = keys };
 }
 
 /// Derive keys as the initiator using a fresh ephemeral secret and a verified recipient ENR.

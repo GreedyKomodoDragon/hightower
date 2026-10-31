@@ -13,6 +13,7 @@ pub const Candidates = struct {
     fork_digest: [4]u8,
     max_peers: usize,
     items: std.ArrayList(enr.Record) = .empty,
+    signed: std.ArrayList(?[]u8) = .empty,
 
     /// Create a candidate table with a limit no greater than 256 peers.
     pub fn init(allocator: std.mem.Allocator, fork_digest: [4]u8, max_peers: usize) !Candidates {
@@ -22,6 +23,8 @@ pub const Candidates = struct {
 
     /// Free the candidate table; returned record values need no separate release.
     pub fn deinit(self: *Candidates) void {
+        for (self.signed.items) |bytes| if (bytes) |owned| self.allocator.free(owned);
+        self.signed.deinit(self.allocator);
         self.items.deinit(self.allocator);
     }
 
@@ -35,25 +38,53 @@ pub const Candidates = struct {
         const bytes = try self.allocator.alloc(u8, length);
         defer self.allocator.free(bytes);
         std.base64.url_safe_no_pad.Decoder.decode(bytes, encoded) catch return error.InvalidEnrUri;
-        const record = try enr.decode(self.allocator, bytes);
-        return self.addVerified(record);
+        return self.addSigned(bytes);
     }
 
     /// Admit a record already authenticated by ENR decoding or a discv5 handshake.
     pub fn addVerified(self: *Candidates, record: enr.Record) !void {
+        return self.admit(record, null);
+    }
+
+    /// Decode and retain signed ENR bytes for later NODES replies.
+    pub fn addSigned(self: *Candidates, bytes: []const u8) !void {
+        const record = try enr.decode(self.allocator, bytes);
+        return self.admit(record, bytes);
+    }
+
+    /// Return a borrowed signed ENR for a candidate, if its wire bytes are known.
+    pub fn raw(self: *const Candidates, node_id: [32]u8) ?[]const u8 {
+        for (self.items.items, 0..) |record, index| {
+            if (std.mem.eql(u8, &record.node_id, &node_id)) return self.signed.items[index];
+        }
+        return null;
+    }
+
+    /// Apply sequence and capacity rules after the caller has authenticated the ENR.
+    fn admit(self: *Candidates, record: enr.Record, bytes: ?[]const u8) !void {
         try enr.requireFork(record, self.fork_digest);
-        for (self.items.items) |*existing| {
+        for (self.items.items, 0..) |*existing, index| {
             if (!std.mem.eql(u8, &existing.node_id, &record.node_id)) continue;
             if (record.sequence < existing.sequence) return error.StaleEnr;
             if (record.sequence == existing.sequence) {
                 if (!std.meta.eql(existing.*, record)) return error.ConflictingEnr;
+                if (bytes) |wire| {
+                    if (self.signed.items[index] == null) self.signed.items[index] = try self.allocator.dupe(u8, wire);
+                }
                 return;
             }
+            const copy = if (bytes) |wire| try self.allocator.dupe(u8, wire) else null;
+            if (self.signed.items[index]) |old| self.allocator.free(old);
+            self.signed.items[index] = copy;
             existing.* = record;
             return;
         }
         if (self.items.items.len == self.max_peers) return error.PeerLimitReached;
+        const copy = if (bytes) |wire| try self.allocator.dupe(u8, wire) else null;
+        errdefer if (copy) |owned| self.allocator.free(owned);
         try self.items.append(self.allocator, record);
+        errdefer self.items.items.len -= 1;
+        try self.signed.append(self.allocator, copy);
     }
 
     /// Return a copied candidate by discovery node ID.
@@ -79,6 +110,7 @@ test "bootstrap table verifies signed ENRs and updates only newer records" {
     try candidates.add(first_text);
     try std.testing.expectEqual(@as(usize, 1), candidates.items.items.len);
     const id = candidates.items.items[0].node_id;
+    try std.testing.expectEqualSlices(u8, first, candidates.raw(id).?);
     local.sequence = 2;
     local.udp_port = 9002;
     const newer = try enr.encode(allocator, key, local);
@@ -87,7 +119,9 @@ test "bootstrap table verifies signed ENRs and updates only newer records" {
     defer allocator.free(newer_text);
     try candidates.add(newer_text);
     try std.testing.expectEqual(@as(u16, 9002), candidates.get(id).?.udp_port);
+    try std.testing.expectEqualSlices(u8, newer, candidates.raw(id).?);
     try std.testing.expectError(error.StaleEnr, candidates.add(first_text));
+    try std.testing.expectEqualSlices(u8, newer, candidates.raw(id).?);
     local.udp_port = 9003;
     const conflicting = try enr.encode(allocator, key, local);
     defer allocator.free(conflicting);
