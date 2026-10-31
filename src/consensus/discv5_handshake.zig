@@ -115,11 +115,11 @@ test "WHOAREYOU keys agree and identity proof binds challenge, key, and recipien
 
 test "discv5 ECDH and HKDF match the official wire vector" {
     // https://github.com/ethereum/devp2p/blob/master/discv5/discv5-wire-test-vectors.md
-    var public_key: [33]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&public_key, "0317931e6e0840220642f230037d285d122bc59063221ef3226b1f403ddc69ca91");
+    var ecdh_public_key: [33]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&ecdh_public_key, "039961e4c2356d61bedb83052c115d311acb3a96f5777296dcf297351130266231");
     var secret: [32]u8 = undefined;
     _ = try std.fmt.hexToBytes(&secret, "fb757dc581730490a1d7a00deea65e9b1936924caaea8f44d476014856b68736");
-    const shared = (try (try Curve.fromSec1(&public_key)).mul(secret, .big)).toCompressedSec1();
+    const shared = (try (try Curve.fromSec1(&ecdh_public_key)).mul(secret, .big)).toCompressedSec1();
     var expected_shared: [33]u8 = undefined;
     _ = try std.fmt.hexToBytes(&expected_shared, "033b11a2a1f214567e1537ce5e509ffd9b21373247f2a3ff6841f4976f53165e7e");
     try std.testing.expectEqual(expected_shared, shared);
@@ -129,16 +129,19 @@ test "discv5 ECDH and HKDF match the official wire vector" {
     _ = try std.fmt.hexToBytes(&initiator_id, "aaaa8419e9f49d0083561b48287df592939a8d19947d8c0ef88f2a4856a69fbb");
     var recipient_id: [32]u8 = undefined;
     _ = try std.fmt.hexToBytes(&recipient_id, "bbbb9d047f0488c0b5a93c1c3f2d8bafc7c8ff337024a55434a0d0555de64db9");
-    const keys = deriveKeys(challenge, initiator_id, recipient_id, shared);
+    // Key derivation uses a different destination public key than the ECDH vector.
+    var destination_public_key: [33]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&destination_public_key, "0317931e6e0840220642f230037d285d122bc59063221ef3226b1f403ddc69ca91");
+    const agreement_secret = (try (try Curve.fromSec1(&destination_public_key)).mul(secret, .big)).toCompressedSec1();
+    const keys = deriveKeys(challenge, initiator_id, recipient_id, agreement_secret);
     var expected_initiator: [16]u8 = undefined;
     _ = try std.fmt.hexToBytes(&expected_initiator, "dccc82d81bd610f4f76d3ebe97a40571");
     var expected_recipient: [16]u8 = undefined;
     _ = try std.fmt.hexToBytes(&expected_recipient, "ac74bb8773749920b0d3a8881c173ec5");
     try std.testing.expectEqual(expected_initiator, keys.initiator);
     try std.testing.expectEqual(expected_recipient, keys.recipient);
-    var ephemeral_public_key: [33]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&ephemeral_public_key, "039961e4c2356d61bedb83052c115d311acb3a96f5777296dcf297351130266231");
     var expected_signature: [64]u8 = undefined;
     _ = try std.fmt.hexToBytes(&expected_signature, "94852a1e2318c4e5e9d422c98eaf19d1d90d876b29cd06ca7cb7546d0fff7b484fe86c09a064fe72bdbef73ba8e9c34df0cd2b53e9d65528c2c7f336d5dfc6e6");
-    try Ecdsa.Signature.fromBytes(expected_signature).verifyPrehashed(proofDigest(challenge, ephemeral_public_key, recipient_id), try Ecdsa.PublicKey.fromSec1(&ephemeral_public_key));
+    const signing_key = try Ecdsa.KeyPair.fromSecretKey(try Ecdsa.SecretKey.fromBytes(secret));
+    try Ecdsa.Signature.fromBytes(expected_signature).verifyPrehashed(proofDigest(challenge, ecdh_public_key, recipient_id), signing_key.public_key);
 }
