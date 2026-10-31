@@ -58,6 +58,9 @@ Chain:      [Block 0] ───────────────────�
 | Ethereum Node Record (ENR) | A signed record that advertises a node's discovery identity, network address, fork, and custody commitment. |
 | discv5 | Ethereum's peer discovery protocol, which uses node records and UDP messages to find other nodes. |
 | WHOAREYOU | A discv5 challenge sent when a node cannot authenticate a discovery packet; it prompts the sender to prove its identity and establish fresh session keys. |
+| FINDNODE | A discv5 request for node records at specified logarithmic distances from the recipient's node ID. |
+| NODES | A discv5 reply carrying signed node records for a FINDNODE request. |
+| Logarithmic distance | The position of the highest bit that differs between two node IDs; discv5 groups peers by this value. |
 | UDP datagram | One connectionless network packet; discv5 sends each discovery message in a bounded UDP datagram. |
 | Discv5 session | A short-lived pair of encryption keys and nonce history used to authenticate discovery packets between two nodes. |
 | Discv5 identity proof | A signature that binds a node's ENR key to a WHOAREYOU challenge, an ephemeral key, and the intended recipient. |
