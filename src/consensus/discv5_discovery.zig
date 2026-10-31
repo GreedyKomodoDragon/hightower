@@ -10,6 +10,7 @@
 //   ENR probe -> WHOAREYOU -> verified handshake PING -> session PONG
 //   session FINDNODE -> bounded NODES -> verified candidate table
 // At most 256 peers and challenges are retained; challenges expire after 1 s.
+// FINDNODE replies have 10 s for a caller-driven, multi-packet exchange.
 const std = @import("std");
 const enr = @import("enr.zig");
 const bootstrap = @import("discovery_bootstrap.zig");
@@ -20,6 +21,7 @@ const messages = @import("discv5_messages.zig");
 const Session = @import("discv5_session.zig").Session;
 const Ecdsa = std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
 const challenge_lifetime_ns = std.time.ns_per_s;
+const findnode_lifetime_ns = 10 * std.time.ns_per_s;
 
 const Probe = struct {
     nonce: [12]u8,
@@ -122,7 +124,7 @@ pub const Service = struct {
         const peer = self.findPeer(id) orelse return error.UnknownPeer;
         if (!peer.discovered or peer.session == null) return error.UnknownSession;
         if (peer.find_query) |query| {
-            if (!self.expired(query.started_ns)) return error.RequestInProgress;
+            if (self.now() - query.started_ns <= findnode_lifetime_ns) return error.RequestInProgress;
         }
         var request_bytes: [8]u8 = undefined;
         self.io.random(&request_bytes);
@@ -330,7 +332,7 @@ pub const Service = struct {
     /// Verify a NODES reply's request ID and distances before adding candidates.
     fn handleNodes(self: *Service, peer: *Peer, plaintext: []const u8) !void {
         const query = if (peer.find_query) |*pending| pending else return error.UnsolicitedNodes;
-        if (self.expired(query.started_ns)) return error.RequestExpired;
+        if (self.now() - query.started_ns > findnode_lifetime_ns) return error.RequestExpired;
         const nodes = try messages.decodeNodes(self.allocator, plaintext, self.candidates.fork_digest);
         if (!std.mem.eql(u8, query.request.request_id.slice(), nodes.request_id.slice())) return error.WrongRequestId;
         if (query.total != 0 and query.total != nodes.total or query.received >= nodes.total) return error.InvalidNodes;
@@ -487,9 +489,15 @@ test "FINDNODE shares verified ENRs and rejects wrong-distance NODES" {
     try std.testing.expectError(error.InvalidDistance, a.step(timeout));
     try std.testing.expect(a.candidates.get(c.local_record.node_id) == null);
     try b.step(timeout);
+    a.findPeer(b.local_record.node_id).?.find_query.?.started_ns -= 2 * std.time.ns_per_s;
     try a.step(timeout);
     try std.testing.expect(a.findPeer(b.local_record.node_id).?.find_query == null);
 
+    try a.findNode(b.local_record.node_id, &.{logDistance(b.local_record.node_id, c.local_record.node_id)});
+    try b.step(timeout);
+    a.findPeer(b.local_record.node_id).?.find_query.?.started_ns -= findnode_lifetime_ns + 1;
+    try std.testing.expectError(error.RequestExpired, a.step(timeout));
+    try std.testing.expect(a.candidates.get(c.local_record.node_id) == null);
     try a.findNode(b.local_record.node_id, &.{logDistance(b.local_record.node_id, c.local_record.node_id)});
     try b.step(timeout);
     try a.step(timeout);
