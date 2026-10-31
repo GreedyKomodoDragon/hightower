@@ -57,6 +57,7 @@ Chain:      [Block 0] ───────────────────�
 | Node ID | A 32-byte discovery identity used to select a node's custody groups. |
 | Ethereum Node Record (ENR) | A signed record that advertises a node's discovery identity, network address, fork, and custody commitment. |
 | discv5 | Ethereum's peer discovery protocol, which uses node records and UDP messages to find other nodes. |
+| WHOAREYOU | A discv5 challenge sent when a node cannot authenticate a discovery packet; it prompts the sender to prove its identity and establish fresh session keys. |
 | Discv5 session | A short-lived pair of encryption keys and nonce history used to authenticate discovery packets between two nodes. |
 | Discv5 identity proof | A signature that binds a node's ENR key to a WHOAREYOU challenge, an ephemeral key, and the intended recipient. |
 | Fork digest | Four bytes that identify a chain's current consensus fork for network messages. |
