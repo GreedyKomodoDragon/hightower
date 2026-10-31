@@ -30,6 +30,7 @@ test {
     _ = @import("enr.zig");
     _ = @import("discovery_bootstrap.zig");
     _ = @import("p2p_admission.zig");
+    _ = @import("discv5_messages.zig");
     _ = @import("fixture_runner.zig");
     _ = @import("transition.zig");
     _ = @import("fork.zig");
