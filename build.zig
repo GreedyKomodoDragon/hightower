@@ -570,6 +570,31 @@ pub fn build(b: *std.Build) void {
     const vectors_step = b.step("test-vectors", "Run official SSZ test vectors");
     vectors_step.dependOn(&run_vectors_tests.step);
 
+    // Microbenchmarks for the hot paths found during the memory/performance
+    // review. Run with -Doptimize=ReleaseFast for comparable timings.
+    const bench_exe = b.addExecutable(.{
+        .name = "hightower-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bench.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "fulu", .module = fulu_mod },
+                .{ .name = "ssz", .module = ssz_mod },
+                .{ .name = "merkle", .module = merkle_mod },
+                .{ .name = "storage", .module = storage_mod },
+                .{ .name = "consensus", .module = consensus_mod },
+                .{ .name = "consensus_preset", .module = consensus_preset_mod },
+            },
+        }),
+    });
+    const run_bench = b.addRunArtifact(bench_exe);
+    if (b.args) |args| {
+        run_bench.addArgs(args);
+    }
+    const bench_step = b.step("bench", "Run local hot-path microbenchmarks");
+    bench_step.dependOn(&run_bench.step);
+
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
     // The Zig build system is entirely implemented in userland, which means

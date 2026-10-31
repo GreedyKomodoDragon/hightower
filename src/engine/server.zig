@@ -322,23 +322,24 @@ pub const Server = struct {
         const head = try wire.fixed(32, try wire.field(choice, "headBlockHash"));
         const safe = try wire.fixed(32, try wire.field(choice, "safeBlockHash"));
         const finalized = try wire.fixed(32, try wire.field(choice, "finalizedBlockHash"));
-        var selected: ?*Candidate = null;
+        var selected: ?usize = null;
         if (!std.mem.eql(u8, &head, &self.chain.latest().hash)) {
-            for (self.staged.items) |*candidate| if (std.mem.eql(u8, &candidate.payload.block_hash, &head)) {
-                selected = candidate;
+            for (self.staged.items, 0..) |candidate, index| if (std.mem.eql(u8, &candidate.payload.block_hash, &head)) {
+                selected = index;
             };
-            const candidate = selected orelse return choiceResult(a, "SYNCING", null, null);
-            if (!std.mem.eql(u8, &candidate.payload.parent_hash, &self.chain.latest().hash)) return choiceResult(a, "SYNCING", null, null);
+            const index = selected orelse return choiceResult(a, "SYNCING", null, null);
+            if (!std.mem.eql(u8, &self.staged.items[index].payload.parent_hash, &self.chain.latest().hash)) return choiceResult(a, "SYNCING", null, null);
         }
         if (!std.mem.allEqual(u8, &safe, 0) and self.chain.byHash(safe) == null and !std.mem.eql(u8, &safe, &head)) return error.InvalidForkchoiceState;
         if (!std.mem.allEqual(u8, &finalized, 0) and self.chain.byHash(finalized) == null and !std.mem.eql(u8, &finalized, &head)) return error.InvalidForkchoiceState;
-        const head_number = if (selected) |candidate| candidate.header.number else self.chain.latest().header.number;
+        const head_number = if (selected) |index| self.staged.items[index].header.number else self.chain.latest().header.number;
         const safe_number: u64 = if (std.mem.allEqual(u8, &safe, 0)) 0 else if (std.mem.eql(u8, &safe, &head)) head_number else self.chain.byHash(safe).?.header.number;
         const finalized_number: u64 = if (std.mem.allEqual(u8, &finalized, 0)) 0 else if (std.mem.eql(u8, &finalized, &head)) head_number else self.chain.byHash(finalized).?.header.number;
         if (safe_number > head_number or finalized_number > safe_number or (std.mem.allEqual(u8, &safe, 0) and !std.mem.allEqual(u8, &finalized, 0))) return error.InvalidForkchoiceState;
-        const parent_header = if (selected) |candidate| candidate.header else self.chain.latest().header;
-        const parent_world = if (selected) |candidate| &candidate.world else &self.chain.latest().world;
-        if (selected) |candidate| {
+        const parent_header = if (selected) |index| self.staged.items[index].header else self.chain.latest().header;
+        const parent_world = if (selected) |index| &self.staged.items[index].world else &self.chain.latest().world;
+        if (selected) |index| {
+            const candidate = &self.staged.items[index];
             const p = candidate.payload;
             const txs = try a.alloc([]const u8, p.transactions.data.len);
             for (p.transactions.data, txs) |raw, *out| out.* = raw.data;
@@ -347,6 +348,12 @@ pub const Server = struct {
             try self.chain.append(self.world, candidate.header, txs, withdrawals, candidate.hashes, candidate.requests);
             self.pool.prune(self.world);
         }
+        // The committed block is now owned by the canonical chain; release its
+        // staged world after the build request has cloned the parent snapshot.
+        defer if (selected) |index| {
+            var candidate = self.staged.orderedRemove(index);
+            candidate.deinit();
+        };
         var pending: ?Build = if (params[1] == .null) null else self.startBuild(a, params[1], parent_header, head, parent_world) catch |err| {
             if (err == error.InvalidParams) return error.InvalidPayloadAttributes;
             return err;
@@ -731,6 +738,8 @@ fn checkBuiltFork(fork: execution.transition.Fork) !void {
     try wire.put(temp, &request, "params", request_params);
     const bearer = try jwt.sign(temp, server.secret, 1_000);
     const body = try std.json.Stringify.valueAlloc(temp, request, .{});
+    // Capture the staged request hash before commit releases the candidate.
+    const request_hash = if (versions.new_payload >= 4) try execution.transition.requestsHash(temp, server.staged.items[0].requests) else try emptyRequestsHash();
     const invalid_attrs = try server.dispatch(a, bearer, body, 1_000);
     defer a.free(invalid_attrs);
     try std.testing.expect(std.mem.indexOf(u8, invalid_attrs, "-38003") != null);
@@ -742,7 +751,6 @@ fn checkBuiltFork(fork: execution.transition.Fork) !void {
     try std.testing.expectEqualSlices(execution.Hash, &.{genesis}, older);
     const payload_value = &params.array.items[0];
     payload_value.object.getPtr("extraData").?.* = try wire.hex(temp, &.{0x01});
-    const request_hash = if (versions.new_payload >= 4) try execution.transition.requestsHash(temp, server.staged.items[0].requests) else try emptyRequestsHash();
     const side_payload = try wire.parsePayload(temp, payload_value.*, @min(versions.new_payload, 3));
     const side_hash = try execution.transition.headerHash(temp, fork, try payloadHeader(temp, side_payload, beacon_root, request_hash));
     payload_value.object.getPtr("blockHash").?.* = try wire.hex(temp, &side_hash);

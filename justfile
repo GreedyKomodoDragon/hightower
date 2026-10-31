@@ -26,6 +26,10 @@ test:
 fulu-transition-test:
     zig build test-transition --summary all
 
+# run local hot-path microbenchmarks in ReleaseFast
+bench:
+    zig build bench -Doptimize=ReleaseFast
+
 # run tests with the Zig test fuzzer
 fuzz:
     zig build test -- --fuzz

@@ -141,7 +141,11 @@ pub fn onTick(store: *Store, time: u64) !void {
         if (next_slot % helpers.SLOTS_PER_EPOCH == 0) try ensureCheckpointState(store, store.unrealized_justified_checkpoint);
         store.time = next_time;
         store.proposer_boost_root = [_]u8{0} ** 32;
-        if (next_slot % helpers.SLOTS_PER_EPOCH == 0) updateCheckpoints(store);
+        if (next_slot % helpers.SLOTS_PER_EPOCH == 0) {
+            const prior_finalized_epoch = store.finalized_checkpoint.epoch;
+            updateCheckpoints(store);
+            if (store.finalized_checkpoint.epoch > prior_finalized_epoch) pruneToFinalized(store);
+        }
     }
     store.time = time;
 }
@@ -154,6 +158,59 @@ fn updateCheckpoints(store: *Store) void {
     if (store.unrealized_finalized_checkpoint.epoch > store.finalized_checkpoint.epoch) {
         store.finalized_checkpoint = store.unrealized_finalized_checkpoint;
     }
+}
+
+/// Drop blocks, states, and votes that cannot contain the finalized checkpoint.
+/// Only the finalized root and its descendants remain available for head choice.
+fn pruneToFinalized(store: *Store) void {
+    const finalized = store.finalized_checkpoint.root;
+    if (!store.blocks.contains(finalized)) return;
+    var children = buildChildMap(store) catch return;
+    defer deinitChildMap(&children, store.allocator);
+    var keep = std.AutoHashMap(fulu.Root, void).init(store.allocator);
+    defer keep.deinit();
+    var pending = std.ArrayListUnmanaged(fulu.Root).empty;
+    defer pending.deinit(store.allocator);
+    keep.put(finalized, {}) catch return;
+    pending.append(store.allocator, finalized) catch return;
+    while (pending.pop()) |root| {
+        const kids = children.get(root) orelse continue;
+        for (kids.items) |child| {
+            const entry = keep.getOrPut(child) catch return;
+            if (entry.found_existing) continue;
+            pending.append(store.allocator, child) catch return;
+        }
+    }
+    var removed = std.ArrayListUnmanaged(fulu.Root).empty;
+    defer removed.deinit(store.allocator);
+    var blocks = store.blocks.iterator();
+    while (blocks.next()) |entry| {
+        if (keep.contains(entry.key_ptr.*)) continue;
+        removed.append(store.allocator, entry.key_ptr.*) catch return;
+    }
+    for (removed.items) |root| {
+        if (store.blocks.fetchRemove(root)) |entry| ssz.freeDecoded(store.allocator, fulu.BeaconBlock, entry.value);
+        if (store.block_states.fetchRemove(root)) |entry| ssz.freeDecoded(store.allocator, fulu.BeaconState, entry.value);
+        _ = store.signed_block_signatures.remove(root);
+        _ = store.block_timeliness.remove(root);
+        _ = store.unrealized_justifications.remove(root);
+    }
+    var checkpoints = std.ArrayListUnmanaged(fulu.Checkpoint).empty;
+    defer checkpoints.deinit(store.allocator);
+    var checkpoint_states = store.checkpoint_states.keyIterator();
+    while (checkpoint_states.next()) |checkpoint| {
+        if (!store.blocks.contains(checkpoint.root)) checkpoints.append(store.allocator, checkpoint.*) catch return;
+    }
+    for (checkpoints.items) |checkpoint| {
+        if (store.checkpoint_states.fetchRemove(checkpoint)) |entry| ssz.freeDecoded(store.allocator, fulu.BeaconState, entry.value);
+    }
+    var messages = std.ArrayListUnmanaged(fulu.ValidatorIndex).empty;
+    defer messages.deinit(store.allocator);
+    var latest_messages = store.latest_messages.iterator();
+    while (latest_messages.next()) |entry| {
+        if (!store.blocks.contains(entry.value_ptr.root)) messages.append(store.allocator, entry.key_ptr.*) catch return;
+    }
+    for (messages.items) |index| _ = store.latest_messages.remove(index);
 }
 
 /// Return the ancestor at or before the first slot of an epoch.
@@ -188,6 +245,7 @@ pub fn isWithinWeakSubjectivityPeriod(store: *const Store, state: *const fulu.Be
 
 /// Import a validated, available block without changing the store on rejection.
 pub fn onBlock(store: *Store, signed_block: fulu.SignedBeaconBlock, engine: engine_api.ExecutionEngine, availability: DataAvailabilityCheck) !void {
+    const prior_finalized_epoch = store.finalized_checkpoint.epoch;
     const block = signed_block.message;
     const parent_state = store.block_states.getPtr(block.parent_root) orelse return error.UnknownParent;
     if (block.slot > store.currentSlot()) return error.FutureBlock;
@@ -239,6 +297,7 @@ pub fn onBlock(store: *Store, signed_block: fulu.SignedBeaconBlock, engine: engi
         store.unrealized_finalized_checkpoint = pulled.finalized_checkpoint;
     }
     if (past_epoch) updateCheckpoints(store);
+    if (store.finalized_checkpoint.epoch > prior_finalized_epoch) pruneToFinalized(store);
 }
 
 /// Deep-copy an SSZ value so store ownership is independent of caller memory.
@@ -378,18 +437,79 @@ fn checkpointBlockAtSlot(store: *const Store, root: fulu.Root, slot: fulu.Slot) 
     }
 }
 
+const ChildMap = std.AutoHashMap(fulu.Root, std.ArrayListUnmanaged(fulu.Root));
+
+/// Group block roots by parent once so head selection visits each edge once.
+fn buildChildMap(store: *const Store) !ChildMap {
+    var children = ChildMap.init(store.allocator);
+    errdefer deinitChildMap(&children, store.allocator);
+    var iter = store.blocks.iterator();
+    while (iter.next()) |entry| {
+        const slot = try children.getOrPut(entry.value_ptr.parent_root);
+        if (!slot.found_existing) slot.value_ptr.* = .empty;
+        try slot.value_ptr.append(store.allocator, entry.key_ptr.*);
+    }
+    return children;
+}
+
+/// Release the adjacency lists built for one head selection.
+fn deinitChildMap(children: *ChildMap, allocator: std.mem.Allocator) void {
+    var values = children.valueIterator();
+    while (values.next()) |list| list.deinit(allocator);
+    children.deinit();
+}
+
+/// Add one validator's balance to every ancestor of its latest vote.
+fn addAncestorWeight(store: *const Store, weights: *std.AutoHashMap(fulu.Root, u128), root: fulu.Root, amount: u128) !void {
+    var current = root;
+    while (store.blocks.get(current)) |block| {
+        const entry = try weights.getOrPut(current);
+        if (!entry.found_existing) entry.value_ptr.* = 0;
+        entry.value_ptr.* +|= amount;
+        current = block.parent_root;
+    }
+}
+
+/// Precompute latest-message and proposer-boost weight for every stored block.
+fn computeWeights(store: *const Store) !std.AutoHashMap(fulu.Root, u128) {
+    const state = store.checkpoint_states.get(store.justified_checkpoint) orelse return error.UnknownCheckpoint;
+    const epoch = helpers.getCurrentEpoch(&state);
+    var weights = std.AutoHashMap(fulu.Root, u128).init(store.allocator);
+    errdefer weights.deinit();
+    for (state.validators.data, 0..) |validator, index| {
+        if (!helpers.isActiveValidator(validator, epoch) or validator.slashed or store.equivocating_indices.contains(index)) continue;
+        const message = store.latest_messages.get(index) orelse continue;
+        if (!store.blocks.contains(message.root)) return error.UnknownBlock;
+        try addAncestorWeight(store, &weights, message.root, validator.effective_balance);
+    }
+    if (!std.mem.eql(u8, &store.proposer_boost_root, &([_]u8{0} ** 32))) {
+        if (!store.blocks.contains(store.proposer_boost_root)) return error.UnknownBlock;
+        const balance = try helpers.getTotalActiveBalance(state.validators.data, epoch);
+        const boost = (@as(u128, balance) / helpers.SLOTS_PER_EPOCH) * PROPOSER_SCORE_BOOST / 100;
+        try addAncestorWeight(store, &weights, store.proposer_boost_root, boost);
+    }
+    return weights;
+}
+
 /// Select the viable descendant with the highest latest-message weight at each fork.
 pub fn getHead(store: *const Store) !fulu.Root {
     var head = store.justified_checkpoint.root;
     if (!store.blocks.contains(head)) return error.UnknownCheckpoint;
+    var children = try buildChildMap(store);
+    defer deinitChildMap(&children, store.allocator);
+    var weights = try computeWeights(store);
+    defer weights.deinit();
+    var viable = std.AutoHashMap(fulu.Root, bool).init(store.allocator);
+    defer viable.deinit();
+    var visiting = std.AutoHashMap(fulu.Root, void).init(store.allocator);
+    defer visiting.deinit();
     while (true) {
+        const candidates = children.get(head) orelse return head;
         var best: ?fulu.Root = null;
-        var best_weight: u64 = 0;
-        var iter = store.blocks.iterator();
-        while (iter.next()) |entry| {
-            const root = entry.key_ptr.*;
-            if (!std.mem.eql(u8, &entry.value_ptr.parent_root, &head) or !try viableBranch(store, root)) continue;
-            const weight = try getWeight(store, root);
+        var best_weight: u128 = 0;
+        for (candidates.items) |root| {
+            if (!try viableBranch(store, &children, root, &viable, &visiting)) continue;
+            const weight = weights.get(root) orelse 0;
             if (best == null or weight > best_weight or (weight == best_weight and std.mem.order(u8, &root, &best.?) == .gt)) {
                 best = root;
                 best_weight = weight;
@@ -400,15 +520,28 @@ pub fn getHead(store: *const Store) !fulu.Root {
 }
 
 /// A branch is viable when a leaf below it has compatible justification and finality.
-fn viableBranch(store: *const Store, root: fulu.Root) !bool {
-    var has_child = false;
-    var iter = store.blocks.iterator();
-    while (iter.next()) |entry| {
-        if (!std.mem.eql(u8, &entry.value_ptr.parent_root, &root)) continue;
-        has_child = true;
-        if (try viableBranch(store, entry.key_ptr.*)) return true;
+fn viableBranch(store: *const Store, children: *const ChildMap, root: fulu.Root, cache: *std.AutoHashMap(fulu.Root, bool), visiting: *std.AutoHashMap(fulu.Root, void)) !bool {
+    if (cache.get(root)) |known| return known;
+    if (visiting.contains(root)) return false;
+    try visiting.put(root, {});
+    defer _ = visiting.remove(root);
+    var result = false;
+    if (children.get(root)) |kids| {
+        for (kids.items) |child| {
+            if (try viableBranch(store, children, child, cache, visiting)) {
+                result = true;
+                break;
+            }
+        }
+    } else {
+        result = try leafIsViable(store, root);
     }
-    if (has_child) return false;
+    try cache.put(root, result);
+    return result;
+}
+
+/// Check the justification and finality snapshot carried by a branch leaf.
+fn leafIsViable(store: *const Store, root: fulu.Root) !bool {
     const block = store.blocks.get(root) orelse return error.UnknownBlock;
     const current_epoch = helpers.computeEpochAtSlot(store.currentSlot());
     const source = if (current_epoch > helpers.computeEpochAtSlot(block.slot))
@@ -803,4 +936,55 @@ test "official Fulu slashing fixture excludes equivocating votes" {
     var expected: fulu.Root = undefined;
     _ = try std.fmt.hexToBytes(&expected, "738b28897c8ca84f0b800f5847dc5fdfc009d289fc226d047cf8d660af9342dc");
     try std.testing.expectEqual(expected, try getHead(&store));
+}
+
+test "finality prunes non-descendant blocks, states, checkpoints, and votes" {
+    const allocator = std.testing.allocator;
+    const fixtures = @import("fixture_runner.zig");
+    var state = try fixtures.decodeState(allocator, @embedFile("fixtures/fulu_fork_choice/basic/anchor_state.ssz_snappy"));
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
+    const bytes = try fixtures.decode(allocator, @embedFile("fixtures/fulu_fork_choice/basic/anchor_block.ssz_snappy"));
+    defer allocator.free(bytes);
+    var reader: std.Io.Reader = .fixed(bytes);
+    const anchor = try ssz.deserialize(allocator, fulu.BeaconBlock, &reader);
+    defer ssz.freeDecoded(allocator, fulu.BeaconBlock, anchor);
+    var store = try initStore(allocator, &state, &anchor);
+    defer store.deinit();
+
+    const finalized = [_]u8{0x11} ** 32;
+    const descendant = [_]u8{0x22} ** 32;
+    const stale = [_]u8{0x33} ** 32;
+    var child = anchor;
+    child.slot = 1;
+    child.parent_root = store.justified_checkpoint.root;
+    try putBlock(&store, finalized, child);
+    child.slot = 2;
+    child.parent_root = finalized;
+    try putBlock(&store, descendant, child);
+    child.slot = 1;
+    child.parent_root = store.justified_checkpoint.root;
+    try putBlock(&store, stale, child);
+    try putState(&store, finalized, state);
+    try putState(&store, descendant, state);
+    try putState(&store, stale, state);
+    try store.unrealized_justifications.put(finalized, store.justified_checkpoint);
+    try store.unrealized_justifications.put(descendant, store.justified_checkpoint);
+    try store.unrealized_justifications.put(stale, store.justified_checkpoint);
+    const stale_checkpoint = fulu.Checkpoint{ .epoch = 1, .root = stale };
+    try putCheckpointState(&store, stale_checkpoint, state);
+    try store.latest_messages.put(0, .{ .epoch = 0, .root = stale });
+    try store.latest_messages.put(1, .{ .epoch = 0, .root = descendant });
+
+    store.justified_checkpoint = .{ .epoch = 1, .root = finalized };
+    store.finalized_checkpoint = .{ .epoch = 1, .root = finalized };
+    pruneToFinalized(&store);
+
+    try std.testing.expectEqual(@as(usize, 2), store.blocks.count());
+    try std.testing.expectEqual(@as(usize, 2), store.block_states.count());
+    try std.testing.expect(store.blocks.contains(finalized));
+    try std.testing.expect(store.blocks.contains(descendant));
+    try std.testing.expect(!store.blocks.contains(stale));
+    try std.testing.expect(!store.checkpoint_states.contains(stale_checkpoint));
+    try std.testing.expect(!store.latest_messages.contains(0));
+    try std.testing.expect(store.latest_messages.contains(1));
 }

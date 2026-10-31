@@ -74,8 +74,9 @@ pub const Pool = struct {
             const combined = try combineAttestations(self.allocator, state, entry.value, value) orelse continue;
             errdefer ssz.freeDecoded(self.allocator, fulu.Attestation, combined);
             try validate(self.allocator, state, combined, operations.processAttestation);
+            const combined_root = try merkle.HashTreeRoot(self.allocator, combined);
             ssz.freeDecoded(self.allocator, fulu.Attestation, self.attestations.items[i].value);
-            self.attestations.items[i] = .{ .root = try merkle.HashTreeRoot(self.allocator, combined), .value = combined };
+            self.attestations.items[i] = .{ .root = combined_root, .value = combined };
             std.mem.sort(Entry(fulu.Attestation), self.attestations.items, {}, lessThan(fulu.Attestation));
             return;
         }
