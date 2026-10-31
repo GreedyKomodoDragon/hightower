@@ -128,7 +128,7 @@ pub fn challengeData(destination_id: [32]u8, packet: []const u8) ![63]u8 {
 }
 
 /// XOR packet header bytes with the destination-keyed AES-CTR stream.
-fn mask(destination_id: [32]u8, iv: [16]u8, output: []u8, input: []const u8) void {
+pub fn mask(destination_id: [32]u8, iv: [16]u8, output: []u8, input: []const u8) void {
     const aes = std.crypto.core.aes.Aes128.initEnc(destination_id[0..16].*);
     std.crypto.core.modes.ctr(@TypeOf(aes), aes, output, input, iv, .big);
 }
