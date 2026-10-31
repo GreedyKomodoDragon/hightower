@@ -32,6 +32,7 @@ test {
     _ = @import("p2p_admission.zig");
     _ = @import("discv5_messages.zig");
     _ = @import("discv5_packets.zig");
+    _ = @import("discv5_session.zig");
     _ = @import("fixture_runner.zig");
     _ = @import("transition.zig");
     _ = @import("fork.zig");

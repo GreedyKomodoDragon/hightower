@@ -57,6 +57,7 @@ Chain:      [Block 0] ───────────────────�
 | Node ID | A 32-byte discovery identity used to select a node's custody groups. |
 | Ethereum Node Record (ENR) | A signed record that advertises a node's discovery identity, network address, fork, and custody commitment. |
 | discv5 | Ethereum's peer discovery protocol, which uses node records and UDP messages to find other nodes. |
+| Discv5 session | A short-lived pair of encryption keys and nonce history used to authenticate discovery packets between two nodes. |
 | Fork digest | Four bytes that identify a chain's current consensus fork for network messages. |
 | Gossipsub | The peer-to-peer protocol that spreads consensus messages through subscribed topics. |
 | Subnet | A numbered gossip topic group used to distribute attestations or data columns. |

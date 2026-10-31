@@ -22,4 +22,4 @@ The transport must enforce read timeouts, append `/ssz_snappy` to protocol prefi
 
 `consensus.Discv5Packets` masks and checks discv5 static packet headers and encodes/decodes the exact 63-byte WHOAREYOU challenge. Header inspection is unauthenticated; ordinary and handshake payloads require session cryptography before any message is trusted.
 
-`encodeOrdinary` and `decodeOrdinary` authenticate ordinary packet plaintext with AES-128-GCM and the unmasked header as associated data. Callers supply directional session keys from a completed handshake, generate a unique nonce for every packet under that key, and reject replayed nonces before dispatching decrypted messages. The handshake and replay cache are not implemented here.
+`encodeOrdinary` and `decodeOrdinary` authenticate ordinary packet plaintext with AES-128-GCM and the unmasked header as associated data. `consensus.Discv5Session.Session` generates unique outbound nonces and masking IVs, rejects replayed authenticated inbound nonces, and exhausts after its configured 1–4096 packet budget. Callers must supply fresh directional keys from a completed handshake; the handshake is not implemented here.
