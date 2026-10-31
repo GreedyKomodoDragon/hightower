@@ -13,3 +13,5 @@
 The transport must enforce read timeouts, append `/ssz_snappy` to protocol prefixes, and handle peer scoring. The Snappy block writer currently emits literals, so a near-limit gossip message can exceed its encoded-size cap and be rejected by `encodeGossip`. The peer transport, discovery, and two-node test are not implemented by these modules.
 
 `consensus.ENR` encodes and verifies bounded, signed IPv4 node records with the Fulu `eth2`, `cgc`, and `nfd` fields. Call `requireFork` on a decoded record before adding it to a discovery candidate table. The record codec alone does not exchange discv5 packets or establish a consensus peer connection.
+
+`consensus.DiscoveryBootstrap.Candidates` admits configured `enr:` URIs after signature and fork checks, retains at most 256 identities, and accepts only higher ENR sequence numbers for updates. It supplies verified bootstrap candidates to a future discv5 service; it does not send UDP packets.
