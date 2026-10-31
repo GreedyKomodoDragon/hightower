@@ -21,3 +21,5 @@ The transport must enforce read timeouts, append `/ssz_snappy` to protocol prefi
 `consensus.Discv5Messages` encodes and checks bounded, canonical PING, PONG, FINDNODE, and NODES plaintext messages. NODES replies verify every signed ENR and its current fork before exposing peers. Ordinary packet plaintext is capped at 1,193 bytes so the discv5 header and GCM tag fit the 1,280-byte UDP packet limit. Packet encryption, handshake, and the discovery loop remain to be implemented.
 
 `consensus.Discv5Packets` masks and checks discv5 static packet headers and encodes/decodes the exact 63-byte WHOAREYOU challenge. Header inspection is unauthenticated; ordinary and handshake payloads require session cryptography before any message is trusted.
+
+`encodeOrdinary` and `decodeOrdinary` authenticate ordinary packet plaintext with AES-128-GCM and the unmasked header as associated data. Callers supply directional session keys from a completed handshake, generate a unique nonce for every packet under that key, and reject replayed nonces before dispatching decrypted messages. The handshake and replay cache are not implemented here.

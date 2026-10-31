@@ -12,10 +12,63 @@ pub const min_packet_size: usize = 63;
 const static_header_size: usize = 23;
 const iv_size: usize = 16;
 const challenge_auth_size: usize = 24;
+const ordinary_auth_size: usize = 32;
+const gcm_tag_size: usize = 16;
+const ordinary_overhead: usize = iv_size + static_header_size + ordinary_auth_size + gcm_tag_size;
+const AesGcm = std.crypto.aead.aes_gcm.Aes128Gcm;
 
 pub const Kind = enum(u8) { ordinary = 0, whoareyou = 1, handshake = 2 };
 pub const Header = struct { kind: Kind, nonce: [12]u8, authdata_size: u16 };
 pub const Challenge = struct { request_nonce: [12]u8, id_nonce: [16]u8, enr_sequence: u64 };
+pub const Ordinary = struct {
+    source_id: [32]u8,
+    nonce: [12]u8,
+    plaintext: []u8,
+
+    /// Release the authenticated plaintext returned by decodeOrdinary.
+    pub fn deinit(self: Ordinary, allocator: std.mem.Allocator) void {
+        allocator.free(self.plaintext);
+    }
+};
+
+/// Encrypt one ordinary packet with a handshake-derived directional session key.
+/// The caller must provide a nonce unique within that key's lifetime.
+pub fn encodeOrdinary(allocator: std.mem.Allocator, destination_id: [32]u8, source_id: [32]u8, masking_iv: [16]u8, nonce: [12]u8, session_key: [16]u8, plaintext: []const u8) ![]u8 {
+    if (plaintext.len == 0 or plaintext.len > max_packet_size - ordinary_overhead) return error.InvalidMessageSize;
+    var header: [static_header_size + ordinary_auth_size]u8 = undefined;
+    @memcpy(header[0..6], "discv5");
+    std.mem.writeInt(u16, header[6..8], 1, .big);
+    header[8] = @intFromEnum(Kind.ordinary);
+    @memcpy(header[9..21], &nonce);
+    std.mem.writeInt(u16, header[21..23], ordinary_auth_size, .big);
+    @memcpy(header[23..55], &source_id);
+    var packet = try allocator.alloc(u8, ordinary_overhead + plaintext.len);
+    errdefer allocator.free(packet);
+    @memcpy(packet[0..iv_size], &masking_iv);
+    mask(destination_id, masking_iv, packet[iv_size .. iv_size + header.len], &header);
+    var associated_data: [iv_size + header.len]u8 = undefined;
+    @memcpy(associated_data[0..iv_size], &masking_iv);
+    @memcpy(associated_data[iv_size..], &header);
+    AesGcm.encrypt(packet[iv_size + header.len .. packet.len - gcm_tag_size], packet[packet.len - gcm_tag_size ..][0..gcm_tag_size], plaintext, &associated_data, nonce, session_key);
+    return packet;
+}
+
+/// Authenticate and decrypt an ordinary packet before exposing its source or plaintext.
+/// The caller must reject replayed nonces for each peer and session key.
+pub fn decodeOrdinary(allocator: std.mem.Allocator, destination_id: [32]u8, session_key: [16]u8, packet: []const u8) !Ordinary {
+    const summary = try inspect(destination_id, packet);
+    if (summary.kind != .ordinary or packet.len <= ordinary_overhead) return error.InvalidPacketHeader;
+    var header: [static_header_size + ordinary_auth_size]u8 = undefined;
+    mask(destination_id, packet[0..iv_size].*, &header, packet[iv_size .. iv_size + header.len]);
+    var associated_data: [iv_size + header.len]u8 = undefined;
+    @memcpy(associated_data[0..iv_size], packet[0..iv_size]);
+    @memcpy(associated_data[iv_size..], &header);
+    const ciphertext = packet[iv_size + header.len .. packet.len - gcm_tag_size];
+    const plaintext = try allocator.alloc(u8, ciphertext.len);
+    errdefer allocator.free(plaintext);
+    try AesGcm.decrypt(plaintext, ciphertext, packet[packet.len - gcm_tag_size ..][0..gcm_tag_size].*, &associated_data, summary.nonce, session_key);
+    return .{ .source_id = header[23..55].*, .nonce = summary.nonce, .plaintext = plaintext };
+}
 
 /// Mask a complete WHOAREYOU challenge for the destination discovery node ID.
 pub fn encodeWhoAreYou(destination_id: [32]u8, masking_iv: [16]u8, challenge: Challenge) [63]u8 {
@@ -87,4 +140,39 @@ test "WHOAREYOU header masking matches the packet shape and rejects wrong destin
     @memcpy(trailing[0..63], &packet);
     trailing[63] = 0;
     try std.testing.expectError(error.InvalidPacketHeader, inspect(destination_id, &trailing));
+}
+
+test "ordinary packet authenticates discv5 plaintext and rejects tampering" {
+    const messages = @import("discv5_messages.zig");
+    const allocator = std.testing.allocator;
+    const destination_id = [_]u8{0x11} ** 32;
+    const source_id = [_]u8{0x55} ** 32;
+    const key = [_]u8{0x66} ** 16;
+    const nonce = [_]u8{0x33} ** 12;
+    const request_id = try messages.RequestId.init(&.{ 1, 2, 3 });
+    const plaintext = try messages.encode(allocator, .{ .ping = .{ .request_id = request_id, .enr_sequence = 7 } });
+    defer allocator.free(plaintext);
+    const packet = try encodeOrdinary(allocator, destination_id, source_id, [_]u8{0x22} ** 16, nonce, key, plaintext);
+    defer allocator.free(packet);
+    var expected_ciphertext_and_tag: [23]u8 = undefined;
+    // Independently calculated with Python cryptography's AESGCM.
+    _ = try std.fmt.hexToBytes(&expected_ciphertext_and_tag, "5c4d5ab218b91920cca0ef343508dbc233b9b7d3fbc60c");
+    try std.testing.expectEqualSlices(u8, &expected_ciphertext_and_tag, packet[iv_size + static_header_size + ordinary_auth_size ..]);
+    try std.testing.expectEqual(Kind.ordinary, (try inspect(destination_id, packet)).kind);
+    const decoded = try decodeOrdinary(allocator, destination_id, key, packet);
+    defer decoded.deinit(allocator);
+    try std.testing.expectEqual(source_id, decoded.source_id);
+    try std.testing.expectEqual(nonce, decoded.nonce);
+    try std.testing.expectEqualSlices(u8, plaintext, decoded.plaintext);
+    try std.testing.expectEqual(@as(u64, 7), (try messages.decode(allocator, decoded.plaintext)).ping.enr_sequence);
+    const tampered = try allocator.dupe(u8, packet);
+    defer allocator.free(tampered);
+    tampered[iv_size + static_header_size + ordinary_auth_size] ^= 1;
+    try std.testing.expectError(error.AuthenticationFailed, decodeOrdinary(allocator, destination_id, key, tampered));
+    tampered[iv_size + static_header_size + ordinary_auth_size] ^= 1;
+    tampered[iv_size + static_header_size] ^= 1;
+    try std.testing.expectError(error.AuthenticationFailed, decodeOrdinary(allocator, destination_id, key, tampered));
+    try std.testing.expectError(error.AuthenticationFailed, decodeOrdinary(allocator, destination_id, [_]u8{0x67} ** 16, packet));
+    try std.testing.expectError(error.InvalidPacketHeader, decodeOrdinary(allocator, [_]u8{0x12} ** 32, key, packet));
+    try std.testing.expectError(error.InvalidMessageSize, encodeOrdinary(allocator, destination_id, source_id, [_]u8{0x22} ** 16, nonce, key, &([_]u8{0} ** (max_packet_size - ordinary_overhead + 1))));
 }
