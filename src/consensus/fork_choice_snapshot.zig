@@ -24,6 +24,8 @@ const zero_root: fulu.Root = [_]u8{0} ** 32;
 pub fn saveForkChoiceStore(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8, store: *const fork_choice.Store) !void {
     var atomic = try dir.createFileAtomic(io, path, .{ .replace = true });
     defer atomic.deinit(io);
+    const buffer = try allocator.alloc(u8, 1024 * 1024);
+    defer allocator.free(buffer);
     var header: [header_len]u8 = [_]u8{0} ** header_len;
     @memcpy(header[0..magic.len], magic);
     try atomic.file.writeStreamingAll(io, &header);
@@ -31,6 +33,7 @@ pub fn saveForkChoiceStore(allocator: std.mem.Allocator, io: std.Io, dir: std.Io
         .file = atomic.file,
         .io = io,
         .hasher = std.crypto.hash.sha2.Sha256.init(.{}),
+        .buffer = buffer,
     };
     try writer.number(store.time);
     try writer.number(store.genesis_time);
@@ -88,6 +91,7 @@ pub fn saveForkChoiceStore(allocator: std.mem.Allocator, io: std.Io, dir: std.Io
         try writer.append(entry.key_ptr);
         try writer.checkpoint(entry.value_ptr.*);
     }
+    try writer.flush();
     var length: [8]u8 = undefined;
     std.mem.writeInt(u64, &length, writer.written, .little);
     @memcpy(header[magic.len..][0..8], &length);
@@ -242,14 +246,30 @@ const SnapshotWriter = struct {
     file: std.Io.File,
     io: std.Io,
     hasher: std.crypto.hash.sha2.Sha256,
+    buffer: []u8,
+    buffered: usize = 0,
     written: usize = 0,
 
     /// Append bytes while advancing the running checksum and size cap.
     fn append(self: *SnapshotWriter, bytes: []const u8) !void {
         if (self.written > max_bytes - header_len or bytes.len > max_bytes - header_len - self.written) return error.SnapshotTooLarge;
-        try self.file.writeStreamingAll(self.io, bytes);
         self.hasher.update(bytes);
         self.written += bytes.len;
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            if (self.buffered == self.buffer.len) try self.flush();
+            const n = @min(bytes.len - offset, self.buffer.len - self.buffered);
+            @memcpy(self.buffer[self.buffered..][0..n], bytes[offset..][0..n]);
+            self.buffered += n;
+            offset += n;
+        }
+    }
+
+    /// Write buffered payload bytes before the header and directory sync.
+    fn flush(self: *SnapshotWriter) !void {
+        if (self.buffered == 0) return;
+        try self.file.writeStreamingAll(self.io, self.buffer[0..self.buffered]);
+        self.buffered = 0;
     }
 
     /// Append a little-endian integer to the snapshot body.
