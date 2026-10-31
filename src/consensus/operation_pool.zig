@@ -128,16 +128,16 @@ pub const Pool = struct {
         // independent arenas so each candidate's state is released promptly.
         var scratch = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer scratch.deinit();
-        var working = try copyValue(scratch.allocator(), fulu.BeaconState, state.*);
-        const proposer_slashings = try selectList(allocator, fulu.ProposerSlashing, self.proposer_slashings.items, &scratch, &working, preset.MAX_PROPOSER_SLASHINGS, operations.processProposerSlashing);
+        var working: ?fulu.BeaconState = null;
+        const proposer_slashings = try selectList(allocator, fulu.ProposerSlashing, self.proposer_slashings.items, &scratch, state, &working, preset.MAX_PROPOSER_SLASHINGS, operations.processProposerSlashing);
         errdefer allocator.free(proposer_slashings);
-        const attester_slashings = try selectList(allocator, fulu.AttesterSlashing, self.attester_slashings.items, &scratch, &working, preset.MAX_ATTESTER_SLASHINGS_ELECTRA, operations.processAttesterSlashing);
+        const attester_slashings = try selectList(allocator, fulu.AttesterSlashing, self.attester_slashings.items, &scratch, state, &working, preset.MAX_ATTESTER_SLASHINGS_ELECTRA, operations.processAttesterSlashing);
         errdefer allocator.free(attester_slashings);
-        const attestations = try selectList(allocator, fulu.Attestation, self.attestations.items, &scratch, &working, preset.MAX_ATTESTATIONS_ELECTRA, operations.processAttestation);
+        const attestations = try selectList(allocator, fulu.Attestation, self.attestations.items, &scratch, state, &working, preset.MAX_ATTESTATIONS_ELECTRA, operations.processAttestation);
         errdefer allocator.free(attestations);
-        const voluntary_exits = try selectList(allocator, fulu.SignedVoluntaryExit, self.voluntary_exits.items, &scratch, &working, preset.MAX_VOLUNTARY_EXITS, operations.processVoluntaryExit);
+        const voluntary_exits = try selectList(allocator, fulu.SignedVoluntaryExit, self.voluntary_exits.items, &scratch, state, &working, preset.MAX_VOLUNTARY_EXITS, operations.processVoluntaryExit);
         errdefer allocator.free(voluntary_exits);
-        const bls_changes = try selectList(allocator, fulu.SignedBLSToExecutionChange, self.bls_changes.items, &scratch, &working, preset.MAX_BLS_TO_EXECUTION_CHANGES, operations.processBLSToExecutionChange);
+        const bls_changes = try selectList(allocator, fulu.SignedBLSToExecutionChange, self.bls_changes.items, &scratch, state, &working, preset.MAX_BLS_TO_EXECUTION_CHANGES, operations.processBLSToExecutionChange);
         return .{
             .proposer_slashings = proposer_slashings,
             .attester_slashings = attester_slashings,
@@ -215,13 +215,14 @@ fn validate(allocator: std.mem.Allocator, state: *const fulu.BeaconState, value:
 }
 
 /// Replay each candidate on a trial state, retaining valid entries up to limit.
-fn selectList(allocator: std.mem.Allocator, comptime T: type, entries: []const Entry(T), scratch: *std.heap.ArenaAllocator, state: *fulu.BeaconState, limit: usize, process: anytype) ![]T {
+fn selectList(allocator: std.mem.Allocator, comptime T: type, entries: []const Entry(T), scratch: *std.heap.ArenaAllocator, base: *const fulu.BeaconState, working: *?fulu.BeaconState, limit: usize, process: anytype) ![]T {
     var chosen = std.ArrayList(T).empty;
     errdefer chosen.deinit(allocator);
     for (entries) |entry| {
         if (chosen.items.len == limit) break;
+        const source = if (working.*) |*state| state else base;
         var trial_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-        var trial = copyValue(trial_arena.allocator(), fulu.BeaconState, state.*) catch |err| {
+        var trial = copyValue(trial_arena.allocator(), fulu.BeaconState, source.*) catch |err| {
             trial_arena.deinit();
             return err;
         };
@@ -232,7 +233,7 @@ fn selectList(allocator: std.mem.Allocator, comptime T: type, entries: []const E
             };
             scratch.deinit();
             scratch.* = trial_arena;
-            state.* = trial;
+            working.* = trial;
         } else |err| {
             trial_arena.deinit();
             if (err == error.OutOfMemory) return err;
@@ -509,8 +510,8 @@ test "selection applies each Fulu operation body limit" {
     inline for (.{ preset.MAX_PROPOSER_SLASHINGS, preset.MAX_ATTESTER_SLASHINGS_ELECTRA, preset.MAX_ATTESTATIONS_ELECTRA, preset.MAX_VOLUNTARY_EXITS, preset.MAX_BLS_TO_EXECUTION_CHANGES }) |limit| {
         var scratch = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer scratch.deinit();
-        var working = try copyValue(scratch.allocator(), fulu.BeaconState, state);
-        const chosen = try selectList(allocator, fulu.SignedVoluntaryExit, &entries, &scratch, &working, limit, acceptForLimitTest);
+        var working: ?fulu.BeaconState = null;
+        const chosen = try selectList(allocator, fulu.SignedVoluntaryExit, &entries, &scratch, &state, &working, limit, acceptForLimitTest);
         defer allocator.free(chosen);
         try std.testing.expectEqual(@as(usize, limit), chosen.len);
     }
