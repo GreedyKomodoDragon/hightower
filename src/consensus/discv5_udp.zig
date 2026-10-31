@@ -95,7 +95,7 @@ test "two UDP sockets exchange a bounded WHOAREYOU at the signed ENR endpoint" {
     });
     try sender.send(record, &packet);
     var buffer: [packets.max_packet_size + 1]u8 = undefined;
-    const received = try recipient.receive(&buffer, .{ .duration = .fromSeconds(1) });
+    const received = try recipient.receive(&buffer, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(1) } });
     try std.testing.expectEqualSlices(u8, &packet, received.bytes);
     const sender_record_bytes = try enr.encode(allocator, signing_key, .{
         .sequence = 1,
@@ -114,6 +114,6 @@ test "two UDP sockets exchange a bounded WHOAREYOU at the signed ENR endpoint" {
     try std.testing.expectError(error.InvalidPacketSize, sender.send(record, &([_]u8{0} ** 1281)));
     const destination = endpoint(record);
     try sender.socket.send(io, &destination, &([_]u8{0} ** 1300));
-    try std.testing.expectError(error.InvalidPacketSize, recipient.receive(&buffer, .{ .duration = .fromSeconds(1) }));
-    try std.testing.expectError(error.Timeout, recipient.receive(&buffer, .{ .duration = .fromMilliseconds(20) }));
+    try std.testing.expectError(error.InvalidPacketSize, recipient.receive(&buffer, .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(1) } }));
+    try std.testing.expectError(error.Timeout, recipient.receive(&buffer, .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(20) } }));
 }
