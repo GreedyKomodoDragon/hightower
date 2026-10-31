@@ -72,14 +72,14 @@ pub const Admission = struct {
     }
 
     /// Reject missing, disconnected, and banned peers before any decoding work.
-    fn requirePeer(self: *const Admission, peer_id: [32]u8) !void {
+    pub fn requirePeer(self: *const Admission, peer_id: [32]u8) !void {
         const peer = self.peers.get(peer_id) orelse return error.UnknownPeer;
         if (!peer.connected) return error.PeerDisconnected;
         if (peer.invalid_messages >= self.invalid_limit) return error.PeerBanned;
     }
 
-    /// Count one rejected remote message, saturating the score at the ban limit.
-    fn noteInvalid(self: *Admission, peer_id: [32]u8) void {
+    /// Count one rejected remote message for a known peer, saturating at the ban limit.
+    pub fn noteInvalid(self: *Admission, peer_id: [32]u8) void {
         const peer = self.peers.getPtr(peer_id).?;
         if (peer.invalid_messages < self.invalid_limit) peer.invalid_messages += 1;
     }
