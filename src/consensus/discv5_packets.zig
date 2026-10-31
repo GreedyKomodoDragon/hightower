@@ -117,6 +117,16 @@ pub fn decodeWhoAreYou(destination_id: [32]u8, packet: []const u8) !Challenge {
     return .{ .request_nonce = header.nonce, .id_nonce = plain[23..39].*, .enr_sequence = std.mem.readInt(u64, plain[39..47], .big) };
 }
 
+/// Return the exact unmasked WHOAREYOU bytes signed and used as the HKDF salt.
+pub fn challengeData(destination_id: [32]u8, packet: []const u8) ![63]u8 {
+    const header = try inspect(destination_id, packet);
+    if (header.kind != .whoareyou) return error.InvalidPacketHeader;
+    var data: [63]u8 = undefined;
+    @memcpy(data[0..iv_size], packet[0..iv_size]);
+    mask(destination_id, packet[0..iv_size].*, data[iv_size..], packet[iv_size..]);
+    return data;
+}
+
 /// XOR packet header bytes with the destination-keyed AES-CTR stream.
 fn mask(destination_id: [32]u8, iv: [16]u8, output: []u8, input: []const u8) void {
     const aes = std.crypto.core.aes.Aes128.initEnc(destination_id[0..16].*);
