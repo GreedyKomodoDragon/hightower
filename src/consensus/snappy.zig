@@ -75,17 +75,60 @@ pub fn decompressLimited(allocator: std.mem.Allocator, input: []const u8, max_ou
     return output;
 }
 
-/// Encode a valid Snappy block using literals; callers enforce encoded peer limits.
-/// shortcut: literals can exceed gossip frame limits near 10 MiB; add match compression before sending such payloads.
+/// Encode a valid Snappy block with greedy four-byte matches; callers enforce
+/// encoded peer limits. Matches use two-byte offsets so the encoder stays
+/// bounded even for large state snapshots.
 pub fn compress(allocator: std.mem.Allocator, input: []const u8) std.mem.Allocator.Error![]u8 {
     var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
     var length = input.len;
     while (length >= 128) : (length >>= 7) try output.append(allocator, @as(u8, @truncate(length)) | 0x80);
     try output.append(allocator, @intCast(length));
+    if (input.len < 4) {
+        try emitLiteral(&output, allocator, input);
+        return output.toOwnedSlice(allocator);
+    }
+    const table = try allocator.alloc(u32, 1 << 15);
+    defer allocator.free(table);
+    @memset(table, std.math.maxInt(u32));
+    var literal_start: usize = 0;
+    var i: usize = 0;
+    while (i + 4 <= input.len) {
+        const slot = matchHash(input[i..][0..4]);
+        const candidate = table[slot];
+        table[slot] = @intCast(i);
+        if (candidate == std.math.maxInt(u32) or i - candidate > std.math.maxInt(u16) or
+            !std.mem.eql(u8, input[candidate..][0..4], input[i..][0..4]))
+        {
+            i += 1;
+            continue;
+        }
+        try emitLiteral(&output, allocator, input[literal_start..i]);
+        var match_len: usize = 4;
+        while (i + match_len < input.len and input[candidate + match_len] == input[i + match_len]) match_len += 1;
+        try emitCopy(&output, allocator, i - candidate, match_len);
+        var next = i + 1;
+        while (next < i + match_len and next + 4 <= input.len) : (next += 1) {
+            table[matchHash(input[next..][0..4])] = @intCast(next);
+        }
+        i += match_len;
+        literal_start = i;
+    }
+    try emitLiteral(&output, allocator, input[literal_start..]);
+    return output.toOwnedSlice(allocator);
+}
+
+/// Hash four input bytes into the fixed match table.
+fn matchHash(bytes: *const [4]u8) usize {
+    const value = std.mem.readInt(u32, bytes, .little);
+    return (value *% 2_654_435_761) >> 17;
+}
+
+/// Emit literal runs using Snappy's inline or extended length forms.
+fn emitLiteral(output: *std.ArrayList(u8), allocator: std.mem.Allocator, bytes: []const u8) std.mem.Allocator.Error!void {
     var offset: usize = 0;
-    while (offset < input.len) {
-        const chunk_len = @min(input.len - offset, 65536);
+    while (offset < bytes.len) {
+        const chunk_len: usize = @min(bytes.len - offset, 65536);
         const encoded_len = chunk_len - 1;
         if (encoded_len < 60) {
             try output.append(allocator, @intCast(encoded_len << 2));
@@ -95,10 +138,26 @@ pub fn compress(allocator: std.mem.Allocator, input: []const u8) std.mem.Allocat
             try output.append(allocator, @truncate(encoded_len));
             if (extra == 2) try output.append(allocator, @truncate(encoded_len >> 8));
         }
-        try output.appendSlice(allocator, input[offset..][0..chunk_len]);
+        try output.appendSlice(allocator, bytes[offset..][0..chunk_len]);
         offset += chunk_len;
     }
-    return output.toOwnedSlice(allocator);
+}
+
+/// Emit a back-reference split into Snappy's maximum copy length.
+fn emitCopy(output: *std.ArrayList(u8), allocator: std.mem.Allocator, offset: usize, length: usize) std.mem.Allocator.Error!void {
+    var remaining = length;
+    while (remaining > 0) {
+        const chunk: usize = @min(remaining, 64);
+        if (offset < 2048 and chunk >= 4 and chunk <= 11) {
+            try output.append(allocator, @intCast(((chunk - 4) << 2) | ((offset >> 8) << 5) | 1));
+            try output.append(allocator, @truncate(offset));
+        } else {
+            try output.append(allocator, @intCast(((chunk - 1) << 2) | 2));
+            try output.append(allocator, @truncate(offset));
+            try output.append(allocator, @truncate(offset >> 8));
+        }
+        remaining -= chunk;
+    }
 }
 
 /// Reads the Snappy length prefix and advances the cursor, rejecting truncated or overlong values.
@@ -144,7 +203,7 @@ test "Snappy block decoder rejects bad offsets and truncated input" {
     try std.testing.expectError(error.OutputTooLarge, decompress(std.testing.allocator, &[_]u8{ 0x80, 0x80, 0x80, 0x21 }));
 }
 
-test "Snappy literal encoder round trips across the 64 KiB boundary" {
+test "Snappy encoder round trips across the 64 KiB boundary" {
     const allocator = std.testing.allocator;
     const input = try allocator.alloc(u8, 65537);
     defer allocator.free(input);
@@ -154,5 +213,6 @@ test "Snappy literal encoder round trips across the 64 KiB boundary" {
     const decoded = try decompressLimited(allocator, encoded, input.len);
     defer allocator.free(decoded);
     try std.testing.expectEqualSlices(u8, input, decoded);
+    try std.testing.expect(encoded.len < input.len / 2);
     try std.testing.expectError(error.OutputTooLarge, decompressLimited(allocator, encoded, input.len - 1));
 }

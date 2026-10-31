@@ -120,31 +120,32 @@ pub const Database = struct {
         defer self.mutex.unlock(self.io);
         if (self.poisoned) return error.DatabaseNeedsReopen;
         if (self.seq > std.math.maxInt(u64) - operations.len) return error.SequenceExhausted;
-        var payload: std.ArrayList(u8) = .empty;
-        defer payload.deinit(self.allocator);
-        try appendInt(&payload, self.allocator, u32, @intCast(operations.len));
-        try appendInt(&payload, self.allocator, u64, self.seq + 1);
+        var record: std.ArrayList(u8) = .empty;
+        defer record.deinit(self.allocator);
+        try record.resize(self.allocator, 8 + 32);
+        @memset(record.items, 0);
+        try appendInt(&record, self.allocator, u32, @intCast(operations.len));
+        try appendInt(&record, self.allocator, u64, self.seq + 1);
         for (operations) |operation| {
             const key, const value, const tag: u8 = switch (operation) {
                 .put => |item| .{ item.key, item.value, 1 },
                 .delete => |item| .{ item, &.{}, 0 },
             };
             if (key.len == 0 or key.len > max_key or value.len > max_value) return error.InvalidSize;
-            if (payload.items.len > max_batch - 7 - key.len - value.len) return error.InvalidSize;
-            try payload.append(self.allocator, tag);
-            try appendInt(&payload, self.allocator, u16, @intCast(key.len));
-            try appendInt(&payload, self.allocator, u32, @intCast(value.len));
-            try payload.appendSlice(self.allocator, key);
-            try payload.appendSlice(self.allocator, value);
+            const payload_len = record.items.len - 8 - 32;
+            if (payload_len > max_batch - 7 - key.len - value.len) return error.InvalidSize;
+            try record.append(self.allocator, tag);
+            try appendInt(&record, self.allocator, u16, @intCast(key.len));
+            try appendInt(&record, self.allocator, u32, @intCast(value.len));
+            try record.appendSlice(self.allocator, key);
+            try record.appendSlice(self.allocator, value);
         }
-        const bytes = try self.allocator.alloc(u8, 8 + 32 + payload.items.len);
-        defer self.allocator.free(bytes);
-        std.mem.writeInt(u32, bytes[0..4], @intCast(payload.items.len), .little);
-        std.mem.writeInt(u32, bytes[4..8], ~@as(u32, @intCast(payload.items.len)), .little);
-        std.crypto.hash.sha2.Sha256.hash(payload.items, bytes[8..40], .{});
-        @memcpy(bytes[40..], payload.items);
-        if (self.mem_bytes != 0 and (payload.items.len > mem_limit -| self.mem_bytes or bytes.len > mem_limit -| self.wal_end)) try self.flushLocked();
-        self.wal.writePositionalAll(self.io, bytes, self.wal_end) catch |err| {
+        const payload = record.items[8 + 32 ..];
+        std.mem.writeInt(u32, record.items[0..4], @intCast(payload.len), .little);
+        std.mem.writeInt(u32, record.items[4..8], ~@as(u32, @intCast(payload.len)), .little);
+        std.crypto.hash.sha2.Sha256.hash(payload, record.items[8..40], .{});
+        if (self.mem_bytes != 0 and (payload.len > mem_limit -| self.mem_bytes or record.items.len > mem_limit -| self.wal_end)) try self.flushLocked();
+        self.wal.writePositionalAll(self.io, record.items, self.wal_end) catch |err| {
             self.poisoned = true;
             return err;
         };
@@ -152,8 +153,8 @@ pub const Database = struct {
             self.poisoned = true;
             return err;
         };
-        self.wal_end += bytes.len;
-        self.applyBatch(payload.items) catch |err| {
+        self.wal_end += record.items.len;
+        self.applyBatch(payload) catch |err| {
             self.poisoned = true;
             return err;
         };
