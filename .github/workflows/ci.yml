@@ -66,3 +66,17 @@ jobs:
           echo "GETH_BIN=$RUNNER_TEMP/geth-bin" >> "$GITHUB_ENV"
       - name: Geth ${{ matrix.version }} Engine API interoperability
         run: bash scripts/test_engine_interop.sh ${{ matrix.version }}
+
+  discv5-interop:
+    name: Geth discv5 interoperability
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: vercel-labs/setup-zig@v1
+        with:
+          version: 0.16.0
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: scripts/geth-discovery-probe/go.mod
+          cache-dependency-path: scripts/geth-discovery-probe/go.sum
+      - run: bash scripts/test_discv5_geth.sh

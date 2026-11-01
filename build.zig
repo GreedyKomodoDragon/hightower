@@ -399,6 +399,17 @@ pub fn build(b: *std.Build) void {
     });
     const engine_test_server_step = b.step("engine-test-server", "Build the loopback Engine API test server");
     engine_test_server_step.dependOn(&b.addInstallArtifact(engine_test_server, .{}).step);
+    const discv5_interop_fixture = b.addExecutable(.{
+        .name = "hightower-discv5-interop-fixture",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/consensus/discv5_interop_fixture.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "consensus", .module = consensus_mod }},
+        }),
+    });
+    const discv5_interop_step = b.step("discv5-interop-fixture", "Build the loopback discv5 interoperability fixture");
+    discv5_interop_step.dependOn(&b.addInstallArtifact(discv5_interop_fixture, .{}).step);
     const api_mod = b.addModule("hightower_api", .{
         .root_source_file = b.path("src/api/root.zig"),
         .target = target,
