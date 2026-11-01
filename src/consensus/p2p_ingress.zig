@@ -2,7 +2,8 @@
 // their slot. The four-byte fork digest must match that slot before an object
 // reaches a consensus callback. Column gossip also binds its subnet index to
 // the verified sidecar and known block before storage. The caller owns block
-// and attestation consensus validation; the column store verifies KZG proofs.
+// and attestation/aggregate consensus validation; the column store verifies
+// KZG proofs.
 //
 // Snappy -> SSZ -> slot digest -> consensus validation -> callback/store
 // Each uncompressed message is limited to 10 MiB by the wire decoder.
@@ -39,6 +40,11 @@ pub const AttestationValidation = struct {
     validate: *const fn (*anyopaque, *const fulu.Attestation) anyerror!void,
 };
 
+pub const AggregateValidation = struct {
+    context: *anyopaque,
+    validate: *const fn (*anyopaque, *const fulu.SignedAggregateAndProof) anyerror!void,
+};
+
 /// Decode and validate block gossip before invoking the caller's consensus gate.
 pub fn receiveBlockGossip(allocator: std.mem.Allocator, config: Config, topic_digest: [4]u8, encoded: []const u8, validation: BlockValidation) !void {
     const bytes = try wire.decodeGossip(allocator, encoded, config.max_encoded_size);
@@ -61,6 +67,18 @@ pub fn receiveAttestationGossip(allocator: std.mem.Allocator, config: Config, to
     const expected = try config.digestAtSlot(attestation.data.slot);
     if (!std.mem.eql(u8, &topic_digest, &expected)) return error.InvalidForkContext;
     try validation.validate(validation.context, &attestation);
+}
+
+/// Decode an aggregate and verify its slot fork before the caller's consensus gate.
+pub fn receiveAggregateGossip(allocator: std.mem.Allocator, config: Config, topic_digest: [4]u8, encoded: []const u8, validation: AggregateValidation) !void {
+    const bytes = try wire.decodeGossip(allocator, encoded, config.max_encoded_size);
+    defer allocator.free(bytes);
+    var reader: std.Io.Reader = .fixed(bytes);
+    const aggregate = try ssz.deserialize(allocator, fulu.SignedAggregateAndProof, &reader);
+    defer ssz.freeDecoded(allocator, fulu.SignedAggregateAndProof, aggregate);
+    const expected = try config.digestAtSlot(aggregate.message.aggregate.data.slot);
+    if (!std.mem.eql(u8, &topic_digest, &expected)) return error.InvalidForkContext;
+    try validation.validate(validation.context, &aggregate);
 }
 
 /// Verify column gossip against the known block and parent state before retention.
@@ -161,6 +179,30 @@ test "attestation gossip and official column sidecar cross validation gates" {
     wrong[0] ^= 1;
     try std.testing.expectError(error.InvalidForkContext, receiveAttestationGossip(allocator, config, wrong, att_gossip, validation));
     try std.testing.expectEqual(@as(usize, 1), calls);
+
+    const aggregate = fulu.SignedAggregateAndProof{
+        .message = .{ .aggregator_index = 1, .aggregate = attestation, .selection_proof = [_]u8{0} ** 96 },
+        .signature = [_]u8{0} ** 96,
+    };
+    const aggregate_ssz = try ssz.serializeAlloc(allocator, aggregate);
+    defer allocator.free(aggregate_ssz);
+    const aggregate_gossip = try wire.encodeGossip(allocator, aggregate_ssz, config.max_encoded_size);
+    defer allocator.free(aggregate_gossip);
+    const aggregate_validation = AggregateValidation{ .context = &calls, .validate = struct {
+        /// Count only an aggregate delivered after SSZ and fork checks.
+        fn check(context: *anyopaque, _: *const fulu.SignedAggregateAndProof) !void {
+            const count: *usize = @ptrCast(@alignCast(context));
+            count.* += 1;
+        }
+    }.check };
+    try receiveAggregateGossip(allocator, config, att_digest, aggregate_gossip, aggregate_validation);
+    try std.testing.expectEqual(@as(usize, 2), calls);
+    try std.testing.expectError(error.InvalidForkContext, receiveAggregateGossip(allocator, config, wrong, aggregate_gossip, aggregate_validation));
+    try std.testing.expectError(error.MalformedBlock, receiveAggregateGossip(allocator, config, att_digest, &.{ 0xff, 0xff }, aggregate_validation));
+    const malformed_ssz = try wire.encodeGossip(allocator, &.{0}, config.max_encoded_size);
+    defer allocator.free(malformed_ssz);
+    try std.testing.expectError(error.EndOfStream, receiveAggregateGossip(allocator, config, att_digest, malformed_ssz, aggregate_validation));
+    try std.testing.expectEqual(@as(usize, 2), calls);
 
     var state = try fixture.decodeState(allocator, @embedFile("fixtures/fulu_fork_choice/availability/anchor_state.ssz_snappy"));
     defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
