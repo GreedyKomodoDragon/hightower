@@ -69,6 +69,8 @@ Chain:      [Block 0] ───────────────────�
 | Aggregate and proof | A combined attestation, the aggregator's selection proof, and its signature, shared on a global gossip topic. |
 | Subnet | A numbered gossip topic group used to distribute attestations or data columns. |
 | Req/Resp | The consensus network's request and response streams for fetching peer data. |
+| Status message | A peer's fork, finalized and head checkpoints, and earliest serveable slot exchanged when peers connect. |
+| Metadata sequence number | A counter peers exchange in Ping messages to signal changed subnet and custody metadata. |
 | Response chunk | One item in a Req/Resp reply, with a result code and an encoded payload; block and data-column items also carry a fork digest. |
 | Snappy frame | A checksummed chunk in the streaming form of Snappy compression used by consensus requests and responses. |
 | Authorization list | Signed permissions carried by a set-code transaction to delegate account behavior. |
