@@ -1,7 +1,8 @@
 // Gossipsub subscriptions and publishes arrive as protobuf RPCs from
-// authenticated peers. Parse the complete bounded envelope before changing
-// subscriptions or delivering SSZ objects. Valid duplicates are suppressed;
-// invalid messages count toward the existing peer ban threshold.
+// authenticated peers. Announce our selected topics on each new stream, then
+// parse complete bounded envelopes before changing remote subscriptions or
+// delivering SSZ objects. Valid duplicates are suppressed; invalid messages
+// count toward the existing peer ban threshold.
 //
 //   peer RPC -> bounded protobuf -> topic -> SSZ/consensus gate -> delivery
 // One RPC carries at most 128 subscription updates and 16 publishes in 16 MiB.
@@ -114,7 +115,7 @@ pub const Service = struct {
         _ = self.subscriptions.remove(peer_id);
     }
 
-    /// Copy connected peers subscribed to a local block or attestation topic.
+    /// Copy connected, unbanned peers subscribed to a local gossip topic.
     /// Returns BufferTooSmall without writing beyond the caller's output slice.
     pub fn recipients(self: *Service, name: []const u8, output: [][32]u8) !usize {
         const selected = self.classify(name) orelse return error.UnknownTopic;
@@ -125,12 +126,26 @@ pub const Service = struct {
                 .block => entry.value_ptr.block,
                 .attestation => |subnet| entry.value_ptr.attestations & (@as(u64, 1) << @intCast(subnet)) != 0,
             };
-            if (!interested or !self.peers.state(entry.key_ptr.*).?.connected) continue;
+            if (!interested) continue;
+            self.peers.requirePeer(entry.key_ptr.*) catch continue;
             if (count == output.len) return error.BufferTooSmall;
             output[count] = entry.key_ptr.*;
             count += 1;
         }
         return count;
+    }
+
+    /// Encode this node's block and selected attestation subscriptions as one
+    /// framed RPC to send when a peer's gossip stream opens or reconnects.
+    pub fn localSubscriptionFrame(self: *const Service) ![]u8 {
+        var rpc: std.ArrayList(u8) = .empty;
+        defer rpc.deinit(self.allocator);
+        try appendSubscription(self.allocator, &rpc, self.block_topic, true);
+        for (self.attestation_topics) |maybe_name| {
+            const name = maybe_name orelse continue;
+            try appendSubscription(self.allocator, &rpc, name, true);
+        }
+        return encodeFrame(self.allocator, rpc.items);
     }
 
     /// Decode one complete RPC, then apply subscriptions and valid publishes.
@@ -274,16 +289,21 @@ pub fn encodePublish(allocator: std.mem.Allocator, topic: []const u8, data: []co
 
 /// Encode one subscription update in the libp2p Gossipsub RPC format.
 pub fn encodeSubscription(allocator: std.mem.Allocator, topic: []const u8, subscribe: bool) ![]u8 {
+    var rpc: std.ArrayList(u8) = .empty;
+    errdefer rpc.deinit(allocator);
+    try appendSubscription(allocator, &rpc, topic, subscribe);
+    return rpc.toOwnedSlice(allocator);
+}
+
+/// Append one bounded topic update to a protobuf RPC under construction.
+fn appendSubscription(allocator: std.mem.Allocator, rpc: *std.ArrayList(u8), topic: []const u8, subscribe: bool) !void {
     if (topic.len == 0 or topic.len > max_topic_size) return error.InvalidGossipRpc;
     var option: std.ArrayList(u8) = .empty;
     defer option.deinit(allocator);
     try appendVarint(allocator, &option, @as(u64, SubscriptionField.subscribe) << field_shift | WireType.varint);
     try appendVarint(allocator, &option, @intFromBool(subscribe));
     try appendBytes(allocator, &option, SubscriptionField.topic, topic);
-    var rpc: std.ArrayList(u8) = .empty;
-    errdefer rpc.deinit(allocator);
-    try appendBytes(allocator, &rpc, RpcField.subscription, option.items);
-    return rpc.toOwnedSlice(allocator);
+    try appendBytes(allocator, rpc, RpcField.subscription, option.items);
 }
 
 /// Parse all subscription and publish fields before changing peer state.
@@ -618,7 +638,14 @@ test "gossip RPC validates blocks and attestations before delivery and retains p
     var publisher = try Service.init(allocator, config, digest, &.{3}, 1, 3, block_gate, att_gate);
     defer publisher.deinit();
     try publisher.connect(bad_peer);
+    const publisher_frame = try publisher.localSubscriptionFrame();
+    defer allocator.free(publisher_frame);
+    var remote_stream = Stream.init(allocator, bad_peer);
+    defer remote_stream.deinit();
+    try remote_stream.feed(&service, publisher_frame);
     var recipients: [1][32]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try service.recipients(service.block_topic, &recipients));
+    try std.testing.expectEqual(bad_peer, recipients[0]);
     try std.testing.expectEqual(@as(usize, 0), try publisher.recipients(publisher.block_topic, &recipients));
     const block_subscribe = try encodeSubscription(allocator, service.block_topic, true);
     defer allocator.free(block_subscribe);
@@ -628,9 +655,16 @@ test "gossip RPC validates blocks and attestations before delivery and retains p
     try malformed_subscription_batch.appendSlice(allocator, &.{ 0x12, 0x80 });
     try std.testing.expectError(error.InvalidGossipRpc, publisher.receive(bad_peer, malformed_subscription_batch.items));
     try std.testing.expectEqual(@as(usize, 0), try publisher.recipients(publisher.block_topic, &recipients));
-    try publisher.receive(bad_peer, block_subscribe);
+    const subscriptions_frame = try service.localSubscriptionFrame();
+    defer allocator.free(subscriptions_frame);
+    var subscription_stream = Stream.init(allocator, bad_peer);
+    defer subscription_stream.deinit();
+    try subscription_stream.feed(&publisher, subscriptions_frame[0 .. subscriptions_frame.len / 2]);
+    try std.testing.expectEqual(@as(usize, 0), try publisher.recipients(publisher.block_topic, &recipients));
+    try subscription_stream.feed(&publisher, subscriptions_frame[subscriptions_frame.len / 2 ..]);
     try std.testing.expectEqual(@as(usize, 1), try publisher.recipients(publisher.block_topic, &recipients));
     try std.testing.expectEqual(bad_peer, recipients[0]);
+    try std.testing.expectEqual(@as(usize, 1), try publisher.recipients(publisher.attestation_topics[3].?, &recipients));
     try std.testing.expectError(error.BufferTooSmall, publisher.recipients(publisher.block_topic, recipients[0..0]));
     const block_data = try wire.encodeGossip(allocator, raw_block, config.max_encoded_size);
     defer allocator.free(block_data);
@@ -647,10 +681,6 @@ test "gossip RPC validates blocks and attestations before delivery and retains p
     try std.testing.expectEqual(@as(usize, 1), counts.blocks);
     const att_data = try wire.encodeGossip(allocator, raw_attestation, config.max_encoded_size);
     defer allocator.free(att_data);
-    const att_subscribe = try encodeSubscription(allocator, service.attestation_topics[3].?, true);
-    defer allocator.free(att_subscribe);
-    try publisher.receive(bad_peer, att_subscribe);
-    try std.testing.expectEqual(@as(usize, 1), try publisher.recipients(publisher.attestation_topics[3].?, &recipients));
     const att_rpc = try encodePublish(allocator, service.attestation_topics[3].?, att_data);
     defer allocator.free(att_rpc);
     const att_frame = try encodeFrame(allocator, att_rpc);
@@ -671,6 +701,10 @@ test "gossip RPC validates blocks and attestations before delivery and retains p
     publisher.disconnect(bad_peer);
     try publisher.connect(bad_peer);
     try std.testing.expectEqual(@as(usize, 0), try publisher.recipients(publisher.block_topic, &recipients));
+    var reconnected_stream = Stream.init(allocator, bad_peer);
+    defer reconnected_stream.deinit();
+    try reconnected_stream.feed(&publisher, subscriptions_frame);
+    try std.testing.expectEqual(@as(usize, 1), try publisher.recipients(publisher.block_topic, &recipients));
     const malformed_rpc = try encodePublish(allocator, service.block_topic, &.{ 0xff, 0xff });
     defer allocator.free(malformed_rpc);
     try std.testing.expectError(error.MalformedBlock, service.receive(bad_peer, malformed_rpc));
@@ -686,6 +720,7 @@ test "gossip RPC validates blocks and attestations before delivery and retains p
     try std.testing.expectError(error.MalformedBlock, service.receive(bad_peer, malformed_rpc));
     try std.testing.expectEqual(@as(u8, 3), service.peers.state(bad_peer).?.invalid_messages);
     try std.testing.expectError(error.PeerBanned, service.receive(bad_peer, block_rpc));
+    try std.testing.expectEqual(@as(usize, 0), try service.recipients(service.block_topic, &recipients));
     try std.testing.expectEqual(@as(usize, 1), counts.blocks);
     service.disconnect(good_peer);
     try std.testing.expectError(error.PeerDisconnected, service.receive(good_peer, att_rpc));
