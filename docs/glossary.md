@@ -66,6 +66,7 @@ Chain:      [Block 0] ───────────────────�
 | Discv5 identity proof | A signature that binds a node's ENR key to a WHOAREYOU challenge, an ephemeral key, and the intended recipient. |
 | Fork digest | Four bytes that identify a chain's current consensus fork for network messages. |
 | Gossipsub | The peer-to-peer protocol that spreads consensus messages through subscribed topics. |
+| Multistream-select | The short exchange on a peer stream that chooses an exact application protocol ID before its messages are sent. |
 | Aggregate and proof | A combined attestation, the aggregator's selection proof, and its signature, shared on a global gossip topic. |
 | Subnet | A numbered gossip topic group used to distribute attestations or data columns. |
 | Req/Resp | The consensus network's request and response streams for fetching peer data. |
