@@ -45,6 +45,17 @@ pub const AggregateValidation = struct {
     validate: *const fn (*anyopaque, *const fulu.SignedAggregateAndProof) anyerror!void,
 };
 
+pub const ColumnBlock = struct {
+    block: *const fulu.BeaconBlock,
+    parent_state: *const fulu.BeaconState,
+};
+
+pub const ColumnLookup = struct {
+    context: *anyopaque,
+    /// Return borrowed data for a known header, or null while its block is unknown.
+    resolve: *const fn (*anyopaque, *const fulu.SignedBeaconBlockHeader) ?ColumnBlock,
+};
+
 /// Decode and validate block gossip before invoking the caller's consensus gate.
 pub fn receiveBlockGossip(allocator: std.mem.Allocator, config: Config, topic_digest: [4]u8, encoded: []const u8, validation: BlockValidation) !void {
     const bytes = try wire.decodeGossip(allocator, encoded, config.max_encoded_size);
@@ -83,15 +94,32 @@ pub fn receiveAggregateGossip(allocator: std.mem.Allocator, config: Config, topi
 
 /// Verify column gossip against the known block and parent state before retention.
 pub fn receiveColumnGossip(allocator: std.mem.Allocator, config: Config, topic_digest: [4]u8, subnet: u8, encoded: []const u8, store: *columns.Store, settings: *const kzg.Settings, block: *const fulu.BeaconBlock, parent_state: *const fulu.BeaconState) !void {
+    const sidecar = try decodeColumnGossip(allocator, config, topic_digest, subnet, encoded);
+    defer ssz.freeDecoded(allocator, fulu.DataColumnSidecar, sidecar);
+    if (sidecar.signed_block_header.message.slot != block.slot) return error.InvalidDataColumn;
+    try store.put(settings, &sidecar, block, parent_state);
+}
+
+/// Resolve a gossiped sidecar's known block, then verify and retain it.
+/// Unknown blocks are ignored by scoring; the caller may request them later.
+pub fn receiveColumnGossipResolved(allocator: std.mem.Allocator, config: Config, topic_digest: [4]u8, subnet: u8, encoded: []const u8, store: *columns.Store, settings: *const kzg.Settings, lookup: ColumnLookup) !void {
+    const sidecar = try decodeColumnGossip(allocator, config, topic_digest, subnet, encoded);
+    defer ssz.freeDecoded(allocator, fulu.DataColumnSidecar, sidecar);
+    const known = lookup.resolve(lookup.context, &sidecar.signed_block_header) orelse return error.UnknownBlock;
+    try store.put(settings, &sidecar, known.block, known.parent_state);
+}
+
+/// Decode a sidecar and reject a wrong topic before any block lookup or write.
+fn decodeColumnGossip(allocator: std.mem.Allocator, config: Config, topic_digest: [4]u8, subnet: u8, encoded: []const u8) !fulu.DataColumnSidecar {
     const bytes = try wire.decodeGossip(allocator, encoded, config.max_encoded_size);
     defer allocator.free(bytes);
     var reader: std.Io.Reader = .fixed(bytes);
     const sidecar = try ssz.deserialize(allocator, fulu.DataColumnSidecar, &reader);
-    defer ssz.freeDecoded(allocator, fulu.DataColumnSidecar, sidecar);
-    if (sidecar.index != subnet or sidecar.signed_block_header.message.slot != block.slot) return error.InvalidDataColumn;
-    const expected = try config.digestAtSlot(block.slot);
+    errdefer ssz.freeDecoded(allocator, fulu.DataColumnSidecar, sidecar);
+    if (sidecar.index != subnet) return error.InvalidDataColumn;
+    const expected = try config.digestAtSlot(sidecar.signed_block_header.message.slot);
     if (!std.mem.eql(u8, &topic_digest, &expected)) return error.InvalidForkContext;
-    try store.put(settings, &sidecar, block, parent_state);
+    return sidecar;
 }
 
 /// Validate a data-column response chunk before retaining its verified sidecar.

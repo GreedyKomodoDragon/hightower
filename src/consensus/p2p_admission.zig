@@ -1,5 +1,5 @@
 // Consensus gossip is untrusted until its Snappy and SSZ bytes, fork context,
-// and caller's consensus rules pass. Track each connected peer separately so
+// and caller's consensus rules or column proofs pass. Track peers separately so
 // repeated invalid input cannot keep reaching validation callbacks. A peer
 // that disconnects without violations can reconnect with its score intact.
 //
@@ -8,6 +8,8 @@
 const std = @import("std");
 const fulu = @import("fulu");
 const ingress = @import("p2p_ingress.zig");
+const columns = @import("data_columns.zig");
+const kzg = @import("execution").kzg;
 
 pub const State = struct {
     connected: bool = true,
@@ -75,6 +77,16 @@ pub const Admission = struct {
         };
     }
 
+    /// Verify a sidecar against its known block before scoring or storage.
+    pub fn receiveColumn(self: *Admission, peer_id: [32]u8, topic_digest: [4]u8, subnet: u8, bytes: []const u8, store: *columns.Store, settings: *const kzg.Settings, lookup: ingress.ColumnLookup) !void {
+        try self.requirePeer(peer_id);
+        ingress.receiveColumnGossipResolved(self.allocator, self.config, topic_digest, subnet, bytes, store, settings, lookup) catch |err| {
+            if (err == error.DuplicateColumn) return;
+            if (isPeerFault(err)) self.noteInvalid(peer_id);
+            return err;
+        };
+    }
+
     /// Return the current peer score and connectivity, if the peer is tracked.
     pub fn state(self: *const Admission, peer_id: [32]u8) ?State {
         return self.peers.get(peer_id);
@@ -97,7 +109,7 @@ pub const Admission = struct {
 /// Score only wire, SSZ, fork, or explicitly rejected consensus input.
 fn isPeerFault(err: anyerror) bool {
     return switch (err) {
-        error.InvalidGossip, error.InvalidForkContext, error.PayloadTooLarge, error.MalformedBlock, error.OutputTooLarge, error.InvalidBoolean, error.InvalidLength, error.InvalidOffset, error.TrailingBytes, error.EndOfStream, error.ListTooLong, error.BitListTooLong, error.ByteListTooLong, error.NoDelimiterBit, error.StreamTooLong, error.NonZeroPaddingBits => true,
+        error.InvalidGossip, error.InvalidForkContext, error.PayloadTooLarge, error.MalformedBlock, error.OutputTooLarge, error.InvalidBoolean, error.InvalidLength, error.InvalidOffset, error.TrailingBytes, error.EndOfStream, error.ListTooLong, error.BitListTooLong, error.ByteListTooLong, error.NoDelimiterBit, error.StreamTooLong, error.NonZeroPaddingBits, error.InvalidDataColumn, error.WrongBlock, error.InvalidProposer, error.InvalidCommitmentProof, error.InvalidCellProof, error.InvalidSignature, error.VerificationFailed => true,
         else => false,
     };
 }
