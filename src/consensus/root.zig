@@ -43,6 +43,7 @@ pub const ENR = @import("enr.zig");
 pub const DiscoveryBootstrap = @import("discovery_bootstrap.zig");
 pub const P2PAdmission = @import("p2p_admission.zig");
 pub const P2PGossip = @import("p2p_gossip.zig");
+pub const P2PGossipSession = @import("p2p_gossip_session.zig");
 pub const Discv5Messages = @import("discv5_messages.zig");
 pub const Discv5Packets = @import("discv5_packets.zig");
 pub const Discv5Session = @import("discv5_session.zig");
