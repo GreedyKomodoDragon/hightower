@@ -28,6 +28,7 @@ test {
     _ = @import("p2p_ingress.zig");
     _ = @import("p2p_requests.zig");
     _ = @import("p2p_control.zig");
+    _ = @import("p2p_multistream.zig");
     _ = @import("enr.zig");
     _ = @import("discovery_bootstrap.zig");
     _ = @import("p2p_admission.zig");

@@ -38,6 +38,7 @@ pub const P2PWire = @import("p2p_wire.zig");
 pub const P2PIngress = @import("p2p_ingress.zig");
 pub const P2PRequests = @import("p2p_requests.zig");
 pub const P2PControl = @import("p2p_control.zig");
+pub const P2PMultistream = @import("p2p_multistream.zig");
 pub const ENR = @import("enr.zig");
 pub const DiscoveryBootstrap = @import("discovery_bootstrap.zig");
 pub const P2PAdmission = @import("p2p_admission.zig");
