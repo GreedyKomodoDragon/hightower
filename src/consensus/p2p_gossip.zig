@@ -1,22 +1,24 @@
 // Gossipsub subscriptions and publishes arrive as protobuf RPCs from
-// authenticated peers. Announce our block, aggregate, and selected attestation
-// topics on each new stream, then parse complete bounded envelopes before
+// authenticated peers. Announce our block, aggregate, selected attestation,
+// and sampled data-column topics on each new stream, then parse envelopes before
 // changing remote subscriptions or delivering SSZ objects. Valid duplicates
 // are suppressed; invalid messages
 // count toward the existing peer ban threshold.
 //
 //   peer RPC -> bounded protobuf -> topic -> SSZ/consensus gate -> delivery
-// One RPC carries at most 128 subscription updates and 16 publishes in 16 MiB.
+// One RPC carries at most 256 subscription updates and 16 publishes in 16 MiB.
 // A stream prefixes each RPC with its unsigned varint byte length. Connection
 // security and mesh control are separate work.
 const std = @import("std");
 const ingress = @import("p2p_ingress.zig");
 const admission = @import("p2p_admission.zig");
 const wire = @import("p2p_wire.zig");
+const columns = @import("data_columns.zig");
+const kzg = @import("execution").kzg;
 
 pub const max_rpc_size: usize = 16 * 1024 * 1024;
 const max_publishes: usize = 16;
-const max_subscriptions: usize = 128;
+const max_subscriptions: usize = 256;
 const seen_capacity: usize = 1024;
 const max_topic_size: usize = 128;
 const max_frame_prefix: usize = 4;
@@ -47,13 +49,20 @@ const WireType = struct {
 
 const Publish = struct { topic: []const u8, data: []const u8 };
 const Subscription = struct { topic: []const u8, subscribe: bool };
-const RemoteSubscriptions = struct { block: bool = false, aggregate: bool = false, attestations: u64 = 0 };
-const TopicSelection = union(enum) { block, aggregate, attestation: u8 };
+const RemoteSubscriptions = struct { block: bool = false, aggregate: bool = false, attestations: u64 = 0, columns: [2]u64 = .{ 0, 0 } };
+const TopicSelection = union(enum) { block, aggregate, attestation: u8, column: u8 };
 const Parsed = struct {
     publishes: [max_publishes]Publish = undefined,
     publish_len: usize = 0,
     subscriptions: [max_subscriptions]Subscription = undefined,
     subscription_len: usize = 0,
+};
+
+/// Borrow the verified store, KZG setup, and known-block lookup for selected columns.
+pub const ColumnRoute = struct {
+    store: *columns.Store,
+    settings: *const kzg.Settings,
+    lookup: ingress.ColumnLookup,
 };
 
 pub const Service = struct {
@@ -62,6 +71,8 @@ pub const Service = struct {
     block_topic: []u8,
     aggregate_topic: []u8,
     attestation_topics: [64]?[]u8,
+    column_topics: [columns.column_count]?[]u8,
+    column_route: ?ColumnRoute,
     block_validation: ingress.BlockValidation,
     attestation_validation: ingress.AttestationValidation,
     aggregate_validation: ingress.AggregateValidation,
@@ -72,9 +83,10 @@ pub const Service = struct {
     seen_len: usize = 0,
     seen_next: usize = 0,
 
-    /// Subscribe to one Fulu digest and selected attestation subnets. Callback
-    /// contexts and the config's blob schedule must outlive the service.
-    pub fn init(allocator: std.mem.Allocator, config: ingress.Config, digest: [4]u8, subnets: []const u8, max_peers: usize, invalid_limit: u8, block_validation: ingress.BlockValidation, attestation_validation: ingress.AttestationValidation, aggregate_validation: ingress.AggregateValidation) !Service {
+    /// Subscribe to one Fulu digest, selected attestation subnets, and the
+    /// optional store's sampled columns. Callbacks, store, settings, and blob
+    /// schedule must outlive the service.
+    pub fn init(allocator: std.mem.Allocator, config: ingress.Config, digest: [4]u8, subnets: []const u8, max_peers: usize, invalid_limit: u8, block_validation: ingress.BlockValidation, attestation_validation: ingress.AttestationValidation, aggregate_validation: ingress.AggregateValidation, column_route: ?ColumnRoute) !Service {
         if (subnets.len > 64) return error.InvalidSubnet;
         var peers = try admission.Admission.init(allocator, config, max_peers, invalid_limit);
         errdefer peers.deinit();
@@ -89,13 +101,20 @@ pub const Service = struct {
             if (attestation_topics[subnet] != null) continue;
             attestation_topics[subnet] = try wire.topicName(allocator, digest, .attestation, subnet);
         }
+        var column_topics: [columns.column_count]?[]u8 = .{null} ** columns.column_count;
+        errdefer for (column_topics) |name| if (name) |owned| allocator.free(owned);
+        if (column_route) |route| {
+            for (route.store.samples.values[0..route.store.samples.len]) |subnet| {
+                column_topics[subnet] = try wire.topicName(allocator, digest, .data_column, subnet);
+            }
+        }
         var seen = std.AutoHashMap([32]u8, void).init(allocator);
         errdefer seen.deinit();
         try seen.ensureTotalCapacity(seen_capacity);
         var subscriptions = std.AutoHashMap([32]u8, RemoteSubscriptions).init(allocator);
         errdefer subscriptions.deinit();
         try subscriptions.ensureTotalCapacity(@intCast(max_peers));
-        return .{ .allocator = allocator, .digest = digest, .block_topic = block_topic, .aggregate_topic = aggregate_topic, .attestation_topics = attestation_topics, .block_validation = block_validation, .attestation_validation = attestation_validation, .aggregate_validation = aggregate_validation, .peers = peers, .subscriptions = subscriptions, .seen = seen };
+        return .{ .allocator = allocator, .digest = digest, .block_topic = block_topic, .aggregate_topic = aggregate_topic, .attestation_topics = attestation_topics, .column_topics = column_topics, .column_route = column_route, .block_validation = block_validation, .attestation_validation = attestation_validation, .aggregate_validation = aggregate_validation, .peers = peers, .subscriptions = subscriptions, .seen = seen };
     }
 
     /// Release topic names, the bounded duplicate cache, and peer scores.
@@ -104,6 +123,7 @@ pub const Service = struct {
         self.subscriptions.deinit();
         self.peers.deinit();
         for (self.attestation_topics) |name| if (name) |owned| self.allocator.free(owned);
+        for (self.column_topics) |name| if (name) |owned| self.allocator.free(owned);
         self.allocator.free(self.aggregate_topic);
         self.allocator.free(self.block_topic);
     }
@@ -132,6 +152,7 @@ pub const Service = struct {
                 .block => entry.value_ptr.block,
                 .aggregate => entry.value_ptr.aggregate,
                 .attestation => |subnet| entry.value_ptr.attestations & (@as(u64, 1) << @intCast(subnet)) != 0,
+                .column => |subnet| entry.value_ptr.columns[subnet / 64] & (@as(u64, 1) << @intCast(subnet % 64)) != 0,
             };
             if (!interested) continue;
             self.peers.requirePeer(entry.key_ptr.*) catch continue;
@@ -150,6 +171,10 @@ pub const Service = struct {
         try appendSubscription(self.allocator, &rpc, self.block_topic, true);
         try appendSubscription(self.allocator, &rpc, self.aggregate_topic, true);
         for (self.attestation_topics) |maybe_name| {
+            const name = maybe_name orelse continue;
+            try appendSubscription(self.allocator, &rpc, name, true);
+        }
+        for (self.column_topics) |maybe_name| {
             const name = maybe_name orelse continue;
             try appendSubscription(self.allocator, &rpc, name, true);
         }
@@ -174,6 +199,10 @@ pub const Service = struct {
                     const mask = @as(u64, 1) << @intCast(subnet);
                     if (subscription.subscribe) remote.attestations |= mask else remote.attestations &= ~mask;
                 },
+                .column => |subnet| {
+                    const mask = @as(u64, 1) << @intCast(subnet % 64);
+                    if (subscription.subscribe) remote.columns[subnet / 64] |= mask else remote.columns[subnet / 64] &= ~mask;
+                },
             }
         }
         for (parsed.publishes[0..parsed.publish_len]) |publish| {
@@ -184,6 +213,10 @@ pub const Service = struct {
                 .block => try self.peers.receiveBlock(peer_id, self.digest, publish.data, self.block_validation),
                 .aggregate => try self.peers.receiveAggregate(peer_id, self.digest, publish.data, self.aggregate_validation),
                 .attestation => try self.peers.receiveAttestation(peer_id, self.digest, publish.data, self.attestation_validation),
+                .column => |subnet| {
+                    const route = self.column_route.?;
+                    try self.peers.receiveColumn(peer_id, self.digest, subnet, publish.data, route.store, route.settings, route.lookup);
+                },
             }
             if (self.seen_len == seen_capacity) {
                 _ = self.seen.remove(self.seen_order[self.seen_next]);
@@ -203,6 +236,10 @@ pub const Service = struct {
         for (self.attestation_topics, 0..) |maybe_name, subnet| {
             const topic_name = maybe_name orelse continue;
             if (std.mem.eql(u8, name, topic_name)) return .{ .attestation = @intCast(subnet) };
+        }
+        for (self.column_topics, 0..) |maybe_name, subnet| {
+            const topic_name = maybe_name orelse continue;
+            if (std.mem.eql(u8, name, topic_name)) return .{ .column = @intCast(subnet) };
         }
         return null;
     }
@@ -560,7 +597,7 @@ test "gossip stream assembles split RPCs and rejects bad length prefixes" {
             return error.UnexpectedAggregate;
         }
     }.reject };
-    var service = try Service.init(allocator, config, .{ 1, 2, 3, 4 }, &.{}, 1, 4, block_gate, att_gate, aggregate_gate);
+    var service = try Service.init(allocator, config, .{ 1, 2, 3, 4 }, &.{}, 1, 4, block_gate, att_gate, aggregate_gate, null);
     defer service.deinit();
     try service.connect(peer_id);
     var stream = Stream.init(allocator, peer_id);
@@ -654,12 +691,12 @@ test "gossip RPC validates blocks attestations and aggregates before delivery" {
     }.check };
     const bad_peer = [_]u8{1} ** 32;
     const good_peer = [_]u8{2} ** 32;
-    try std.testing.expectError(error.InvalidSubnet, Service.init(allocator, config, digest, &.{64}, 2, 3, block_gate, att_gate, aggregate_gate));
-    var service = try Service.init(allocator, config, digest, &.{3}, 2, 3, block_gate, att_gate, aggregate_gate);
+    try std.testing.expectError(error.InvalidSubnet, Service.init(allocator, config, digest, &.{64}, 2, 3, block_gate, att_gate, aggregate_gate, null));
+    var service = try Service.init(allocator, config, digest, &.{3}, 2, 3, block_gate, att_gate, aggregate_gate, null);
     defer service.deinit();
     try service.connect(bad_peer);
     try service.connect(good_peer);
-    var publisher = try Service.init(allocator, config, digest, &.{3}, 1, 3, block_gate, att_gate, aggregate_gate);
+    var publisher = try Service.init(allocator, config, digest, &.{3}, 1, 3, block_gate, att_gate, aggregate_gate, null);
     defer publisher.deinit();
     try publisher.connect(bad_peer);
     const publisher_frame = try publisher.localSubscriptionFrame();
@@ -771,7 +808,7 @@ test "gossip RPC validates blocks attestations and aggregates before delivery" {
 
     var wrong_digest = digest;
     wrong_digest[0] ^= 1;
-    var wrong = try Service.init(allocator, config, wrong_digest, &.{}, 1, 3, block_gate, att_gate, aggregate_gate);
+    var wrong = try Service.init(allocator, config, wrong_digest, &.{}, 1, 3, block_gate, att_gate, aggregate_gate, null);
     defer wrong.deinit();
     try wrong.connect(bad_peer);
     const wrong_rpc = try encodePublish(allocator, wrong.block_topic, block_data);
@@ -782,7 +819,7 @@ test "gossip RPC validates blocks attestations and aggregates before delivery" {
 
     var small_config = config;
     small_config.max_encoded_size = 1;
-    var bounded = try Service.init(allocator, small_config, digest, &.{}, 1, 3, block_gate, att_gate, aggregate_gate);
+    var bounded = try Service.init(allocator, small_config, digest, &.{}, 1, 3, block_gate, att_gate, aggregate_gate, null);
     defer bounded.deinit();
     try bounded.connect(bad_peer);
     try std.testing.expectError(error.PayloadTooLarge, bounded.receive(bad_peer, block_rpc));
@@ -795,9 +832,145 @@ test "gossip RPC validates blocks attestations and aggregates before delivery" {
             return error.LocalUnavailable;
         }
     }.unavailable };
-    var local_error = try Service.init(allocator, config, digest, &.{}, 1, 3, local_gate, att_gate, aggregate_gate);
+    var local_error = try Service.init(allocator, config, digest, &.{}, 1, 3, local_gate, att_gate, aggregate_gate, null);
     defer local_error.deinit();
     try local_error.connect(bad_peer);
     try std.testing.expectError(error.LocalUnavailable, local_error.receive(bad_peer, block_rpc));
     try std.testing.expectEqual(@as(u8, 0), local_error.peers.state(bad_peer).?.invalid_messages);
+}
+
+test "column gossip retains only verified selected sidecars" {
+    const fixture = @import("fixture_runner.zig");
+    const fulu = @import("fulu");
+    const ssz = @import("ssz");
+    const merkle = @import("merkle");
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const config = ingress.Config{ .genesis_validators_root = [_]u8{1} ** 32, .fulu_version = .{ 6, 0, 0, 0 }, .fulu_epoch = 0, .blob_schedule = &@import("helpers.zig").BLOB_SCHEDULE };
+    var state = try fixture.decodeState(allocator, @embedFile("fixtures/fulu_fork_choice/availability/anchor_state.ssz_snappy"));
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
+    var signed = try fixture.decodeBlock(allocator, @embedFile("fixtures/fulu_fork_choice/availability/block.ssz_snappy"));
+    defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, signed);
+    const root = try merkle.HashTreeRoot(allocator, signed.message);
+    const digest = try config.digestAtSlot(signed.message.slot);
+    const sidecar_bytes = try fixture.decode(allocator, @embedFile("fixtures/fulu_data_columns/sample_01.ssz_snappy"));
+    defer allocator.free(sidecar_bytes);
+    const sidecar_data = try wire.encodeGossip(allocator, sidecar_bytes, config.max_encoded_size);
+    defer allocator.free(sidecar_data);
+    var settings = try kzg.loadTrustedSetup("src/execution/trusted_setup.txt");
+    defer settings.deinit();
+    var store = try columns.Store.open(allocator, std.testing.io, tmp.dir, "columns", [_]u8{9} ** 32, [_]u8{0} ** 32, columns.custody_requirement);
+    defer store.deinit();
+    try std.testing.expect(store.samples.contains(1));
+    const Known = struct { block: *const fulu.BeaconBlock, parent_state: *const fulu.BeaconState, present: bool = true };
+    var known = Known{ .block = &signed.message, .parent_state = &state };
+    const lookup = ingress.ColumnLookup{ .context = &known, .resolve = struct {
+        /// Supply the borrowed block and parent state for this test's known header.
+        fn resolve(context: *anyopaque, _: *const fulu.SignedBeaconBlockHeader) ?ingress.ColumnBlock {
+            const source: *Known = @ptrCast(@alignCast(context));
+            if (!source.present) return null;
+            return .{ .block = source.block, .parent_state = source.parent_state };
+        }
+    }.resolve };
+    var unused: u8 = 0;
+    const block_gate = ingress.BlockValidation{ .context = &unused, .validate = struct {
+        /// Reject unexpected block delivery in this column test.
+        fn reject(_: *anyopaque, _: *const fulu.SignedBeaconBlock) !void {
+            return error.UnexpectedBlock;
+        }
+    }.reject };
+    const att_gate = ingress.AttestationValidation{ .context = &unused, .validate = struct {
+        /// Reject unexpected attestation delivery in this column test.
+        fn reject(_: *anyopaque, _: *const fulu.Attestation) !void {
+            return error.UnexpectedAttestation;
+        }
+    }.reject };
+    const aggregate_gate = ingress.AggregateValidation{ .context = &unused, .validate = struct {
+        /// Reject unexpected aggregate delivery in this column test.
+        fn reject(_: *anyopaque, _: *const fulu.SignedAggregateAndProof) !void {
+            return error.UnexpectedAggregate;
+        }
+    }.reject };
+    const route = ColumnRoute{ .store = &store, .settings = &settings, .lookup = lookup };
+    var service = try Service.init(allocator, config, digest, &.{}, 1, 5, block_gate, att_gate, aggregate_gate, route);
+    defer service.deinit();
+    const peer = [_]u8{2} ** 32;
+    try service.connect(peer);
+    const topic = service.column_topics[1].?;
+    const rpc = try encodePublish(allocator, topic, sidecar_data);
+    defer allocator.free(rpc);
+    const frame = try encodeFrame(allocator, rpc);
+    defer allocator.free(frame);
+    var stream = Stream.init(allocator, peer);
+    defer stream.deinit();
+    var recipients: [1][32]u8 = undefined;
+    const announcement = try service.localSubscriptionFrame();
+    defer allocator.free(announcement);
+    try stream.feed(&service, announcement);
+    try std.testing.expectEqual(@as(usize, 1), try service.recipients(topic, &recipients));
+    try std.testing.expectEqual(peer, recipients[0]);
+
+    var wrong_digest = digest;
+    wrong_digest[0] ^= 1;
+    var wrong_fork = try Service.init(allocator, config, wrong_digest, &.{}, 1, 5, block_gate, att_gate, aggregate_gate, route);
+    defer wrong_fork.deinit();
+    try wrong_fork.connect(peer);
+    const wrong_fork_rpc = try encodePublish(allocator, wrong_fork.column_topics[1].?, sidecar_data);
+    defer allocator.free(wrong_fork_rpc);
+    try std.testing.expectError(error.InvalidForkContext, wrong_fork.receive(peer, wrong_fork_rpc));
+    try std.testing.expect((try store.get(root, 1)) == null);
+
+    const other_subnet = if (store.samples.values[0] == 1) store.samples.values[1] else store.samples.values[0];
+    const wrong_subnet_rpc = try encodePublish(allocator, service.column_topics[other_subnet].?, sidecar_data);
+    defer allocator.free(wrong_subnet_rpc);
+    try std.testing.expectError(error.InvalidDataColumn, service.receive(peer, wrong_subnet_rpc));
+    const malformed_ssz = try wire.encodeGossip(allocator, &.{0}, config.max_encoded_size);
+    defer allocator.free(malformed_ssz);
+    const malformed_rpc = try encodePublish(allocator, topic, malformed_ssz);
+    defer allocator.free(malformed_rpc);
+    try std.testing.expectError(error.EndOfStream, service.receive(peer, malformed_rpc));
+    try std.testing.expect((try store.get(root, 1)) == null);
+
+    known.present = false;
+    try std.testing.expectError(error.UnknownBlock, stream.feed(&service, frame));
+    try std.testing.expectEqual(@as(u8, 2), service.peers.state(peer).?.invalid_messages);
+    try std.testing.expect((try store.get(root, 1)) == null);
+    known.present = true;
+    var wrong_block = signed.message;
+    wrong_block.parent_root[0] ^= 1;
+    known.block = &wrong_block;
+    try std.testing.expectError(error.WrongBlock, stream.feed(&service, frame));
+    known.block = &signed.message;
+    try std.testing.expect((try store.get(root, 1)) == null);
+
+    var reader: std.Io.Reader = .fixed(sidecar_bytes);
+    const sidecar = try ssz.deserialize(allocator, fulu.DataColumnSidecar, &reader);
+    defer ssz.freeDecoded(allocator, fulu.DataColumnSidecar, sidecar);
+    var altered = sidecar;
+    const bad_proofs = try allocator.dupe(fulu.KZGProof, sidecar.kzg_proofs.data);
+    defer allocator.free(bad_proofs);
+    bad_proofs[0][0] ^= 1;
+    altered.kzg_proofs.data = bad_proofs;
+    const altered_ssz = try ssz.serializeAlloc(allocator, altered);
+    defer allocator.free(altered_ssz);
+    const altered_data = try wire.encodeGossip(allocator, altered_ssz, config.max_encoded_size);
+    defer allocator.free(altered_data);
+    const altered_rpc = try encodePublish(allocator, topic, altered_data);
+    defer allocator.free(altered_rpc);
+    try std.testing.expectError(error.InvalidCellProof, service.receive(peer, altered_rpc));
+    try std.testing.expect((try store.get(root, 1)) == null);
+    try std.testing.expect(!(try store.available(root, &signed.message)));
+    try std.testing.expectEqual(@as(u8, 4), service.peers.state(peer).?.invalid_messages);
+
+    try stream.feed(&service, frame);
+    try stream.feed(&service, frame);
+    service.seen.clearRetainingCapacity();
+    service.seen_len = 0;
+    service.seen_next = 0;
+    try stream.feed(&service, frame);
+    const stored = (try store.get(root, 1)).?;
+    defer allocator.free(stored);
+    try std.testing.expect(!(try store.available(root, &signed.message)));
+    try std.testing.expectEqual(@as(u8, 4), service.peers.state(peer).?.invalid_messages);
 }
