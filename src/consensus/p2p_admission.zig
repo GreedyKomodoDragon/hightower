@@ -66,6 +66,15 @@ pub const Admission = struct {
         };
     }
 
+    /// Decode aggregate gossip and score peer faults before its consensus callback.
+    pub fn receiveAggregate(self: *Admission, peer_id: [32]u8, topic_digest: [4]u8, bytes: []const u8, validation: ingress.AggregateValidation) !void {
+        try self.requirePeer(peer_id);
+        ingress.receiveAggregateGossip(self.allocator, self.config, topic_digest, bytes, validation) catch |err| {
+            if (isPeerFault(err)) self.noteInvalid(peer_id);
+            return err;
+        };
+    }
+
     /// Return the current peer score and connectivity, if the peer is tracked.
     pub fn state(self: *const Admission, peer_id: [32]u8) ?State {
         return self.peers.get(peer_id);
@@ -161,5 +170,21 @@ test "valid gossip reaches callbacks and repeated invalid input bans only its pe
     }.reject };
     try std.testing.expectError(error.InvalidGossip, admission.receiveBlock(good_peer, digest, encoded_block, invalid_consensus));
     try std.testing.expectEqual(@as(u8, 1), admission.state(good_peer).?.invalid_messages);
+    const aggregate = fulu.SignedAggregateAndProof{
+        .message = .{ .aggregator_index = 1, .aggregate = attestation, .selection_proof = [_]u8{0} ** 96 },
+        .signature = [_]u8{0} ** 96,
+    };
+    const aggregate_ssz = try ssz.serializeAlloc(allocator, aggregate);
+    defer allocator.free(aggregate_ssz);
+    const aggregate_bytes = try wire.encodeGossip(allocator, aggregate_ssz, config.max_encoded_size);
+    defer allocator.free(aggregate_bytes);
+    const invalid_aggregate = ingress.AggregateValidation{ .context = &calls, .validate = struct {
+        /// Simulate a rejected aggregate after successful wire validation.
+        fn reject(_: *anyopaque, _: *const fulu.SignedAggregateAndProof) !void {
+            return error.InvalidGossip;
+        }
+    }.reject };
+    try std.testing.expectError(error.InvalidGossip, admission.receiveAggregate(good_peer, att_digest, aggregate_bytes, invalid_aggregate));
+    try std.testing.expectEqual(@as(u8, 2), admission.state(good_peer).?.invalid_messages);
     try std.testing.expectEqual(@as(u8, 3), admission.state(bad_peer).?.invalid_messages);
 }

@@ -5,6 +5,8 @@
 //! attestations and slashings, deposits and exits, sync aggregate, execution
 //! payload, BLS changes, blob commitments, and execution requests. A
 //! SignedBeaconBlock wraps the block with its proposer signature.
+//! AggregateAndProof wraps a combined attestation with the aggregator's
+//! selection proof; its signed envelope authenticates the aggregator.
 //!
 //! BeaconState is a separate container for fork metadata, the latest block
 //! header, historical roots, Eth1 data, validators and balances, sync
@@ -136,6 +138,19 @@ pub const Attestation = struct {
     data: AttestationData,
     signature: BLSSignature,
     committee_bits: types.BitVector(preset.MAX_COMMITTEES_PER_SLOT),
+};
+
+/// Combined validator vote with the aggregator's selection proof.
+pub const AggregateAndProof = struct {
+    aggregator_index: ValidatorIndex,
+    aggregate: Attestation,
+    selection_proof: BLSSignature,
+};
+
+/// Signed envelope used on the aggregate-and-proof gossip topic.
+pub const SignedAggregateAndProof = struct {
+    message: AggregateAndProof,
+    signature: BLSSignature,
 };
 
 pub const IndexedAttestation = struct {

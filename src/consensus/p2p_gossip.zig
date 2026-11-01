@@ -1,7 +1,8 @@
 // Gossipsub subscriptions and publishes arrive as protobuf RPCs from
-// authenticated peers. Announce our selected topics on each new stream, then
-// parse complete bounded envelopes before changing remote subscriptions or
-// delivering SSZ objects. Valid duplicates are suppressed; invalid messages
+// authenticated peers. Announce our block, aggregate, and selected attestation
+// topics on each new stream, then parse complete bounded envelopes before
+// changing remote subscriptions or delivering SSZ objects. Valid duplicates
+// are suppressed; invalid messages
 // count toward the existing peer ban threshold.
 //
 //   peer RPC -> bounded protobuf -> topic -> SSZ/consensus gate -> delivery
@@ -46,8 +47,8 @@ const WireType = struct {
 
 const Publish = struct { topic: []const u8, data: []const u8 };
 const Subscription = struct { topic: []const u8, subscribe: bool };
-const RemoteSubscriptions = struct { block: bool = false, attestations: u64 = 0 };
-const TopicSelection = union(enum) { block, attestation: u8 };
+const RemoteSubscriptions = struct { block: bool = false, aggregate: bool = false, attestations: u64 = 0 };
+const TopicSelection = union(enum) { block, aggregate, attestation: u8 };
 const Parsed = struct {
     publishes: [max_publishes]Publish = undefined,
     publish_len: usize = 0,
@@ -59,9 +60,11 @@ pub const Service = struct {
     allocator: std.mem.Allocator,
     digest: [4]u8,
     block_topic: []u8,
+    aggregate_topic: []u8,
     attestation_topics: [64]?[]u8,
     block_validation: ingress.BlockValidation,
     attestation_validation: ingress.AttestationValidation,
+    aggregate_validation: ingress.AggregateValidation,
     peers: admission.Admission,
     subscriptions: std.AutoHashMap([32]u8, RemoteSubscriptions),
     seen: std.AutoHashMap([32]u8, void),
@@ -71,12 +74,14 @@ pub const Service = struct {
 
     /// Subscribe to one Fulu digest and selected attestation subnets. Callback
     /// contexts and the config's blob schedule must outlive the service.
-    pub fn init(allocator: std.mem.Allocator, config: ingress.Config, digest: [4]u8, subnets: []const u8, max_peers: usize, invalid_limit: u8, block_validation: ingress.BlockValidation, attestation_validation: ingress.AttestationValidation) !Service {
+    pub fn init(allocator: std.mem.Allocator, config: ingress.Config, digest: [4]u8, subnets: []const u8, max_peers: usize, invalid_limit: u8, block_validation: ingress.BlockValidation, attestation_validation: ingress.AttestationValidation, aggregate_validation: ingress.AggregateValidation) !Service {
         if (subnets.len > 64) return error.InvalidSubnet;
         var peers = try admission.Admission.init(allocator, config, max_peers, invalid_limit);
         errdefer peers.deinit();
         const block_topic = try wire.topicName(allocator, digest, .block, null);
         errdefer allocator.free(block_topic);
+        const aggregate_topic = try wire.topicName(allocator, digest, .aggregate_attestation, null);
+        errdefer allocator.free(aggregate_topic);
         var attestation_topics: [64]?[]u8 = .{null} ** 64;
         errdefer for (attestation_topics) |name| if (name) |owned| allocator.free(owned);
         for (subnets) |subnet| {
@@ -90,7 +95,7 @@ pub const Service = struct {
         var subscriptions = std.AutoHashMap([32]u8, RemoteSubscriptions).init(allocator);
         errdefer subscriptions.deinit();
         try subscriptions.ensureTotalCapacity(@intCast(max_peers));
-        return .{ .allocator = allocator, .digest = digest, .block_topic = block_topic, .attestation_topics = attestation_topics, .block_validation = block_validation, .attestation_validation = attestation_validation, .peers = peers, .subscriptions = subscriptions, .seen = seen };
+        return .{ .allocator = allocator, .digest = digest, .block_topic = block_topic, .aggregate_topic = aggregate_topic, .attestation_topics = attestation_topics, .block_validation = block_validation, .attestation_validation = attestation_validation, .aggregate_validation = aggregate_validation, .peers = peers, .subscriptions = subscriptions, .seen = seen };
     }
 
     /// Release topic names, the bounded duplicate cache, and peer scores.
@@ -99,6 +104,7 @@ pub const Service = struct {
         self.subscriptions.deinit();
         self.peers.deinit();
         for (self.attestation_topics) |name| if (name) |owned| self.allocator.free(owned);
+        self.allocator.free(self.aggregate_topic);
         self.allocator.free(self.block_topic);
     }
 
@@ -124,6 +130,7 @@ pub const Service = struct {
         while (iterator.next()) |entry| {
             const interested = switch (selected) {
                 .block => entry.value_ptr.block,
+                .aggregate => entry.value_ptr.aggregate,
                 .attestation => |subnet| entry.value_ptr.attestations & (@as(u64, 1) << @intCast(subnet)) != 0,
             };
             if (!interested) continue;
@@ -141,6 +148,7 @@ pub const Service = struct {
         var rpc: std.ArrayList(u8) = .empty;
         defer rpc.deinit(self.allocator);
         try appendSubscription(self.allocator, &rpc, self.block_topic, true);
+        try appendSubscription(self.allocator, &rpc, self.aggregate_topic, true);
         for (self.attestation_topics) |maybe_name| {
             const name = maybe_name orelse continue;
             try appendSubscription(self.allocator, &rpc, name, true);
@@ -161,6 +169,7 @@ pub const Service = struct {
             const selected = self.classify(subscription.topic) orelse continue;
             switch (selected) {
                 .block => remote.block = subscription.subscribe,
+                .aggregate => remote.aggregate = subscription.subscribe,
                 .attestation => |subnet| {
                     const mask = @as(u64, 1) << @intCast(subnet);
                     if (subscription.subscribe) remote.attestations |= mask else remote.attestations &= ~mask;
@@ -173,6 +182,7 @@ pub const Service = struct {
             if (self.seen.contains(hash)) continue;
             switch (selected) {
                 .block => try self.peers.receiveBlock(peer_id, self.digest, publish.data, self.block_validation),
+                .aggregate => try self.peers.receiveAggregate(peer_id, self.digest, publish.data, self.aggregate_validation),
                 .attestation => try self.peers.receiveAttestation(peer_id, self.digest, publish.data, self.attestation_validation),
             }
             if (self.seen_len == seen_capacity) {
@@ -189,6 +199,7 @@ pub const Service = struct {
     /// Match only topics this service follows at its configured fork digest.
     fn classify(self: *const Service, name: []const u8) ?TopicSelection {
         if (std.mem.eql(u8, name, self.block_topic)) return .block;
+        if (std.mem.eql(u8, name, self.aggregate_topic)) return .aggregate;
         for (self.attestation_topics, 0..) |maybe_name, subnet| {
             const topic_name = maybe_name orelse continue;
             if (std.mem.eql(u8, name, topic_name)) return .{ .attestation = @intCast(subnet) };
@@ -543,7 +554,13 @@ test "gossip stream assembles split RPCs and rejects bad length prefixes" {
             return error.UnexpectedAttestation;
         }
     }.reject };
-    var service = try Service.init(allocator, config, .{ 1, 2, 3, 4 }, &.{}, 1, 4, block_gate, att_gate);
+    const aggregate_gate = ingress.AggregateValidation{ .context = &unused, .validate = struct {
+        /// Reject unexpected aggregate delivery in this framing test.
+        fn reject(_: *anyopaque, _: *const fulu.SignedAggregateAndProof) !void {
+            return error.UnexpectedAggregate;
+        }
+    }.reject };
+    var service = try Service.init(allocator, config, .{ 1, 2, 3, 4 }, &.{}, 1, 4, block_gate, att_gate, aggregate_gate);
     defer service.deinit();
     try service.connect(peer_id);
     var stream = Stream.init(allocator, peer_id);
@@ -593,7 +610,7 @@ test "gossip stream assembles split RPCs and rejects bad length prefixes" {
     try std.testing.expectEqual(@as(usize, 0), try service.recipients(service.block_topic, &recipients));
 }
 
-test "gossip RPC validates blocks and attestations before delivery and retains peer scores" {
+test "gossip RPC validates blocks attestations and aggregates before delivery" {
     const fixture = @import("fixture_runner.zig");
     const fulu = @import("fulu");
     const ssz = @import("ssz");
@@ -612,7 +629,7 @@ test "gossip RPC validates blocks and attestations before delivery and retains p
     const attestation = try ssz.deserialize(allocator, fulu.Attestation, &att_reader);
     defer ssz.freeDecoded(allocator, fulu.Attestation, attestation);
     try std.testing.expectEqual(digest, try config.digestAtSlot(attestation.data.slot));
-    const Counts = struct { blocks: usize = 0, attestations: usize = 0 };
+    const Counts = struct { blocks: usize = 0, attestations: usize = 0, aggregates: usize = 0 };
     var counts = Counts{};
     const block_gate = ingress.BlockValidation{ .context = &counts, .validate = struct {
         /// Count a block only after it passes the ingress checks.
@@ -628,14 +645,21 @@ test "gossip RPC validates blocks and attestations before delivery and retains p
             state.attestations += 1;
         }
     }.check };
+    const aggregate_gate = ingress.AggregateValidation{ .context = &counts, .validate = struct {
+        /// Count a signed aggregate only after its ingress checks pass.
+        fn check(context: *anyopaque, _: *const fulu.SignedAggregateAndProof) !void {
+            const state: *Counts = @ptrCast(@alignCast(context));
+            state.aggregates += 1;
+        }
+    }.check };
     const bad_peer = [_]u8{1} ** 32;
     const good_peer = [_]u8{2} ** 32;
-    try std.testing.expectError(error.InvalidSubnet, Service.init(allocator, config, digest, &.{64}, 2, 3, block_gate, att_gate));
-    var service = try Service.init(allocator, config, digest, &.{3}, 2, 3, block_gate, att_gate);
+    try std.testing.expectError(error.InvalidSubnet, Service.init(allocator, config, digest, &.{64}, 2, 3, block_gate, att_gate, aggregate_gate));
+    var service = try Service.init(allocator, config, digest, &.{3}, 2, 3, block_gate, att_gate, aggregate_gate);
     defer service.deinit();
     try service.connect(bad_peer);
     try service.connect(good_peer);
-    var publisher = try Service.init(allocator, config, digest, &.{3}, 1, 3, block_gate, att_gate);
+    var publisher = try Service.init(allocator, config, digest, &.{3}, 1, 3, block_gate, att_gate, aggregate_gate);
     defer publisher.deinit();
     try publisher.connect(bad_peer);
     const publisher_frame = try publisher.localSubscriptionFrame();
@@ -664,6 +688,7 @@ test "gossip RPC validates blocks and attestations before delivery and retains p
     try subscription_stream.feed(&publisher, subscriptions_frame[subscriptions_frame.len / 2 ..]);
     try std.testing.expectEqual(@as(usize, 1), try publisher.recipients(publisher.block_topic, &recipients));
     try std.testing.expectEqual(bad_peer, recipients[0]);
+    try std.testing.expectEqual(@as(usize, 1), try publisher.recipients(publisher.aggregate_topic, &recipients));
     try std.testing.expectEqual(@as(usize, 1), try publisher.recipients(publisher.attestation_topics[3].?, &recipients));
     try std.testing.expectError(error.BufferTooSmall, publisher.recipients(publisher.block_topic, recipients[0..0]));
     const block_data = try wire.encodeGossip(allocator, raw_block, config.max_encoded_size);
@@ -687,6 +712,21 @@ test "gossip RPC validates blocks and attestations before delivery and retains p
     defer allocator.free(att_frame);
     try block_stream.feed(&service, att_frame);
     try std.testing.expectEqual(@as(usize, 1), counts.attestations);
+    const signed_aggregate = fulu.SignedAggregateAndProof{
+        .message = .{ .aggregator_index = 1, .aggregate = attestation, .selection_proof = [_]u8{0} ** 96 },
+        .signature = [_]u8{0} ** 96,
+    };
+    const aggregate_ssz = try ssz.serializeAlloc(allocator, signed_aggregate);
+    defer allocator.free(aggregate_ssz);
+    const aggregate_data = try wire.encodeGossip(allocator, aggregate_ssz, config.max_encoded_size);
+    defer allocator.free(aggregate_data);
+    const aggregate_rpc = try encodePublish(allocator, service.aggregate_topic, aggregate_data);
+    defer allocator.free(aggregate_rpc);
+    const aggregate_frame = try encodeFrame(allocator, aggregate_rpc);
+    defer allocator.free(aggregate_frame);
+    try block_stream.feed(&service, aggregate_frame);
+    try block_stream.feed(&service, aggregate_frame);
+    try std.testing.expectEqual(@as(usize, 1), counts.aggregates);
     const other_topic = try wire.topicName(allocator, digest, .attestation, 4);
     defer allocator.free(other_topic);
     const other_rpc = try encodePublish(allocator, other_topic, att_data);
@@ -731,7 +771,7 @@ test "gossip RPC validates blocks and attestations before delivery and retains p
 
     var wrong_digest = digest;
     wrong_digest[0] ^= 1;
-    var wrong = try Service.init(allocator, config, wrong_digest, &.{}, 1, 3, block_gate, att_gate);
+    var wrong = try Service.init(allocator, config, wrong_digest, &.{}, 1, 3, block_gate, att_gate, aggregate_gate);
     defer wrong.deinit();
     try wrong.connect(bad_peer);
     const wrong_rpc = try encodePublish(allocator, wrong.block_topic, block_data);
@@ -742,7 +782,7 @@ test "gossip RPC validates blocks and attestations before delivery and retains p
 
     var small_config = config;
     small_config.max_encoded_size = 1;
-    var bounded = try Service.init(allocator, small_config, digest, &.{}, 1, 3, block_gate, att_gate);
+    var bounded = try Service.init(allocator, small_config, digest, &.{}, 1, 3, block_gate, att_gate, aggregate_gate);
     defer bounded.deinit();
     try bounded.connect(bad_peer);
     try std.testing.expectError(error.PayloadTooLarge, bounded.receive(bad_peer, block_rpc));
@@ -755,7 +795,7 @@ test "gossip RPC validates blocks and attestations before delivery and retains p
             return error.LocalUnavailable;
         }
     }.unavailable };
-    var local_error = try Service.init(allocator, config, digest, &.{}, 1, 3, local_gate, att_gate);
+    var local_error = try Service.init(allocator, config, digest, &.{}, 1, 3, local_gate, att_gate, aggregate_gate);
     defer local_error.deinit();
     try local_error.connect(bad_peer);
     try std.testing.expectError(error.LocalUnavailable, local_error.receive(bad_peer, block_rpc));
