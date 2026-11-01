@@ -28,10 +28,13 @@ test {
     _ = @import("p2p_ingress.zig");
     _ = @import("p2p_requests.zig");
     _ = @import("p2p_control.zig");
+    _ = @import("p2p_multistream.zig");
     _ = @import("enr.zig");
     _ = @import("discovery_bootstrap.zig");
     _ = @import("p2p_admission.zig");
     _ = @import("p2p_gossip.zig");
+    _ = @import("p2p_gossip_session.zig");
+    _ = @import("p2p_noise_identity.zig");
     _ = @import("discv5_messages.zig");
     _ = @import("discv5_packets.zig");
     _ = @import("discv5_session.zig");
