@@ -13,8 +13,15 @@ const enr = @import("enr.zig");
 const Ecdsa = std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
 const Scalar = std.crypto.ecc.Secp256k1.scalar;
 const signature_prefix = "noise-libp2p-static-key:";
-const public_key_prefix = [_]u8{ 0x08, 0x02, 0x12, 0x21 };
-const public_key_size = public_key_prefix.len + 33;
+const compressed_key_size = 33;
+const identity_key_tag: u8 = 0x0a;
+const identity_signature_tag: u8 = 0x12;
+const extensions_tag: u8 = 0x22;
+const key_type_tag: u8 = 0x08;
+const secp256k1_key_type: u8 = 2;
+const key_data_tag: u8 = 0x12;
+const public_key_prefix = [_]u8{ key_type_tag, secp256k1_key_type, key_data_tag, compressed_key_size };
+const public_key_size = public_key_prefix.len + compressed_key_size;
 const max_signature_size = Ecdsa.Signature.der_encoded_length_max;
 const encoded_capacity = 2 + public_key_size + 2 + max_signature_size;
 pub const max_payload_size = 1024;
@@ -39,13 +46,13 @@ pub fn encode(identity: Ecdsa.KeyPair, noise_static_key: [32]u8) !Payload {
     var der_buffer: [max_signature_size]u8 = undefined;
     const der = signature.toDer(&der_buffer);
     var payload: Payload = .{ .bytes = undefined, .len = 2 + public_key_size + 2 + der.len };
-    payload.bytes[0] = 0x0a;
+    payload.bytes[0] = identity_key_tag;
     payload.bytes[1] = public_key_size;
     @memcpy(payload.bytes[2..][0..public_key_prefix.len], &public_key_prefix);
     const public_key = identity.public_key.toCompressedSec1();
     @memcpy(payload.bytes[2 + public_key_prefix.len ..][0..public_key.len], &public_key);
     const signature_offset = 2 + public_key_size;
-    payload.bytes[signature_offset] = 0x12;
+    payload.bytes[signature_offset] = identity_signature_tag;
     payload.bytes[signature_offset + 1] = @intCast(der.len);
     @memcpy(payload.bytes[signature_offset + 2 ..][0..der.len], der);
     return payload;
@@ -56,7 +63,7 @@ pub fn encode(identity: Ecdsa.KeyPair, noise_static_key: [32]u8) !Payload {
 pub fn verify(payload: []const u8, noise_static_key: [32]u8, expected: enr.Record) !void {
     if (payload.len > max_payload_size) return error.PayloadTooLarge;
     var offset: usize = 0;
-    if (offset == payload.len or payload[offset] != 0x0a) return error.InvalidIdentityPayload;
+    if (offset == payload.len or payload[offset] != identity_key_tag) return error.InvalidIdentityPayload;
     offset += 1;
     const key_len = try readLength(payload, &offset);
     if (key_len != public_key_size or key_len > payload.len - offset) return error.InvalidIdentityPayload;
@@ -64,14 +71,14 @@ pub fn verify(payload: []const u8, noise_static_key: [32]u8, expected: enr.Recor
     offset += key_len;
     if (!std.mem.eql(u8, key[0..public_key_prefix.len], &public_key_prefix)) return error.InvalidIdentityPayload;
     if (!std.mem.eql(u8, key[public_key_prefix.len..], &expected.public_key)) return error.InvalidIdentity;
-    if (offset == payload.len or payload[offset] != 0x12) return error.InvalidIdentityPayload;
+    if (offset == payload.len or payload[offset] != identity_signature_tag) return error.InvalidIdentityPayload;
     offset += 1;
     const signature_len = try readLength(payload, &offset);
     if (signature_len == 0 or signature_len > max_signature_size or signature_len > payload.len - offset) return error.InvalidIdentityPayload;
     const der = payload[offset..][0..signature_len];
     offset += signature_len;
     if (offset < payload.len) {
-        if (payload[offset] != 0x22) return error.InvalidIdentityPayload;
+        if (payload[offset] != extensions_tag) return error.InvalidIdentityPayload;
         offset += 1;
         const extension_len = try readLength(payload, &offset);
         if (extension_len != payload.len - offset) return error.InvalidIdentityPayload;
@@ -131,7 +138,7 @@ test "Noise identity payload rejects malformed and noncanonical protobuf" {
     const static_key = [_]u8{31} ** 32;
     const payload = try encode(identity, static_key);
     var duplicate = payload;
-    duplicate.bytes[duplicate.len] = 0x12;
+    duplicate.bytes[duplicate.len] = identity_signature_tag;
     duplicate.len += 1;
     try std.testing.expectError(error.InvalidIdentityPayload, verify(duplicate.slice(), static_key, record));
     var bad_key = payload;
@@ -143,7 +150,7 @@ test "Noise identity payload rejects malformed and noncanonical protobuf" {
     const with_extension = try allocator.alloc(u8, payload.len + 3);
     defer allocator.free(with_extension);
     @memcpy(with_extension[0..payload.len], payload.slice());
-    @memcpy(with_extension[payload.len..], &[_]u8{ 0x22, 1, 0 });
+    @memcpy(with_extension[payload.len..], &[_]u8{ extensions_tag, 1, 0 });
     try verify(with_extension, static_key, record);
     const signature_offset = 2 + public_key_size + 2;
     const original_signature = try Ecdsa.Signature.fromDer(payload.slice()[signature_offset..]);
