@@ -25,6 +25,8 @@ pub const samples_per_slot: usize = 8;
 pub const retention_epochs: u64 = 4096;
 pub const max_request_blocks: usize = 128;
 pub const max_request_columns: usize = max_request_blocks * column_count;
+pub const max_response_bytes: usize = 15 * 1024 * 1024;
+pub const max_response_columns: usize = column_count;
 
 pub const ByRoot = struct {
     block_root: fulu.Root,
@@ -218,12 +220,13 @@ pub const Store = struct {
         defer self.mutex.unlock(self.io);
         if (requests.len > max_request_blocks) return error.InvalidRequest;
         var total: usize = 0;
+        var response_bytes: usize = 0;
         var result: std.ArrayList(ServedColumn) = .empty;
         errdefer {
             freeServedItems(allocator, result.items);
             result.deinit(allocator);
         }
-        for (requests) |request| {
+        roots: for (requests) |request| {
             if (request.columns.len > column_count or request.columns.len > max_request_columns - total) return error.InvalidRequest;
             total += request.columns.len;
             var seen = [_]bool{false} ** column_count;
@@ -232,6 +235,11 @@ pub const Store = struct {
                 seen[index] = true;
                 if (!self.custody.contains(index)) continue;
                 const entry = (try self.load(allocator, request.block_root, @intCast(index))) orelse continue;
+                if (result.items.len == max_response_columns or entry.bytes.len > max_response_bytes - response_bytes) {
+                    allocator.free(entry.bytes);
+                    break :roots;
+                }
+                response_bytes += entry.bytes.len;
                 result.append(allocator, .{ .block_root = request.block_root, .slot = entry.slot, .index = @intCast(index), .bytes = entry.bytes }) catch |err| {
                     allocator.free(entry.bytes);
                     return err;
@@ -252,12 +260,15 @@ pub const Store = struct {
             requested[index] = true;
         }
         var result: std.ArrayList(ServedColumn) = .empty;
+        var response_bytes: usize = 0;
         errdefer {
             freeServedItems(allocator, result.items);
             result.deinit(allocator);
         }
-        for (start_slot..start_slot + count) |slot| {
+        slots: for (start_slot..start_slot + count) |slot| {
             const root = canonical.root_at_slot(canonical.context, slot) orelse continue;
+            const slot_start = result.items.len;
+            const slot_bytes = response_bytes;
             for (requested, 0..) |want, index| {
                 if (!want or !self.custody.contains(index)) continue;
                 const entry = (try self.load(allocator, root, @intCast(index))) orelse continue;
@@ -265,6 +276,14 @@ pub const Store = struct {
                     allocator.free(entry.bytes);
                     return error.InconsistentStore;
                 }
+                if (result.items.len == max_response_columns or entry.bytes.len > max_response_bytes - response_bytes) {
+                    allocator.free(entry.bytes);
+                    freeServedItems(allocator, result.items[slot_start..]);
+                    result.items.len = slot_start;
+                    response_bytes = slot_bytes;
+                    break :slots;
+                }
+                response_bytes += entry.bytes.len;
                 result.append(allocator, .{ .block_root = root, .slot = slot, .index = @intCast(index), .bytes = entry.bytes }) catch |err| {
                     allocator.free(entry.bytes);
                     return err;
@@ -418,6 +437,39 @@ test "column serving enforces custody, request bounds, canonical order and reten
     try store.prune(10 + retention_epochs * preset.SLOTS_PER_EPOCH + 1);
     try std.testing.expect(!try has(&store, root_a, first));
     try std.testing.expect(try has(&store, root_b, first));
+}
+
+test "column responses stop before a block would exceed the byte limit" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try Store.open(allocator, std.testing.io, tmp.dir, "columns", [_]u8{9} ** 32, [_]u8{0} ** 32, custody_requirement);
+    defer store.deinit();
+    const first_root = [_]u8{1} ** 32;
+    const second_root = [_]u8{2} ** 32;
+    const index = store.custody.values[0];
+    const bytes = try allocator.alloc(u8, 8 * 1024 * 1024);
+    defer allocator.free(bytes);
+    @memset(bytes, 1);
+    try putRaw(&store, first_root, index, 1, bytes);
+    try putRaw(&store, second_root, index, 2, bytes);
+    const canonical = CanonicalRoots{ .context = &store, .root_at_slot = struct {
+        /// Select the two fixture roots from one stable canonical view.
+        fn at(_: *anyopaque, slot: u64) ?fulu.Root {
+            return switch (slot) {
+                1 => [_]u8{1} ** 32,
+                2 => [_]u8{2} ** 32,
+                else => null,
+            };
+        }
+    }.at };
+    const served = try store.serveByRange(allocator, 1, 2, &.{index}, canonical);
+    defer Store.freeServed(allocator, served);
+    try std.testing.expectEqual(@as(usize, 1), served.len);
+    try std.testing.expectEqual(first_root, served[0].block_root);
+    const rooted = try store.serveByRoot(allocator, &.{ .{ .block_root = first_root, .columns = &.{index} }, .{ .block_root = second_root, .columns = &.{index} } });
+    defer Store.freeServed(allocator, rooted);
+    try std.testing.expectEqual(@as(usize, 1), rooted.len);
 }
 
 test "pruning multiple batches reclaims expired columns across restart" {

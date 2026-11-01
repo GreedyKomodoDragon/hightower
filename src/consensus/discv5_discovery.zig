@@ -22,6 +22,8 @@ const Session = @import("discv5_session.zig").Session;
 const Ecdsa = std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
 const challenge_lifetime_ns = std.time.ns_per_s;
 const findnode_lifetime_ns = 10 * std.time.ns_per_s;
+const retry_interval_ns = 2 * std.time.ns_per_s;
+const refresh_interval_ns = 30 * std.time.ns_per_s;
 
 const Probe = struct {
     nonce: [12]u8,
@@ -42,6 +44,9 @@ const Peer = struct {
     expected_pong: ?messages.RequestId = null,
     find_query: ?FindQuery = null,
     discovered: bool = false,
+    last_probe_ns: i96 = 0,
+    last_query_ns: i96 = 0,
+    next_distance: u16 = 1,
 };
 const PendingChallenge = struct {
     id: [32]u8,
@@ -115,7 +120,7 @@ pub const Service = struct {
         try self.socket.send(record, packet);
         peer.probe = .{ .nonce = nonce, .request_id = request_id, .endpoint = udp.endpoint(record), .started_ns = self.now() };
         peer.expected_pong = request_id;
-        peer.discovered = false;
+        peer.last_probe_ns = self.now();
     }
 
     /// Ask an authenticated peer for signed ENRs at up to 16 XOR distances.
@@ -140,10 +145,40 @@ pub const Service = struct {
         const record = self.candidates.get(id) orelse return error.UnknownPeer;
         try self.socket.send(record, packet);
         peer.find_query = .{ .request = request, .started_ns = self.now() };
+        peer.last_query_ns = self.now();
+    }
+
+    /// Probe verified candidates, retry lost peers, and refresh ENRs in bounded batches.
+    pub fn maintain(self: *Service) !void {
+        const now_ns = self.now();
+        for (self.candidates.items.items) |record| {
+            if (std.mem.eql(u8, &record.node_id, &self.local_record.node_id)) continue;
+            const peer = try self.ensurePeer(record.node_id);
+            if (peer.probe) |pending| {
+                if (now_ns - pending.started_ns <= challenge_lifetime_ns) continue;
+                peer.probe = null;
+            }
+            if (peer.expected_pong != null and now_ns - peer.last_probe_ns > challenge_lifetime_ns) {
+                peer.expected_pong = null;
+                peer.discovered = false;
+            }
+            if (!peer.discovered or now_ns - peer.last_probe_ns >= refresh_interval_ns) {
+                if (peer.last_probe_ns == 0 or now_ns - peer.last_probe_ns >= retry_interval_ns) try self.probe(record.node_id);
+                continue;
+            }
+            const query_expired = if (peer.find_query) |query| now_ns - query.started_ns > findnode_lifetime_ns else true;
+            if (query_expired and (peer.last_query_ns == 0 or now_ns - peer.last_query_ns >= refresh_interval_ns)) {
+                var distances: [16]u16 = undefined;
+                for (&distances, 0..) |*distance, index| distance.* = @intCast((@as(usize, peer.next_distance) + index - 1) % 256 + 1);
+                peer.next_distance = if (peer.next_distance > 240) 1 else peer.next_distance + 16;
+                try self.findNode(record.node_id, &distances);
+            }
+        }
     }
 
     /// Receive and process one UDP datagram within the caller's timeout.
     pub fn step(self: *Service, timeout: std.Io.Timeout) !void {
+        try self.maintain();
         var buffer: [packets.max_packet_size + 1]u8 = undefined;
         const datagram = try self.socket.receive(&buffer, timeout);
         return self.handle(datagram);
@@ -188,6 +223,7 @@ pub const Service = struct {
                 if (!std.mem.eql(u8, expected.slice(), pong.request_id.slice())) return error.WrongRequestId;
                 peer.expected_pong = null;
                 peer.discovered = true;
+                peer.last_query_ns = self.now();
             },
             .findnode => |find| return self.sendNodes(peer, record, find),
         }
@@ -250,6 +286,8 @@ pub const Service = struct {
             if (peer.session) |*old| old.deinit();
             peer.session = session;
             peer.discovered = true;
+            peer.last_probe_ns = self.now();
+            peer.last_query_ns = self.now();
             peer.expected_pong = null;
             _ = self.challenges.swapRemove(index);
             return;
@@ -450,6 +488,54 @@ test "two bootstrap nodes discover and reconnect through live UDP handshakes" {
     try b_again.step(timeout);
     try std.testing.expectEqual(b_again.local_record.udp_port, a.discoveredRecord(b_again.local_record.node_id).?.udp_port);
     try std.testing.expect(b_again.discoveredRecord(a.local_record.node_id) != null);
+}
+
+test "configured bootstrap is probed automatically and a lost peer can return" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const key_a = try Ecdsa.KeyPair.generateDeterministic([_]u8{91} ** 32);
+    const key_b = try Ecdsa.KeyPair.generateDeterministic([_]u8{92} ** 32);
+    const local = enr.Local{ .sequence = 1, .ip = .{ 127, 0, 0, 1 }, .udp_port = 0, .tcp_port = 9000, .fork_id = .{ 1, 2, 3, 4, 0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255 }, .next_fork_digest = .{0} ** 4, .custody_group_count = 4 };
+    const timeout: std.Io.Timeout = .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(1) } };
+    var a = try Service.init(allocator, io, key_a, local, 2);
+    defer a.deinit();
+    const a_uri = try a.localUri();
+    defer allocator.free(a_uri);
+    var old_port: u16 = undefined;
+    {
+        var b = try Service.init(allocator, io, key_b, local, 2);
+        defer b.deinit();
+        old_port = b.local_record.udp_port;
+        const b_uri = try b.localUri();
+        defer allocator.free(b_uri);
+        try a.addBootstrap(b_uri);
+        try a.maintain();
+        try b.step(timeout);
+        try a.step(timeout);
+        try b.step(timeout);
+        try a.step(timeout);
+        try std.testing.expect(a.discoveredRecord(b.local_record.node_id) != null);
+    }
+    const peer = a.findPeer(a.candidates.items.items[0].node_id).?;
+    peer.last_probe_ns -= refresh_interval_ns;
+    try a.maintain();
+    peer.probe.?.started_ns -= challenge_lifetime_ns + 1;
+    peer.last_probe_ns -= retry_interval_ns;
+    try a.maintain();
+    try std.testing.expect(a.discoveredRecord(peer.id) == null);
+
+    var restarted = local;
+    restarted.sequence = 2;
+    var b_again = try Service.init(allocator, io, key_b, restarted, 2);
+    defer b_again.deinit();
+    try std.testing.expect(b_again.local_record.udp_port != old_port);
+    try b_again.addBootstrap(a_uri);
+    try b_again.maintain();
+    try a.step(timeout);
+    try b_again.step(timeout);
+    try a.step(timeout);
+    try b_again.step(timeout);
+    try std.testing.expectEqual(b_again.local_record.udp_port, a.discoveredRecord(b_again.local_record.node_id).?.udp_port);
 }
 
 test "FINDNODE shares verified ENRs and rejects wrong-distance NODES" {

@@ -56,6 +56,7 @@ Chain:      [Block 0] ───────────────────�
 | Data availability sampling | Checking selected, verified columns before treating a blob-carrying block as available. |
 | Node ID | A 32-byte discovery identity used to select a node's custody groups. |
 | Ethereum Node Record (ENR) | A signed record that advertises a node's discovery identity, network address, fork, and custody commitment. |
+| Bootstrap ENR | A configured signed node record used as the first contact for finding other peers. |
 | discv5 | Ethereum's peer discovery protocol, which uses node records and UDP messages to find other nodes. |
 | WHOAREYOU | A discv5 challenge sent when a node cannot authenticate a discovery packet; it prompts the sender to prove its identity and establish fresh session keys. |
 | FINDNODE | A discv5 request for node records at specified logarithmic distances from the recipient's node ID. |
@@ -67,6 +68,7 @@ Chain:      [Block 0] ───────────────────�
 | Fork digest | Four bytes that identify a chain's current consensus fork for network messages. |
 | Gossipsub | The peer-to-peer protocol that spreads consensus messages through subscribed topics. |
 | Multistream-select | The short exchange on a peer stream that chooses an exact application protocol ID before its messages are sent. |
+| Yamux | A stream multiplexer that carries separate gossip and request streams over one authenticated peer connection. |
 | Noise XX | A three-message peer handshake that exchanges encryption keys and proves both peers' identities before application messages are accepted. |
 | Noise static key | An X25519 public key used by a peer's Noise handshake; its libp2p identity signs it to bind the encrypted channel to that peer. |
 | Handshake hash | The running digest of a Noise handshake transcript, used to bind encrypted messages to the exact exchange both peers saw. |
