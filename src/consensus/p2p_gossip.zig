@@ -1,11 +1,11 @@
-// Gossipsub publishes arrive as protobuf RPCs from authenticated peers. Parse
-// the complete bounded envelope before delivering any SSZ object, then check
-// its fork topic and consensus rules. Valid duplicates are suppressed; invalid
-// messages count toward the existing peer ban threshold.
+// Gossipsub subscriptions and publishes arrive as protobuf RPCs from
+// authenticated peers. Parse the complete bounded envelope before changing
+// subscriptions or delivering SSZ objects. Valid duplicates are suppressed;
+// invalid messages count toward the existing peer ban threshold.
 //
 //   peer RPC -> bounded protobuf -> topic -> SSZ/consensus gate -> delivery
-// This module handles publish envelopes only. Connection security, mesh
-// control, and stream framing are separate parts of the peer transport.
+// One RPC carries at most 128 subscription updates and 16 publishes in 16 MiB.
+// Connection security, mesh control, and stream framing are separate work.
 const std = @import("std");
 const ingress = @import("p2p_ingress.zig");
 const admission = @import("p2p_admission.zig");
@@ -13,12 +13,18 @@ const wire = @import("p2p_wire.zig");
 
 pub const max_rpc_size: usize = 16 * 1024 * 1024;
 const max_publishes: usize = 16;
+const max_subscriptions: usize = 128;
 const seen_capacity: usize = 1024;
 const max_topic_size: usize = 128;
 const field_shift = 3;
 const wire_mask = 0b111;
 const RpcField = struct {
+    const subscription = 1;
     const publish = 2;
+};
+const SubscriptionField = struct {
+    const subscribe = 1;
+    const topic = 2;
 };
 const MessageField = struct {
     const from = 1;
@@ -36,7 +42,15 @@ const WireType = struct {
 };
 
 const Publish = struct { topic: []const u8, data: []const u8 };
-const Parsed = struct { items: [max_publishes]Publish = undefined, len: usize = 0 };
+const Subscription = struct { topic: []const u8, subscribe: bool };
+const RemoteSubscriptions = struct { block: bool = false, attestations: u64 = 0 };
+const TopicSelection = union(enum) { block, attestation: u8 };
+const Parsed = struct {
+    publishes: [max_publishes]Publish = undefined,
+    publish_len: usize = 0,
+    subscriptions: [max_subscriptions]Subscription = undefined,
+    subscription_len: usize = 0,
+};
 
 pub const Service = struct {
     allocator: std.mem.Allocator,
@@ -46,6 +60,7 @@ pub const Service = struct {
     block_validation: ingress.BlockValidation,
     attestation_validation: ingress.AttestationValidation,
     peers: admission.Admission,
+    subscriptions: std.AutoHashMap([32]u8, RemoteSubscriptions),
     seen: std.AutoHashMap([32]u8, void),
     seen_order: [seen_capacity][32]u8 = undefined,
     seen_len: usize = 0,
@@ -69,12 +84,16 @@ pub const Service = struct {
         var seen = std.AutoHashMap([32]u8, void).init(allocator);
         errdefer seen.deinit();
         try seen.ensureTotalCapacity(seen_capacity);
-        return .{ .allocator = allocator, .digest = digest, .block_topic = block_topic, .attestation_topics = attestation_topics, .block_validation = block_validation, .attestation_validation = attestation_validation, .peers = peers, .seen = seen };
+        var subscriptions = std.AutoHashMap([32]u8, RemoteSubscriptions).init(allocator);
+        errdefer subscriptions.deinit();
+        try subscriptions.ensureTotalCapacity(@intCast(max_peers));
+        return .{ .allocator = allocator, .digest = digest, .block_topic = block_topic, .attestation_topics = attestation_topics, .block_validation = block_validation, .attestation_validation = attestation_validation, .peers = peers, .subscriptions = subscriptions, .seen = seen };
     }
 
     /// Release topic names, the bounded duplicate cache, and peer scores.
     pub fn deinit(self: *Service) void {
         self.seen.deinit();
+        self.subscriptions.deinit();
         self.peers.deinit();
         for (self.attestation_topics) |name| if (name) |owned| self.allocator.free(owned);
         self.allocator.free(self.block_topic);
@@ -82,15 +101,37 @@ pub const Service = struct {
 
     /// Admit a transport-authenticated peer within the configured table limit.
     pub fn connect(self: *Service, peer_id: [32]u8) !void {
-        return self.peers.connect(peer_id);
+        const already_connected = if (self.peers.state(peer_id)) |state| state.connected else false;
+        try self.peers.connect(peer_id);
+        if (!already_connected) self.subscriptions.putAssumeCapacity(peer_id, .{});
     }
 
     /// Retain a peer's invalid-message count when its stream closes.
     pub fn disconnect(self: *Service, peer_id: [32]u8) void {
         self.peers.disconnect(peer_id);
+        _ = self.subscriptions.remove(peer_id);
     }
 
-    /// Decode one complete RPC, then deliver only subscribed, valid publishes.
+    /// Copy connected peers subscribed to a local block or attestation topic.
+    /// Returns BufferTooSmall without writing beyond the caller's output slice.
+    pub fn recipients(self: *Service, name: []const u8, output: [][32]u8) !usize {
+        const selected = self.classify(name) orelse return error.UnknownTopic;
+        var count: usize = 0;
+        var iterator = self.subscriptions.iterator();
+        while (iterator.next()) |entry| {
+            const interested = switch (selected) {
+                .block => entry.value_ptr.block,
+                .attestation => |subnet| entry.value_ptr.attestations & (@as(u64, 1) << @intCast(subnet)) != 0,
+            };
+            if (!interested or !self.peers.state(entry.key_ptr.*).?.connected) continue;
+            if (count == output.len) return error.BufferTooSmall;
+            output[count] = entry.key_ptr.*;
+            count += 1;
+        }
+        return count;
+    }
+
+    /// Decode one complete RPC, then apply subscriptions and valid publishes.
     /// The caller owns the frame and supplies a transport-authenticated peer ID.
     pub fn receive(self: *Service, peer_id: [32]u8, frame: []const u8) !void {
         try self.peers.requirePeer(peer_id);
@@ -98,20 +139,24 @@ pub const Service = struct {
             self.peers.noteInvalid(peer_id);
             return err;
         };
-        for (parsed.items[0..parsed.len]) |publish| {
-            const kind: wire.Topic = if (std.mem.eql(u8, publish.topic, self.block_topic)) .block else blk: {
-                for (self.attestation_topics) |maybe_name| {
-                    const name = maybe_name orelse continue;
-                    if (std.mem.eql(u8, publish.topic, name)) break :blk .attestation;
-                }
-                continue;
-            };
+        const remote = self.subscriptions.getPtr(peer_id).?;
+        for (parsed.subscriptions[0..parsed.subscription_len]) |subscription| {
+            const selected = self.classify(subscription.topic) orelse continue;
+            switch (selected) {
+                .block => remote.block = subscription.subscribe,
+                .attestation => |subnet| {
+                    const mask = @as(u64, 1) << @intCast(subnet);
+                    if (subscription.subscribe) remote.attestations |= mask else remote.attestations &= ~mask;
+                },
+            }
+        }
+        for (parsed.publishes[0..parsed.publish_len]) |publish| {
+            const selected = self.classify(publish.topic) orelse continue;
             const hash = messageHash(publish);
             if (self.seen.contains(hash)) continue;
-            switch (kind) {
+            switch (selected) {
                 .block => try self.peers.receiveBlock(peer_id, self.digest, publish.data, self.block_validation),
                 .attestation => try self.peers.receiveAttestation(peer_id, self.digest, publish.data, self.attestation_validation),
-                else => unreachable,
             }
             if (self.seen_len == seen_capacity) {
                 _ = self.seen.remove(self.seen_order[self.seen_next]);
@@ -122,6 +167,16 @@ pub const Service = struct {
             self.seen_order[self.seen_next] = hash;
             self.seen_next = (self.seen_next + 1) % seen_capacity;
         }
+    }
+
+    /// Match only topics this service follows at its configured fork digest.
+    fn classify(self: *const Service, name: []const u8) ?TopicSelection {
+        if (std.mem.eql(u8, name, self.block_topic)) return .block;
+        for (self.attestation_topics, 0..) |maybe_name, subnet| {
+            const topic_name = maybe_name orelse continue;
+            if (std.mem.eql(u8, name, topic_name)) return .{ .attestation = @intCast(subnet) };
+        }
+        return null;
     }
 };
 
@@ -138,7 +193,21 @@ pub fn encodePublish(allocator: std.mem.Allocator, topic: []const u8, data: []co
     return rpc.toOwnedSlice(allocator);
 }
 
-/// Parse all publish fields before allowing any consensus callback to run.
+/// Encode one subscription update in the libp2p Gossipsub RPC format.
+pub fn encodeSubscription(allocator: std.mem.Allocator, topic: []const u8, subscribe: bool) ![]u8 {
+    if (topic.len == 0 or topic.len > max_topic_size) return error.InvalidGossipRpc;
+    var option: std.ArrayList(u8) = .empty;
+    defer option.deinit(allocator);
+    try appendVarint(allocator, &option, @as(u64, SubscriptionField.subscribe) << field_shift | WireType.varint);
+    try appendVarint(allocator, &option, @intFromBool(subscribe));
+    try appendBytes(allocator, &option, SubscriptionField.topic, topic);
+    var rpc: std.ArrayList(u8) = .empty;
+    errdefer rpc.deinit(allocator);
+    try appendBytes(allocator, &rpc, RpcField.subscription, option.items);
+    return rpc.toOwnedSlice(allocator);
+}
+
+/// Parse all subscription and publish fields before changing peer state.
 fn decodeRpc(bytes: []const u8, max_data: usize) !Parsed {
     if (bytes.len > max_rpc_size) return error.PayloadTooLarge;
     var result = Parsed{};
@@ -146,15 +215,47 @@ fn decodeRpc(bytes: []const u8, max_data: usize) !Parsed {
     while (cursor < bytes.len) {
         const key = try readVarint(bytes, &cursor);
         if (key >> field_shift == 0) return error.InvalidGossipRpc;
-        if (key >> field_shift != RpcField.publish) {
-            try skipField(bytes, &cursor, @truncate(key & wire_mask));
-            continue;
+        switch (key >> field_shift) {
+            RpcField.subscription => {
+                if (key & wire_mask != WireType.bytes or result.subscription_len == max_subscriptions) return error.InvalidGossipRpc;
+                result.subscriptions[result.subscription_len] = try decodeSubscription(try readBytes(bytes, &cursor));
+                result.subscription_len += 1;
+            },
+            RpcField.publish => {
+                if (key & wire_mask != WireType.bytes or result.publish_len == max_publishes) return error.InvalidGossipRpc;
+                result.publishes[result.publish_len] = try decodeMessage(try readBytes(bytes, &cursor), max_data);
+                result.publish_len += 1;
+            },
+            else => try skipField(bytes, &cursor, @truncate(key & wire_mask)),
         }
-        if (key & wire_mask != WireType.bytes or result.len == max_publishes) return error.InvalidGossipRpc;
-        result.items[result.len] = try decodeMessage(try readBytes(bytes, &cursor), max_data);
-        result.len += 1;
     }
     return result;
+}
+
+/// Read one subscription update with a canonical boolean and topic.
+fn decodeSubscription(bytes: []const u8) !Subscription {
+    var cursor: usize = 0;
+    var subscribe: ?bool = null;
+    var topic: ?[]const u8 = null;
+    while (cursor < bytes.len) {
+        const key = try readVarint(bytes, &cursor);
+        switch (key >> field_shift) {
+            SubscriptionField.subscribe => {
+                if (key & wire_mask != WireType.varint or subscribe != null) return error.InvalidGossipRpc;
+                const value = try readVarint(bytes, &cursor);
+                if (value > 1) return error.InvalidGossipRpc;
+                subscribe = value == 1;
+            },
+            SubscriptionField.topic => {
+                if (key & wire_mask != WireType.bytes or topic != null) return error.InvalidGossipRpc;
+                topic = try readBytes(bytes, &cursor);
+                if (topic.?.len == 0 or topic.?.len > max_topic_size) return error.InvalidGossipRpc;
+            },
+            0 => return error.InvalidGossipRpc,
+            else => try skipField(bytes, &cursor, @truncate(key & wire_mask)),
+        }
+    }
+    return .{ .topic = topic orelse return error.InvalidGossipRpc, .subscribe = subscribe orelse return error.InvalidGossipRpc };
 }
 
 /// Require one topic and data field, with Ethereum's unsigned gossip policy.
@@ -259,9 +360,9 @@ test "publish RPC accepts canonical unsigned fields and rejects malformed envelo
     const encoded = try encodePublish(allocator, "topic", "data");
     defer allocator.free(encoded);
     const parsed = try decodeRpc(encoded, 16);
-    try std.testing.expectEqual(@as(usize, 1), parsed.len);
-    try std.testing.expectEqualStrings("topic", parsed.items[0].topic);
-    try std.testing.expectEqualStrings("data", parsed.items[0].data);
+    try std.testing.expectEqual(@as(usize, 1), parsed.publish_len);
+    try std.testing.expectEqualStrings("topic", parsed.publishes[0].topic);
+    try std.testing.expectEqualStrings("data", parsed.publishes[0].data);
     try std.testing.expectError(error.InvalidGossipRpc, decodeRpc(&.{ 0x12, 0x80 }, 16));
     try std.testing.expectError(error.InvalidGossipRpc, decodeRpc(&.{ 0x12, 0x80, 0x00 }, 16));
     try std.testing.expectError(error.PayloadTooLarge, decodeRpc(encoded, 3));
@@ -286,7 +387,7 @@ test "publish RPC accepts canonical unsigned fields and rejects malformed envelo
     try extended.appendSlice(allocator, &([_]u8{0} ** @sizeOf(u32)));
     try appendBytes(allocator, &extended, unknown_field, "ignored");
     try extended.appendSlice(allocator, encoded);
-    try std.testing.expectEqual(@as(usize, 1), (try decodeRpc(extended.items, 16)).len);
+    try std.testing.expectEqual(@as(usize, 1), (try decodeRpc(extended.items, 16)).publish_len);
 
     var extended_message: std.ArrayList(u8) = .empty;
     defer extended_message.deinit(allocator);
@@ -296,7 +397,33 @@ test "publish RPC accepts canonical unsigned fields and rejects malformed envelo
     var extended_rpc: std.ArrayList(u8) = .empty;
     defer extended_rpc.deinit(allocator);
     try appendBytes(allocator, &extended_rpc, RpcField.publish, extended_message.items);
-    try std.testing.expectEqual(@as(usize, 1), (try decodeRpc(extended_rpc.items, 16)).len);
+    try std.testing.expectEqual(@as(usize, 1), (try decodeRpc(extended_rpc.items, 16)).publish_len);
+}
+
+test "subscription RPC requires a bounded topic and canonical boolean" {
+    const allocator = std.testing.allocator;
+    const encoded = try encodeSubscription(allocator, "topic", true);
+    defer allocator.free(encoded);
+    const parsed = try decodeRpc(encoded, 16);
+    try std.testing.expectEqual(@as(usize, 1), parsed.subscription_len);
+    try std.testing.expect(parsed.subscriptions[0].subscribe);
+    try std.testing.expectEqualStrings("topic", parsed.subscriptions[0].topic);
+    try std.testing.expectError(error.InvalidGossipRpc, encodeSubscription(allocator, "", true));
+
+    var option: std.ArrayList(u8) = .empty;
+    defer option.deinit(allocator);
+    try appendVarint(allocator, &option, @as(u64, SubscriptionField.subscribe) << field_shift | WireType.varint);
+    try appendVarint(allocator, &option, 2);
+    try appendBytes(allocator, &option, SubscriptionField.topic, "topic");
+    var malformed: std.ArrayList(u8) = .empty;
+    defer malformed.deinit(allocator);
+    try appendBytes(allocator, &malformed, RpcField.subscription, option.items);
+    try std.testing.expectError(error.InvalidGossipRpc, decodeRpc(malformed.items, 16));
+
+    var excessive: std.ArrayList(u8) = .empty;
+    defer excessive.deinit(allocator);
+    for (0..max_subscriptions + 1) |_| try excessive.appendSlice(allocator, encoded);
+    try std.testing.expectError(error.InvalidGossipRpc, decodeRpc(excessive.items, 16));
 }
 
 test "gossip RPC validates blocks and attestations before delivery and retains peer scores" {
@@ -341,6 +468,23 @@ test "gossip RPC validates blocks and attestations before delivery and retains p
     defer service.deinit();
     try service.connect(bad_peer);
     try service.connect(good_peer);
+    var publisher = try Service.init(allocator, config, digest, &.{3}, 1, 3, block_gate, att_gate);
+    defer publisher.deinit();
+    try publisher.connect(bad_peer);
+    var recipients: [1][32]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), try publisher.recipients(publisher.block_topic, &recipients));
+    const block_subscribe = try encodeSubscription(allocator, service.block_topic, true);
+    defer allocator.free(block_subscribe);
+    var malformed_subscription_batch: std.ArrayList(u8) = .empty;
+    defer malformed_subscription_batch.deinit(allocator);
+    try malformed_subscription_batch.appendSlice(allocator, block_subscribe);
+    try malformed_subscription_batch.appendSlice(allocator, &.{ 0x12, 0x80 });
+    try std.testing.expectError(error.InvalidGossipRpc, publisher.receive(bad_peer, malformed_subscription_batch.items));
+    try std.testing.expectEqual(@as(usize, 0), try publisher.recipients(publisher.block_topic, &recipients));
+    try publisher.receive(bad_peer, block_subscribe);
+    try std.testing.expectEqual(@as(usize, 1), try publisher.recipients(publisher.block_topic, &recipients));
+    try std.testing.expectEqual(bad_peer, recipients[0]);
+    try std.testing.expectError(error.BufferTooSmall, publisher.recipients(publisher.block_topic, recipients[0..0]));
     const block_data = try wire.encodeGossip(allocator, raw_block, config.max_encoded_size);
     defer allocator.free(block_data);
     const block_rpc = try encodePublish(allocator, service.block_topic, block_data);
@@ -350,6 +494,10 @@ test "gossip RPC validates blocks and attestations before delivery and retains p
     try std.testing.expectEqual(@as(usize, 1), counts.blocks);
     const att_data = try wire.encodeGossip(allocator, raw_attestation, config.max_encoded_size);
     defer allocator.free(att_data);
+    const att_subscribe = try encodeSubscription(allocator, service.attestation_topics[3].?, true);
+    defer allocator.free(att_subscribe);
+    try publisher.receive(bad_peer, att_subscribe);
+    try std.testing.expectEqual(@as(usize, 1), try publisher.recipients(publisher.attestation_topics[3].?, &recipients));
     const att_rpc = try encodePublish(allocator, service.attestation_topics[3].?, att_data);
     defer allocator.free(att_rpc);
     try service.receive(good_peer, att_rpc);
@@ -360,6 +508,14 @@ test "gossip RPC validates blocks and attestations before delivery and retains p
     defer allocator.free(other_rpc);
     try service.receive(good_peer, other_rpc);
     try std.testing.expectEqual(@as(usize, 1), counts.attestations);
+    try std.testing.expectError(error.UnknownTopic, publisher.recipients(other_topic, &recipients));
+    const att_unsubscribe = try encodeSubscription(allocator, service.attestation_topics[3].?, false);
+    defer allocator.free(att_unsubscribe);
+    try publisher.receive(bad_peer, att_unsubscribe);
+    try std.testing.expectEqual(@as(usize, 0), try publisher.recipients(publisher.attestation_topics[3].?, &recipients));
+    publisher.disconnect(bad_peer);
+    try publisher.connect(bad_peer);
+    try std.testing.expectEqual(@as(usize, 0), try publisher.recipients(publisher.block_topic, &recipients));
     const malformed_rpc = try encodePublish(allocator, service.block_topic, &.{ 0xff, 0xff });
     defer allocator.free(malformed_rpc);
     try std.testing.expectError(error.MalformedBlock, service.receive(bad_peer, malformed_rpc));
