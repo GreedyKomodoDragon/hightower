@@ -67,6 +67,8 @@ Chain:      [Block 0] ───────────────────�
 | Fork digest | Four bytes that identify a chain's current consensus fork for network messages. |
 | Gossipsub | The peer-to-peer protocol that spreads consensus messages through subscribed topics. |
 | Multistream-select | The short exchange on a peer stream that chooses an exact application protocol ID before its messages are sent. |
+| Noise XX | A three-message peer handshake that exchanges encryption keys and proves both peers' identities before application messages are accepted. |
+| Noise static key | An X25519 public key used by a peer's Noise handshake; its libp2p identity signs it to bind the encrypted channel to that peer. |
 | Aggregate and proof | A combined attestation, the aggregator's selection proof, and its signature, shared on a global gossip topic. |
 | Subnet | A numbered gossip topic group used to distribute attestations or data columns. |
 | Req/Resp | The consensus network's request and response streams for fetching peer data. |
