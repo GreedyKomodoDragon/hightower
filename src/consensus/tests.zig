@@ -33,6 +33,7 @@ test {
     _ = @import("discovery_bootstrap.zig");
     _ = @import("p2p_admission.zig");
     _ = @import("p2p_gossip.zig");
+    _ = @import("p2p_gossip_session.zig");
     _ = @import("discv5_messages.zig");
     _ = @import("discv5_packets.zig");
     _ = @import("discv5_session.zig");

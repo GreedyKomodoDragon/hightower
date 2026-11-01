@@ -135,6 +135,7 @@ pub fn offer(allocator: std.mem.Allocator, protocol: Protocol) ![]u8 {
 /// Answer one event at a time, leaving unread application bytes with the caller.
 pub const Responder = struct {
     decoder: Decoder = .{},
+    allowed: ?Protocol = null,
     phase: enum { header, proposal, selected } = .header,
 
     pub const Result = struct { consumed: usize, response: ?[]u8 = null, selected: ?Protocol = null };
@@ -151,6 +152,9 @@ pub const Responder = struct {
         }
         switch (event) {
             .protocol => |protocol| {
+                if (self.allowed) |allowed| {
+                    if (protocol != allowed) return .{ .consumed = parsed.consumed, .response = try encodeLine(allocator, unavailable) };
+                }
                 const response = try encodeLine(allocator, protocol.id());
                 self.phase = .selected;
                 return .{ .consumed = parsed.consumed, .response = response, .selected = protocol };
