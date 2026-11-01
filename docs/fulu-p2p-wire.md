@@ -10,6 +10,8 @@
 
 `consensus.P2PRequests` decodes bounded columns-by-root and columns-by-range requests, delegates lookups to the verified column store, and returns one fork-scoped response chunk per served sidecar. Unknown or uncustodied roots are omitted according to the protocol. The caller owns and must free each item in `EncodedChunks` with `deinit`.
 
+`consensus.P2PControl` encodes and decodes the pinned Status v2, Ping v1, and Metadata v3 SSZ requests and successful response chunks in bounded Req/Resp Snappy framing. Status includes Fulu's earliest available slot; compare its fork digest with the current local fork before accepting a peer. The caller checks finalized-chain compatibility before using a peer's head. Ping carries a metadata sequence number, while Metadata carries attestation and sync subnet bits plus the custody group count. The codec checks exact SSZ lengths and the same custody range as ENR. A live transport still needs to negotiate protocol IDs, enforce timeouts, and exchange these payloads over authenticated streams.
+
 The transport must enforce read timeouts, append `/ssz_snappy` to protocol prefixes, and handle peer scoring. The Snappy block writer currently emits literals, so a near-limit gossip message can exceed its encoded-size cap and be rejected by `encodeGossip`. The peer transport, discovery, and two-node test are not implemented by these modules.
 
 `consensus.ENR` encodes and verifies bounded, signed IPv4 node records with the Fulu `eth2`, `cgc`, and `nfd` fields. Call `requireFork` on a decoded record before adding it to a discovery candidate table. The record codec alone does not exchange discv5 packets or establish a consensus peer connection.
