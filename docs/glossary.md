@@ -67,6 +67,7 @@ Chain:      [Block 0] ───────────────────�
 | Discv5 identity proof | A signature that binds a node's ENR key to a WHOAREYOU challenge, an ephemeral key, and the intended recipient. |
 | Fork digest | Four bytes that identify a chain's current consensus fork for network messages. |
 | Gossipsub | The peer-to-peer protocol that spreads consensus messages through subscribed topics. |
+| GRAFT | A Gossipsub control message asking a peer to join the sender's mesh for a topic. |
 | Multistream-select | The short exchange on a peer stream that chooses an exact application protocol ID before its messages are sent. |
 | Yamux | A stream multiplexer that carries separate gossip and request streams over one authenticated peer connection. |
 | Noise XX | A three-message peer handshake that exchanges encryption keys and proves both peers' identities before application messages are accepted. |

@@ -58,4 +58,7 @@ pub const Discv5Handshake = @import("discv5_handshake.zig");
 pub const Discv5Udp = @import("discv5_udp.zig");
 pub const Discv5Discovery = @import("discv5_discovery.zig");
 pub const computeWeakSubjectivityPeriod = @import("helpers.zig").computeWeakSubjectivityPeriod;
+pub const computeForkDigest = @import("helpers.zig").computeForkDigest;
+pub const BLOB_SCHEDULE = @import("helpers.zig").BLOB_SCHEDULE;
+pub const BlobParameters = @import("helpers.zig").BlobParameters;
 pub const isWithinWeakSubjectivityPeriod = @import("fork_choice.zig").isWithinWeakSubjectivityPeriod;

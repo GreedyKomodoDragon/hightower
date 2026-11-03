@@ -190,6 +190,30 @@ pub const Store = struct {
         try self.database.write(&.{ .{ .put = .{ .key = &key, .value = value } }, .{ .put = .{ .key = &slot_key, .value = &.{} } } });
     }
 
+    /// Store a sidecar from a trusted local devnet producer without re-running
+    /// proposer or KZG checks. The interop fixture uses this only for a local
+    /// Prysm node it started; production gossip and Req/Resp use `put`.
+    pub fn putInterop(self: *Store, sidecar: *const fulu.DataColumnSidecar, block: *const fulu.BeaconBlock) !void {
+        if (!self.samples.contains(sidecar.index)) return error.UnselectedColumn;
+        const root = try merkle.HashTreeRoot(self.allocator, block.*);
+        const bytes = try ssz.serializeAlloc(self.allocator, sidecar.*);
+        defer self.allocator.free(bytes);
+        const key = dataKey(root, @intCast(sidecar.index));
+        const slot_key = slotKey(block.slot, root, @intCast(sidecar.index));
+        const value = try self.allocator.alloc(u8, 8 + bytes.len);
+        defer self.allocator.free(value);
+        std.mem.writeInt(u64, value[0..8], block.slot, .little);
+        @memcpy(value[8..], bytes);
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        const existing = try self.database.get(self.allocator, &key);
+        if (existing) |old| {
+            self.allocator.free(old);
+            return error.DuplicateColumn;
+        }
+        try self.database.write(&.{ .{ .put = .{ .key = &key, .value = value } }, .{ .put = .{ .key = &slot_key, .value = &.{} } } });
+    }
+
     /// Report whether every selected sample for a blob-carrying block exists.
     pub fn available(self: *Store, root: fulu.Root, block: *const fulu.BeaconBlock) !bool {
         if (block.body.blob_kzg_commitments.data.len == 0) return true;

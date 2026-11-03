@@ -102,6 +102,15 @@ pub const Service = struct {
         return self.candidates.add(uri);
     }
 
+    /// Trust an already verified ENR, such as one logged by a local devnet
+    /// peer, and mark it discovered so the transport may dial it without a
+    /// UDP handshake.
+    pub fn addTrusted(self: *Service, record: enr.Record) !void {
+        try self.candidates.addVerified(record);
+        const peer = try self.ensurePeer(record.node_id);
+        peer.discovered = true;
+    }
+
     /// Send a fresh unauthenticated probe to a verified bootstrap candidate.
     pub fn probe(self: *Service, id: [32]u8) !void {
         const record = self.candidates.get(id) orelse return error.UnknownPeer;

@@ -62,13 +62,15 @@ fn validate(frame: Frame) !void {
     if (frame.flags.reserved != 0 or frame.data.len > max_data) return error.InvalidYamuxFrame;
     switch (frame.kind) {
         .data => {
-            if (frame.stream_id == 0 or frame.flags.rst) return error.InvalidYamuxFrame;
+            if (frame.stream_id == 0) return error.InvalidYamuxFrame;
+            if (frame.flags.rst and (frame.data.len != 0 or frame.flags.syn or frame.flags.fin)) return error.InvalidYamuxFrame;
         },
         .window_update => {
-            if (frame.stream_id == 0 or frame.data.len != 0 or frame.flags.fin or frame.flags.rst or frame.value == 0) return error.InvalidYamuxFrame;
+            if (frame.stream_id == 0 or frame.data.len != 0) return error.InvalidYamuxFrame;
         },
         .ping => {
-            if (frame.stream_id != 0 or frame.data.len != 0 or frame.flags.syn or frame.flags.fin or frame.flags.rst) return error.InvalidYamuxFrame;
+            if (frame.stream_id != 0 or frame.data.len != 0 or frame.flags.fin or frame.flags.rst) return error.InvalidYamuxFrame;
+            if (frame.flags.syn and frame.flags.ack) return error.InvalidYamuxFrame;
         },
         .go_away => {
             if (frame.stream_id != 0 or frame.data.len != 0 or @as(u16, @bitCast(frame.flags)) != 0 or frame.value > 2) return error.InvalidYamuxFrame;
@@ -89,5 +91,7 @@ test "Yamux codec keeps streams separate and rejects invalid frames" {
     altered[11] += 1;
     try std.testing.expectError(error.InvalidYamuxFrame, decode(altered));
     try std.testing.expectError(error.InvalidYamuxFrame, encode(allocator, .{ .kind = .data, .stream_id = 0, .data = "bad" }));
-    try std.testing.expectError(error.InvalidYamuxFrame, encode(allocator, .{ .kind = .window_update, .stream_id = 1, .value = 0 }));
+    const ack = try encode(allocator, .{ .kind = .window_update, .flags = .{ .ack = true }, .stream_id = 1, .value = 0 });
+    defer allocator.free(ack);
+    try std.testing.expect((try decode(ack)).flags.ack);
 }

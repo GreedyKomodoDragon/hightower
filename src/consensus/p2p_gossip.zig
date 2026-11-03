@@ -27,6 +27,7 @@ const wire_mask = 0b111;
 const RpcField = struct {
     const subscription = 1;
     const publish = 2;
+    const graft = 5;
 };
 const SubscriptionField = struct {
     const subscribe = 1;
@@ -78,8 +79,9 @@ pub const Service = struct {
     aggregate_validation: ingress.AggregateValidation,
     peers: admission.Admission,
     subscriptions: std.AutoHashMap([32]u8, RemoteSubscriptions),
-    seen: std.AutoHashMap([32]u8, void),
-    seen_order: [seen_capacity][32]u8 = undefined,
+    connection_counts: std.AutoHashMap([32]u8, u32),
+    seen: std.AutoHashMap([20]u8, void),
+    seen_order: [seen_capacity][20]u8 = undefined,
     seen_len: usize = 0,
     seen_next: usize = 0,
 
@@ -108,18 +110,22 @@ pub const Service = struct {
                 column_topics[subnet] = try wire.topicName(allocator, digest, .data_column, subnet);
             }
         }
-        var seen = std.AutoHashMap([32]u8, void).init(allocator);
+        var seen = std.AutoHashMap([20]u8, void).init(allocator);
         errdefer seen.deinit();
         try seen.ensureTotalCapacity(seen_capacity);
         var subscriptions = std.AutoHashMap([32]u8, RemoteSubscriptions).init(allocator);
         errdefer subscriptions.deinit();
         try subscriptions.ensureTotalCapacity(@intCast(max_peers));
-        return .{ .allocator = allocator, .digest = digest, .block_topic = block_topic, .aggregate_topic = aggregate_topic, .attestation_topics = attestation_topics, .column_topics = column_topics, .column_route = column_route, .block_validation = block_validation, .attestation_validation = attestation_validation, .aggregate_validation = aggregate_validation, .peers = peers, .subscriptions = subscriptions, .seen = seen };
+        var connection_counts = std.AutoHashMap([32]u8, u32).init(allocator);
+        errdefer connection_counts.deinit();
+        try connection_counts.ensureTotalCapacity(@intCast(max_peers));
+        return .{ .allocator = allocator, .digest = digest, .block_topic = block_topic, .aggregate_topic = aggregate_topic, .attestation_topics = attestation_topics, .column_topics = column_topics, .column_route = column_route, .block_validation = block_validation, .attestation_validation = attestation_validation, .aggregate_validation = aggregate_validation, .peers = peers, .subscriptions = subscriptions, .connection_counts = connection_counts, .seen = seen };
     }
 
     /// Release topic names, the bounded duplicate cache, and peer scores.
     pub fn deinit(self: *Service) void {
         self.seen.deinit();
+        self.connection_counts.deinit();
         self.subscriptions.deinit();
         self.peers.deinit();
         for (self.attestation_topics) |name| if (name) |owned| self.allocator.free(owned);
@@ -128,15 +134,30 @@ pub const Service = struct {
         self.allocator.free(self.block_topic);
     }
 
-    /// Admit a transport-authenticated peer within the configured table limit.
+    /// Admit a transport-authenticated peer and count this gossip stream.
+    /// libp2p uses one outbound and one inbound stream per peer, so admission
+    /// ends only when the last stream closes.
     pub fn connect(self: *Service, peer_id: [32]u8) !void {
-        const already_connected = if (self.peers.state(peer_id)) |state| state.connected else false;
+        const entry = try self.connection_counts.getOrPut(peer_id);
+        if (entry.found_existing) {
+            entry.value_ptr.* += 1;
+            return;
+        }
+        entry.value_ptr.* = 1;
+        errdefer _ = self.connection_counts.remove(peer_id);
         try self.peers.connect(peer_id);
-        if (!already_connected) self.subscriptions.putAssumeCapacity(peer_id, .{});
+        self.subscriptions.putAssumeCapacity(peer_id, .{});
     }
 
-    /// Retain a peer's invalid-message count when its stream closes.
+    /// Drop one gossip stream while retaining the peer's score until the last
+    /// stream closes.
     pub fn disconnect(self: *Service, peer_id: [32]u8) void {
+        const entry = self.connection_counts.getPtr(peer_id) orelse return;
+        if (entry.* > 1) {
+            entry.* -= 1;
+            return;
+        }
+        _ = self.connection_counts.remove(peer_id);
         self.peers.disconnect(peer_id);
         _ = self.subscriptions.remove(peer_id);
     }
@@ -170,13 +191,17 @@ pub const Service = struct {
         defer rpc.deinit(self.allocator);
         try appendSubscription(self.allocator, &rpc, self.block_topic, true);
         try appendSubscription(self.allocator, &rpc, self.aggregate_topic, true);
+        try appendGraft(self.allocator, &rpc, self.block_topic);
+        try appendGraft(self.allocator, &rpc, self.aggregate_topic);
         for (self.attestation_topics) |maybe_name| {
             const name = maybe_name orelse continue;
             try appendSubscription(self.allocator, &rpc, name, true);
+            try appendGraft(self.allocator, &rpc, name);
         }
         for (self.column_topics) |maybe_name| {
             const name = maybe_name orelse continue;
             try appendSubscription(self.allocator, &rpc, name, true);
+            try appendGraft(self.allocator, &rpc, name);
         }
         return encodeFrame(self.allocator, rpc.items);
     }
@@ -207,7 +232,7 @@ pub const Service = struct {
         }
         for (parsed.publishes[0..parsed.publish_len]) |publish| {
             const selected = self.classify(publish.topic) orelse continue;
-            const hash = messageHash(publish);
+            const hash = try messageHash(self, publish);
             if (self.seen.contains(hash)) continue;
             switch (selected) {
                 .block => try self.peers.receiveBlock(peer_id, self.digest, publish.data, self.block_validation),
@@ -354,6 +379,15 @@ fn appendSubscription(allocator: std.mem.Allocator, rpc: *std.ArrayList(u8), top
     try appendBytes(allocator, rpc, RpcField.subscription, option.items);
 }
 
+/// Append one GRAFT control update so libp2p adds this stream to its mesh.
+fn appendGraft(allocator: std.mem.Allocator, rpc: *std.ArrayList(u8), topic: []const u8) !void {
+    if (topic.len == 0 or topic.len > max_topic_size) return error.InvalidGossipRpc;
+    var graft: std.ArrayList(u8) = .empty;
+    defer graft.deinit(allocator);
+    try appendBytes(allocator, &graft, 1, topic);
+    try appendBytes(allocator, rpc, RpcField.graft, graft.items);
+}
+
 /// Parse all subscription and publish fields before changing peer state.
 fn decodeRpc(bytes: []const u8, max_data: usize) !Parsed {
     if (bytes.len > max_rpc_size) return error.PayloadTooLarge;
@@ -491,15 +525,27 @@ fn appendVarint(allocator: std.mem.Allocator, output: *std.ArrayList(u8), value:
     try output.append(allocator, @intCast(remaining));
 }
 
-/// Hash a topic and payload with a separator for bounded duplicate tracking.
-fn messageHash(publish: Publish) [32]u8 {
+/// Hash a gossipsub message with the post-Altair Ethereum message ID domain.
+/// A valid Snappy block hashes its decompressed bytes; malformed data hashes
+/// the raw wire bytes so duplicate suppression still matches libp2p.
+fn messageHash(self: *Service, publish: Publish) ![20]u8 {
+    const decoded = wire.decodeGossip(self.allocator, publish.data, self.peers.config.max_encoded_size) catch null;
+    defer if (decoded) |bytes| self.allocator.free(bytes);
+    const payload = decoded orelse publish.data;
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    if (decoded == null) {
+        hasher.update(&.{ 0, 0, 0, 0 });
+    } else {
+        hasher.update(&.{ 1, 0, 0, 0 });
+    }
+    var length: [8]u8 = undefined;
+    std.mem.writeInt(u64, &length, publish.topic.len, .little);
+    hasher.update(&length);
     hasher.update(publish.topic);
-    hasher.update(&.{0});
-    hasher.update(publish.data);
+    hasher.update(payload);
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
-    return digest;
+    return digest[0..20].*;
 }
 
 test "publish RPC accepts canonical unsigned fields and rejects malformed envelopes" {

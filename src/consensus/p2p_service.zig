@@ -84,8 +84,7 @@ pub const Service = struct {
                 if (std.mem.order(u8, &self.discovery_service.local_record.node_id, &candidate.node_id) != .lt) continue;
                 if (self.discovery_service.discoveredRecord(candidate.node_id) == null) continue;
                 self.last_dial_ns = now(self.io);
-                var active = peer.Peer.dial(self.allocator, self.io, self.identity, self.discovery_service, self.gossip_service, self.status, self.metadata, candidate.node_id) catch break;
-                if (self.routes) |routes| active.setRoutes(routes);
+                const active = peer.Peer.dial(self.allocator, self.io, self.identity, self.discovery_service, self.gossip_service, self.status, self.metadata, candidate.node_id, self.routes) catch break;
                 self.connection = active;
                 return;
             }
@@ -112,8 +111,10 @@ pub const Service = struct {
             if (self.connection != null) {
                 stream.close(self.io);
             } else {
-                var active = try peer.Peer.accept(self.allocator, self.io, stream, self.identity, self.discovery_service, self.gossip_service, self.status, self.metadata);
-                if (self.routes) |routes| active.setRoutes(routes);
+                const active = peer.Peer.accept(self.allocator, self.io, stream, self.identity, self.discovery_service, self.gossip_service, self.status, self.metadata, self.routes) catch |err| switch (err) {
+                    error.Timeout, error.EndOfStream => return,
+                    else => return err,
+                };
                 self.connection = active;
             }
         }
@@ -195,11 +196,14 @@ test "two live services discover and connect without a transport address" {
     };
     var context = Context{ .service = &b };
     const thread = try std.Thread.spawn(.{}, Context.run, .{&context});
+    var first_joined = false;
+    defer if (!first_joined) thread.join();
     for (0..200) |_| {
         try a.step(10);
         if (a.connected()) break;
     }
     thread.join();
+    first_joined = true;
     if (context.err) |err| return err;
     try std.testing.expect(a.connected());
     try std.testing.expect(b.connected());
@@ -207,16 +211,22 @@ test "two live services discover and connect without a transport address" {
     gossip_a.peers.noteInvalid(b.discovery_service.local_record.node_id);
     b.connection.?.deinit();
     b.connection = null;
-    try a.step(10);
+    for (0..200) |_| {
+        try a.step(10);
+        if (!a.connected()) break;
+    }
     try std.testing.expect(!a.connected());
     context.err = null;
     context.attempts = 400;
     const retry_thread = try std.Thread.spawn(.{}, Context.run, .{&context});
+    var retry_joined = false;
+    defer if (!retry_joined) retry_thread.join();
     for (0..400) |_| {
         try a.step(10);
         if (a.connected()) break;
     }
     retry_thread.join();
+    retry_joined = true;
     if (context.err) |err| return err;
     try std.testing.expect(a.connected());
     try std.testing.expect(b.connected());

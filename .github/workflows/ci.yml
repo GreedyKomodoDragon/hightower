@@ -80,3 +80,40 @@ jobs:
           go-version-file: scripts/geth-discovery-probe/go.mod
           cache-dependency-path: scripts/geth-discovery-probe/go.sum
       - run: bash scripts/test_discv5_geth.sh
+
+  prysm-p2p-interop:
+    name: Prysm/Geth Fulu P2P interoperability
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: vercel-labs/setup-zig@v1
+        with:
+          version: 0.16.0
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: scripts/prysm-interop/blobtx/go.mod
+          cache-dependency-path: scripts/prysm-interop/blobtx/go.sum
+      - name: Install verified Geth and Prysm binaries
+        run: |
+          mkdir -p "$RUNNER_TEMP/prysm" "$RUNNER_TEMP/geth"
+          archive=geth-linux-amd64-1.17.10-1df30b18.tar.gz
+          curl --fail --location --silent --show-error "https://gethstore.blob.core.windows.net/builds/$archive" --output "$RUNNER_TEMP/$archive"
+          echo "e016aca8cc391c8d5d14dc17c9af589488d99c37ed71d892213c80757935ba64  $RUNNER_TEMP/$archive" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/geth"
+          find "$RUNNER_TEMP/geth" -type f -name geth -exec cp {} "$RUNNER_TEMP/geth-bin" \;
+          for item in \
+            beacon-chain:4e740bd2eabc98863607c649062f2e8720d4e12ccab28fc59ec6e84cbc90da3e \
+            validator:1be08125b3ea8ecf8e59ebfa48dca77745a9c3a45b0fb390c5122a25e9adc39b \
+            prysmctl:9abd90c15ad98b9dbfb288ddb436a3b803676021885e7b6ab1a16d2424831cc6; do
+            name=${item%%:*}
+            hash=${item#*:}
+            curl --fail --location --silent --show-error "https://github.com/OffchainLabs/prysm/releases/download/v7.3.1/$name-v7.3.1-linux-amd64" --output "$RUNNER_TEMP/prysm/$name"
+            echo "$hash  $RUNNER_TEMP/prysm/$name" | sha256sum --check
+          done
+          chmod +x "$RUNNER_TEMP/geth-bin" "$RUNNER_TEMP/prysm/"*
+          echo "GETH_BIN=$RUNNER_TEMP/geth-bin" >> "$GITHUB_ENV"
+          echo "PRYSM_BIN_DIR=$RUNNER_TEMP/prysm" >> "$GITHUB_ENV"
+      - run: bash scripts/test_prysm_geth_interop.sh
+        env:
+          KEEP_INTEROP_DIR: '1'

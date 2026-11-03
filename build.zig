@@ -314,6 +314,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "blst", .module = blst },
             .{ .name = "ssz", .module = ssz_mod },
             .{ .name = "merkle", .module = merkle_mod },
+            .{ .name = "types", .module = types_mod },
             .{ .name = "consensus_preset", .module = consensus_preset_mod },
         },
     });
@@ -410,6 +411,33 @@ pub fn build(b: *std.Build) void {
     });
     const discv5_interop_step = b.step("discv5-interop-fixture", "Build the loopback discv5 interoperability fixture");
     discv5_interop_step.dependOn(&b.addInstallArtifact(discv5_interop_fixture, .{}).step);
+    const p2p_interop_fixture = b.addExecutable(.{
+        .name = "hightower-p2p-interop-fixture",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/consensus/p2p_interop_fixture.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "consensus", .module = consensus_mod },
+                .{ .name = "fulu", .module = fulu_mod },
+                .{ .name = "ssz", .module = ssz_mod },
+                .{ .name = "merkle", .module = merkle_mod },
+            },
+        }),
+    });
+    const p2p_interop_step = b.step("p2p-interop-fixture", "Build the loopback Prysm/Geth P2P interoperability fixture");
+    p2p_interop_step.dependOn(&b.addInstallArtifact(p2p_interop_fixture, .{}).step);
+    const p2p_interop_keys = b.addExecutable(.{
+        .name = "hightower-p2p-interop-keys",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/consensus/p2p_interop_keys.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "blst", .module = blst }},
+        }),
+    });
+    const p2p_interop_keys_step = b.step("p2p-interop-keys", "Build the mock-genesis validator key generator");
+    p2p_interop_keys_step.dependOn(&b.addInstallArtifact(p2p_interop_keys, .{}).step);
     const api_mod = b.addModule("hightower_api", .{
         .root_source_file = b.path("src/api/root.zig"),
         .target = target,

@@ -108,10 +108,26 @@ pub const Connection = struct {
     }
 
     /// Read and authenticate one complete Yamux frame within the deadline.
+    /// Ping frames are answered here so every stream loop sees only data,
+    /// window, reset, and shutdown frames.
     pub fn receive(self: *Connection, deadline_ns: i96) !Received {
-        const bytes = try self.receiveRaw(deadline_ns);
-        errdefer self.allocator.free(bytes);
-        return .{ .bytes = bytes, .frame = try yamux.decode(bytes) };
+        while (true) {
+            const bytes = try self.receiveRaw(deadline_ns);
+            errdefer self.allocator.free(bytes);
+            const frame = try yamux.decode(bytes);
+            switch (frame.kind) {
+                .ping => {
+                    self.allocator.free(bytes);
+                    if (!frame.flags.ack) try self.send(.{ .kind = .ping, .flags = .{ .ack = true }, .stream_id = 0, .value = frame.value });
+                    continue;
+                },
+                .go_away => {
+                    self.allocator.free(bytes);
+                    return error.GoAway;
+                },
+                else => return .{ .bytes = bytes, .frame = frame },
+            }
+        }
     }
 
     /// Return a monotonic deadline after the standard five-second request timeout.
@@ -126,11 +142,11 @@ pub const Connection = struct {
         return writeAll(self.io, self.stream, encrypted);
     }
 
-    /// Read one encrypted length and its bounded ciphertext with one deadline.
+    /// Read one clear length and its bounded ciphertext with one deadline.
     fn receiveRaw(self: *Connection, deadline_ns: i96) ![]u8 {
-        var encrypted_length: [transport.encrypted_length_size]u8 = undefined;
-        try readExact(self.io, self.stream, &encrypted_length, deadline_ns);
-        const length = try self.cipher.decodeLength(&encrypted_length);
+        var record_length: [transport.record_length_size]u8 = undefined;
+        try readExact(self.io, self.stream, &record_length, deadline_ns);
+        const length = try self.cipher.decodeLength(&record_length);
         const body = try self.allocator.alloc(u8, length);
         defer self.allocator.free(body);
         try readExact(self.io, self.stream, body, deadline_ns);
