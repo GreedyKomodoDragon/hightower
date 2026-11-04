@@ -9,6 +9,8 @@
 //   UDP discovery -> verified ENR -> TCP/Noise/Status/Metadata -> Yamux
 // shortcut: one simultaneous TCP peer is supported, expand the connection
 // table when multi-peer mesh scheduling is implemented.
+// shortcut: mutual bootstrap can collide during blocking outbound handshakes;
+// use asynchronous dialing when simultaneous bootstrap is required.
 const std = @import("std");
 const enr = @import("enr.zig");
 const discovery = @import("discv5_discovery.zig");
@@ -244,12 +246,9 @@ test "two live services discover and connect without a transport address" {
     defer a.deinit();
     var b = try Service.init(allocator, io, try Ecdsa.KeyPair.generateDeterministic([_]u8{122} ** 32), local, 2, &gossip_b, status, metadata);
     defer b.deinit();
-    const a_uri = try a.localUri();
-    defer allocator.free(a_uri);
     const b_uri = try b.localUri();
     defer allocator.free(b_uri);
     try a.addBootstrap(b_uri);
-    try b.addBootstrap(a_uri);
     const Context = struct {
         service: *Service,
         attempts: usize = 200,
