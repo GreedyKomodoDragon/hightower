@@ -1,8 +1,8 @@
 // A live node owns its signed discv5 address and one authenticated consensus
 // TCP peer. Discovery probes bootstrap ENRs and refreshes signed candidates;
-// the smaller node ID dials a discovered TCP address to avoid duplicate
-// connections. A lost socket is dropped while the gossip score remains in the
-// caller's service, so a later step may reconnect.
+// any discovered TCP address may be dialled so a single configured bootstrap
+// still connects. A lost socket is dropped while the gossip score remains in
+// the caller's service, so a later step may reconnect.
 //
 //   UDP discovery -> verified ENR -> TCP/Noise/Status/Metadata -> Yamux
 // shortcut: one simultaneous TCP peer is supported, expand the connection
@@ -80,11 +80,13 @@ pub const Service = struct {
     pub fn step(self: *Service, timeout_ms: u32) !void {
         try self.discovery_service.maintain();
         if (self.connection == null and (self.last_dial_ns == 0 or now(self.io) - self.last_dial_ns >= 2 * std.time.ns_per_s)) {
+            self.last_dial_ns = now(self.io);
             for (self.discovery_service.candidates.items.items) |candidate| {
-                if (std.mem.order(u8, &self.discovery_service.local_record.node_id, &candidate.node_id) != .lt) continue;
                 if (self.discovery_service.discoveredRecord(candidate.node_id) == null) continue;
-                self.last_dial_ns = now(self.io);
-                const active = peer.Peer.dial(self.allocator, self.io, self.identity, self.discovery_service, self.gossip_service, self.status, self.metadata, candidate.node_id, self.routes) catch break;
+                const active = peer.Peer.dial(self.allocator, self.io, self.identity, self.discovery_service, self.gossip_service, self.status, self.metadata, candidate.node_id, self.routes) catch |err| switch (err) {
+                    error.OutOfMemory => return err,
+                    else => continue,
+                };
                 self.connection = active;
                 return;
             }
@@ -112,20 +114,18 @@ pub const Service = struct {
                 stream.close(self.io);
             } else {
                 const active = peer.Peer.accept(self.allocator, self.io, stream, self.identity, self.discovery_service, self.gossip_service, self.status, self.metadata, self.routes) catch |err| switch (err) {
-                    error.Timeout, error.EndOfStream => return,
-                    else => return err,
+                    error.OutOfMemory => return err,
+                    else => return,
                 };
                 self.connection = active;
             }
         }
         if (count == 3 and descriptors[2].revents != 0) {
             const active = if (self.connection) |*value| value else return;
-            active.step() catch |err| switch (err) {
-                error.EndOfStream, error.ConnectionResetByPeer, error.PeerBanned => {
-                    active.deinit();
-                    self.connection = null;
-                },
-                else => return err,
+            active.step() catch |err| {
+                active.deinit();
+                self.connection = null;
+                if (err == error.OutOfMemory) return err;
             };
         }
     }
@@ -140,6 +140,47 @@ pub const Service = struct {
 /// Return the awake monotonic clock used to space connection retries.
 fn now(io: std.Io) i96 {
     return std.Io.Clock.awake.now(io).nanoseconds;
+}
+
+test "service ignores an inbound stream that fails authentication" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const ingress = @import("p2p_ingress.zig");
+    const fulu = @import("fulu");
+    const config = ingress.Config{ .genesis_validators_root = [_]u8{1} ** 32, .fulu_version = .{ 6, 0, 0, 0 }, .fulu_epoch = 0, .blob_schedule = &@import("helpers.zig").BLOB_SCHEDULE };
+    const digest = try config.digestAtSlot(0);
+    var marker: u8 = 0;
+    const block_gate = ingress.BlockValidation{ .context = &marker, .validate = struct {
+        /// Accept blocks after the service's ingress gates.
+        fn accept(_: *anyopaque, _: *const fulu.SignedBeaconBlock) !void {}
+    }.accept };
+    const attestation_gate = ingress.AttestationValidation{ .context = &marker, .validate = struct {
+        /// Accept attestations after the service's ingress gates.
+        fn accept(_: *anyopaque, _: *const fulu.Attestation) !void {}
+    }.accept };
+    const aggregate_gate = ingress.AggregateValidation{ .context = &marker, .validate = struct {
+        /// Accept aggregates after the service's ingress gates.
+        fn accept(_: *anyopaque, _: *const fulu.SignedAggregateAndProof) !void {}
+    }.accept };
+    var gossip_service = try gossip.Service.init(allocator, config, digest, &.{}, 1, 3, block_gate, attestation_gate, aggregate_gate, null);
+    defer gossip_service.deinit();
+    var fork_id = [_]u8{0} ** 16;
+    @memcpy(fork_id[0..4], &digest);
+    const local = enr.Local{ .sequence = 1, .ip = .{ 127, 0, 0, 1 }, .udp_port = 0, .tcp_port = 0, .fork_id = fork_id, .next_fork_digest = .{0} ** 4, .custody_group_count = 4 };
+    const status = control.Status{ .fork_digest = digest, .finalized_root = .{0} ** 32, .finalized_epoch = 0, .head_root = .{0} ** 32, .head_slot = 0, .earliest_available_slot = 0 };
+    const metadata = control.MetaData{ .seq_number = 1, .attnets = .{ .data = [_]bool{false} ** 64 }, .syncnets = .{ .data = [_]bool{false} ** 4 }, .custody_group_count = 4 };
+    var service = try Service.init(allocator, io, try Ecdsa.KeyPair.generateDeterministic([_]u8{123} ** 32), local, 2, &gossip_service, status, metadata);
+    defer service.deinit();
+    var intrusive = try service.listener.socket.address.connect(io, .{ .mode = .stream });
+    var write_buffer: [64]u8 = undefined;
+    var writer = intrusive.writer(io, &write_buffer);
+    try writer.interface.writeAll("not a noise handshake");
+    try writer.interface.flush();
+    intrusive.close(io);
+    try service.step(20);
+    try std.testing.expect(!service.connected());
+    try service.step(20);
+    try std.testing.expect(!service.connected());
 }
 
 test "two live services discover and connect without a transport address" {

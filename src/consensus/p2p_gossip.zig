@@ -27,7 +27,13 @@ const wire_mask = 0b111;
 const RpcField = struct {
     const subscription = 1;
     const publish = 2;
-    const graft = 5;
+    const control = 3;
+};
+const ControlField = struct {
+    const graft = 3;
+};
+const GraftField = struct {
+    const topic = 1;
 };
 const SubscriptionField = struct {
     const subscribe = 1;
@@ -189,20 +195,23 @@ pub const Service = struct {
     pub fn localSubscriptionFrame(self: *const Service) ![]u8 {
         var rpc: std.ArrayList(u8) = .empty;
         defer rpc.deinit(self.allocator);
+        var control: std.ArrayList(u8) = .empty;
+        defer control.deinit(self.allocator);
         try appendSubscription(self.allocator, &rpc, self.block_topic, true);
         try appendSubscription(self.allocator, &rpc, self.aggregate_topic, true);
-        try appendGraft(self.allocator, &rpc, self.block_topic);
-        try appendGraft(self.allocator, &rpc, self.aggregate_topic);
+        try appendGraft(self.allocator, &control, self.block_topic);
+        try appendGraft(self.allocator, &control, self.aggregate_topic);
         for (self.attestation_topics) |maybe_name| {
             const name = maybe_name orelse continue;
             try appendSubscription(self.allocator, &rpc, name, true);
-            try appendGraft(self.allocator, &rpc, name);
+            try appendGraft(self.allocator, &control, name);
         }
         for (self.column_topics) |maybe_name| {
             const name = maybe_name orelse continue;
             try appendSubscription(self.allocator, &rpc, name, true);
-            try appendGraft(self.allocator, &rpc, name);
+            try appendGraft(self.allocator, &control, name);
         }
+        try appendBytes(self.allocator, &rpc, RpcField.control, control.items);
         return encodeFrame(self.allocator, rpc.items);
     }
 
@@ -234,6 +243,7 @@ pub const Service = struct {
             const selected = self.classify(publish.topic) orelse continue;
             const hash = try messageHash(self, publish);
             if (self.seen.contains(hash)) continue;
+            self.noteSeen(hash);
             switch (selected) {
                 .block => try self.peers.receiveBlock(peer_id, self.digest, publish.data, self.block_validation),
                 .aggregate => try self.peers.receiveAggregate(peer_id, self.digest, publish.data, self.aggregate_validation),
@@ -243,15 +253,19 @@ pub const Service = struct {
                     try self.peers.receiveColumn(peer_id, self.digest, subnet, publish.data, route.store, route.settings, route.lookup);
                 },
             }
-            if (self.seen_len == seen_capacity) {
-                _ = self.seen.remove(self.seen_order[self.seen_next]);
-            } else {
-                self.seen_len += 1;
-            }
-            self.seen.putAssumeCapacity(hash, {});
-            self.seen_order[self.seen_next] = hash;
-            self.seen_next = (self.seen_next + 1) % seen_capacity;
         }
+    }
+
+    /// Record a gossipsub message ID before validation so redelivery is ignored.
+    fn noteSeen(self: *Service, hash: [20]u8) void {
+        if (self.seen_len == seen_capacity) {
+            _ = self.seen.remove(self.seen_order[self.seen_next]);
+        } else {
+            self.seen_len += 1;
+        }
+        self.seen.putAssumeCapacity(hash, {});
+        self.seen_order[self.seen_next] = hash;
+        self.seen_next = (self.seen_next + 1) % seen_capacity;
     }
 
     /// Match only topics this service follows at its configured fork digest.
@@ -379,13 +393,13 @@ fn appendSubscription(allocator: std.mem.Allocator, rpc: *std.ArrayList(u8), top
     try appendBytes(allocator, rpc, RpcField.subscription, option.items);
 }
 
-/// Append one GRAFT control update so libp2p adds this stream to its mesh.
-fn appendGraft(allocator: std.mem.Allocator, rpc: *std.ArrayList(u8), topic: []const u8) !void {
+/// Append one GRAFT entry to a libp2p ControlMessage under construction.
+fn appendGraft(allocator: std.mem.Allocator, control: *std.ArrayList(u8), topic: []const u8) !void {
     if (topic.len == 0 or topic.len > max_topic_size) return error.InvalidGossipRpc;
     var graft: std.ArrayList(u8) = .empty;
     defer graft.deinit(allocator);
-    try appendBytes(allocator, &graft, 1, topic);
-    try appendBytes(allocator, rpc, RpcField.graft, graft.items);
+    try appendBytes(allocator, &graft, GraftField.topic, topic);
+    try appendBytes(allocator, control, ControlField.graft, graft.items);
 }
 
 /// Parse all subscription and publish fields before changing peer state.
@@ -619,6 +633,76 @@ test "subscription RPC requires a bounded topic and canonical boolean" {
     try std.testing.expectError(error.InvalidGossipRpc, decodeRpc(excessive.items, 16));
 }
 
+/// Collect GRAFT topic IDs from a framed RPC so tests assert the wire nesting.
+fn collectGraftTopics(allocator: std.mem.Allocator, frame: []const u8) ![][]const u8 {
+    var cursor: usize = 0;
+    _ = try readVarint(frame, &cursor);
+    const rpc = frame[cursor..];
+    cursor = 0;
+    var topics: std.ArrayList([]const u8) = .empty;
+    errdefer topics.deinit(allocator);
+    while (cursor < rpc.len) {
+        const key = try readVarint(rpc, &cursor);
+        if (key >> field_shift != RpcField.control) {
+            try skipField(rpc, &cursor, @truncate(key & wire_mask));
+            continue;
+        }
+        if (key & wire_mask != WireType.bytes) return error.InvalidGossipRpc;
+        const control = try readBytes(rpc, &cursor);
+        var control_cursor: usize = 0;
+        while (control_cursor < control.len) {
+            const control_key = try readVarint(control, &control_cursor);
+            if (control_key >> field_shift != ControlField.graft) {
+                try skipField(control, &control_cursor, @truncate(control_key & wire_mask));
+                continue;
+            }
+            if (control_key & wire_mask != WireType.bytes) return error.InvalidGossipRpc;
+            const graft = try readBytes(control, &control_cursor);
+            var graft_cursor: usize = 0;
+            var topic: ?[]const u8 = null;
+            while (graft_cursor < graft.len) {
+                const graft_key = try readVarint(graft, &graft_cursor);
+                if (graft_key >> field_shift != GraftField.topic) {
+                    try skipField(graft, &graft_cursor, @truncate(graft_key & wire_mask));
+                    continue;
+                }
+                if (graft_key & wire_mask != WireType.bytes or topic != null) return error.InvalidGossipRpc;
+                topic = try readBytes(graft, &graft_cursor);
+            }
+            try topics.append(allocator, topic orelse return error.InvalidGossipRpc);
+        }
+    }
+    return topics.toOwnedSlice(allocator);
+}
+
+test "local subscriptions announce GRAFT inside the control message" {
+    const fulu = @import("fulu");
+    const allocator = std.testing.allocator;
+    const config = ingress.Config{ .genesis_validators_root = [_]u8{1} ** 32, .fulu_version = .{ 6, 0, 0, 0 }, .fulu_epoch = 0, .blob_schedule = &@import("helpers.zig").BLOB_SCHEDULE };
+    var unused: u8 = 0;
+    const block_gate = ingress.BlockValidation{ .context = &unused, .validate = struct {
+        /// Accept blocks in this wire-shape test.
+        fn accept(_: *anyopaque, _: *const fulu.SignedBeaconBlock) !void {}
+    }.accept };
+    const attestation_gate = ingress.AttestationValidation{ .context = &unused, .validate = struct {
+        /// Accept attestations in this wire-shape test.
+        fn accept(_: *anyopaque, _: *const fulu.Attestation) !void {}
+    }.accept };
+    const aggregate_gate = ingress.AggregateValidation{ .context = &unused, .validate = struct {
+        /// Accept aggregates in this wire-shape test.
+        fn accept(_: *anyopaque, _: *const fulu.SignedAggregateAndProof) !void {}
+    }.accept };
+    var service = try Service.init(allocator, config, .{ 1, 2, 3, 4 }, &.{}, 1, 3, block_gate, attestation_gate, aggregate_gate, null);
+    defer service.deinit();
+    const frame = try service.localSubscriptionFrame();
+    defer allocator.free(frame);
+    const topics = try collectGraftTopics(allocator, frame);
+    defer allocator.free(topics);
+    try std.testing.expectEqual(@as(usize, 2), topics.len);
+    try std.testing.expectEqualStrings(service.block_topic, topics[0]);
+    try std.testing.expectEqualStrings(service.aggregate_topic, topics[1]);
+}
+
 test "gossip stream assembles split RPCs and rejects bad length prefixes" {
     const allocator = std.testing.allocator;
     const fulu = @import("fulu");
@@ -691,6 +775,37 @@ test "gossip stream assembles split RPCs and rejects bad length prefixes" {
     try std.testing.expectEqual(@as(u8, 3), service.peers.state(peer_id).?.invalid_messages);
     try stream.feed(&service, unsubscribe_frame);
     try std.testing.expectEqual(@as(usize, 0), try service.recipients(service.block_topic, &recipients));
+}
+
+test "duplicate invalid gossip is ignored before validation" {
+    const fulu = @import("fulu");
+    const allocator = std.testing.allocator;
+    const config = ingress.Config{ .genesis_validators_root = [_]u8{1} ** 32, .fulu_version = .{ 6, 0, 0, 0 }, .fulu_epoch = 0, .blob_schedule = &@import("helpers.zig").BLOB_SCHEDULE };
+    var unused: u8 = 0;
+    const block_gate = ingress.BlockValidation{ .context = &unused, .validate = struct {
+        /// Accept blocks reaching the callback; malformed SSZ fails earlier.
+        fn accept(_: *anyopaque, _: *const fulu.SignedBeaconBlock) !void {}
+    }.accept };
+    const attestation_gate = ingress.AttestationValidation{ .context = &unused, .validate = struct {
+        /// Accept attestations unused by this duplicate test.
+        fn accept(_: *anyopaque, _: *const fulu.Attestation) !void {}
+    }.accept };
+    const aggregate_gate = ingress.AggregateValidation{ .context = &unused, .validate = struct {
+        /// Accept aggregates unused by this duplicate test.
+        fn accept(_: *anyopaque, _: *const fulu.SignedAggregateAndProof) !void {}
+    }.accept };
+    var service = try Service.init(allocator, config, .{ 1, 2, 3, 4 }, &.{}, 1, 5, block_gate, attestation_gate, aggregate_gate, null);
+    defer service.deinit();
+    const peer = [_]u8{2} ** 32;
+    try service.connect(peer);
+    const malformed = try wire.encodeGossip(allocator, &.{0}, config.max_encoded_size);
+    defer allocator.free(malformed);
+    const rpc = try encodePublish(allocator, service.block_topic, malformed);
+    defer allocator.free(rpc);
+    try std.testing.expectError(error.EndOfStream, service.receive(peer, rpc));
+    try std.testing.expectEqual(@as(u8, 1), service.peers.state(peer).?.invalid_messages);
+    try service.receive(peer, rpc);
+    try std.testing.expectEqual(@as(u8, 1), service.peers.state(peer).?.invalid_messages);
 }
 
 test "gossip RPC validates blocks attestations and aggregates before delivery" {
@@ -983,6 +1098,9 @@ test "column gossip retains only verified selected sidecars" {
     try std.testing.expectEqual(@as(u8, 2), service.peers.state(peer).?.invalid_messages);
     try std.testing.expect((try store.get(root, 1)) == null);
     known.present = true;
+    service.seen.clearRetainingCapacity();
+    service.seen_len = 0;
+    service.seen_next = 0;
     var wrong_block = signed.message;
     wrong_block.parent_root[0] ^= 1;
     known.block = &wrong_block;

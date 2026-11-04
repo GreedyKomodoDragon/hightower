@@ -124,13 +124,9 @@ pub const Peer = struct {
         defer allocator.free(metadata_chunk.payload);
         self.remote_metadata = try control.decodeMetadataResponse(allocator, &metadata_chunk);
         try self.checkMetadata(peers);
-        if (self.inbound_gossip_stream) |session| {
-            self.gossip_stream = session;
-            self.gossip_id = self.inbound_gossip_id.?;
-            self.inbound_gossip_stream = null;
-            self.inbound_gossip_id = null;
+        if (self.inbound_gossip_stream != null) {
+            self.adoptInboundGossip();
         } else {
-            self.gossip_stream = try gossip_session.Session.init(allocator, service, self.connection.peer_id, .responder);
             try self.acceptGossip();
         }
         errdefer self.gossip_stream.?.deinit();
@@ -167,6 +163,13 @@ pub const Peer = struct {
     pub fn step(self: *Peer) !void {
         while (true) {
             const received = try self.connection.receive(self.connection.deadline());
+            if (received.frame.flags.rst) {
+                const closed_gossip = received.frame.stream_id == self.gossip_id or
+                    (self.inbound_gossip_id != null and received.frame.stream_id == self.inbound_gossip_id.?);
+                received.deinit(self.allocator);
+                if (closed_gossip) return error.StreamReset;
+                continue;
+            }
             if (try self.dispatchInbound(received.frame)) {
                 received.deinit(self.allocator);
                 return;
@@ -178,7 +181,7 @@ pub const Peer = struct {
             defer received.deinit(self.allocator);
             if (received.frame.kind != .data) return error.UnexpectedStream;
             if (try self.dispatchGossip(received.frame)) return;
-            if (!received.frame.flags.syn or received.frame.flags.fin) return error.UnexpectedStream;
+            if (!received.frame.flags.syn) return error.UnexpectedStream;
             try self.serveRequest(received.frame);
             return;
         }
@@ -201,9 +204,12 @@ pub const Peer = struct {
         while (true) {
             const received = try self.connection.receive(deadline_at);
             defer received.deinit(self.allocator);
+            if (received.frame.flags.rst) {
+                if (received.frame.stream_id == id) return error.StreamReset;
+                continue;
+            }
             if (try self.dispatchInbound(received.frame)) continue;
             if (received.frame.kind == .window_update) {
-                if (received.frame.stream_id == id and received.frame.flags.rst) return error.StreamReset;
                 if (received.frame.stream_id == id and received.frame.flags.fin) {
                     if (decoder.pending.items.len != 0) return error.IncompleteResponse;
                     return result;
@@ -414,9 +420,13 @@ pub const Peer = struct {
         while (true) {
             const received = try self.connection.receive(self.connection.deadline());
             defer received.deinit(self.allocator);
+            if (received.frame.flags.rst) {
+                if (received.frame.stream_id == id) return error.StreamClosed;
+                continue;
+            }
             if (received.frame.kind == .window_update) {
                 if (received.frame.stream_id == id) {
-                    if (received.frame.flags.rst or received.frame.flags.fin) return error.StreamClosed;
+                    if (received.frame.flags.fin) return error.StreamClosed;
                     if (received.frame.value == 0) continue;
                     const current = try self.windowFor(id);
                     self.setWindow(id, current + received.frame.value);
@@ -442,6 +452,11 @@ pub const Peer = struct {
             }
             const received = if (pending_index) |index| self.pending_control.orderedRemove(index) else try self.connection.receive(deadline_at);
             errdefer received.deinit(self.allocator);
+            if (received.frame.flags.rst) {
+                if (received.frame.stream_id == id) return error.StreamReset;
+                received.deinit(self.allocator);
+                continue;
+            }
             if (received.frame.stream_id != id and try self.dispatchInbound(received.frame)) {
                 received.deinit(self.allocator);
                 continue;
@@ -449,9 +464,6 @@ pub const Peer = struct {
             if (received.frame.kind == .window_update and (received.frame.stream_id != id or !received.frame.flags.syn and !received.frame.flags.fin and !received.frame.flags.rst)) {
                 received.deinit(self.allocator);
                 continue;
-            }
-            if (received.frame.flags.rst) {
-                return error.StreamReset;
             }
             if (received.frame.kind == .data and received.frame.stream_id != id and received.frame.flags.syn) {
                 try self.serveRequest(received.frame);
@@ -483,6 +495,10 @@ pub const Peer = struct {
         while (true) {
             const received = try self.connection.receive(deadline_at);
             if (received.frame.stream_id != id and received.frame.kind == .data and !received.frame.flags.syn) {
+                if (received.frame.flags.rst) {
+                    received.deinit(self.allocator);
+                    continue;
+                }
                 if (self.pending_control.items.len == 32) {
                     received.deinit(self.allocator);
                     return error.TooManyPendingFrames;
@@ -494,9 +510,13 @@ pub const Peer = struct {
                 continue;
             }
             defer received.deinit(self.allocator);
+            if (received.frame.flags.rst) {
+                if (received.frame.stream_id == id) return error.StreamReset;
+                continue;
+            }
             if (try self.dispatchInbound(received.frame)) continue;
             if (received.frame.kind == .window_update) {
-                if (received.frame.stream_id == id and (received.frame.flags.fin or received.frame.flags.rst)) return error.StreamClosed;
+                if (received.frame.stream_id == id and received.frame.flags.fin) return error.StreamClosed;
                 continue;
             }
             if (try self.dispatchGossip(received.frame)) continue;
@@ -505,6 +525,12 @@ pub const Peer = struct {
             if (parsed.consumed != received.frame.data.len) return error.InvalidNegotiation;
             if (parsed.selected) return;
         }
+    }
+
+    /// Return consumed stream bytes to the peer's Yamux send window.
+    fn creditWindow(self: *Peer, id: u32, bytes: usize) !void {
+        if (bytes == 0) return;
+        try self.connection.send(.{ .kind = .window_update, .stream_id = id, .value = @intCast(bytes) });
     }
 
     /// Negotiate one inbound stream, then answer control or retained-data
@@ -516,6 +542,7 @@ pub const Peer = struct {
         var buffer: std.ArrayList(u8) = .empty;
         defer buffer.deinit(self.allocator);
         try buffer.appendSlice(self.allocator, opening.data);
+        try self.creditWindow(id, opening.data.len);
         var parse_offset: usize = 0;
         var selected: ?multistream.Protocol = null;
         var application_offset: usize = 0;
@@ -539,6 +566,10 @@ pub const Peer = struct {
             if (selected != null or finished) break;
             const received = try self.connection.receive(deadline_at);
             if (received.frame.stream_id != id and received.frame.kind == .data and !received.frame.flags.syn) {
+                if (received.frame.flags.rst) {
+                    received.deinit(self.allocator);
+                    continue;
+                }
                 if (self.pending_control.items.len == 32) {
                     received.deinit(self.allocator);
                     return error.TooManyPendingFrames;
@@ -550,6 +581,10 @@ pub const Peer = struct {
                 continue;
             }
             defer received.deinit(self.allocator);
+            if (received.frame.flags.rst) {
+                if (received.frame.stream_id == id) return error.StreamReset;
+                continue;
+            }
             if (received.frame.kind == .window_update) {
                 if (received.frame.stream_id == id and received.frame.flags.rst) return error.StreamReset;
                 if (received.frame.stream_id == id and received.frame.flags.fin) finished = true;
@@ -559,6 +594,7 @@ pub const Peer = struct {
             if (try self.dispatchInbound(received.frame)) continue;
             if (received.frame.kind != .data or received.frame.stream_id != id or received.frame.flags.syn) return error.InvalidNegotiation;
             try buffer.appendSlice(self.allocator, received.frame.data);
+            try self.creditWindow(id, received.frame.data.len);
             finished = received.frame.flags.fin;
         }
         const protocol = selected orelse return error.InvalidNegotiation;
@@ -573,6 +609,10 @@ pub const Peer = struct {
         while (!finished) {
             const received = try self.connection.receive(deadline_at);
             if (received.frame.stream_id != id and received.frame.kind == .data and !received.frame.flags.syn) {
+                if (received.frame.flags.rst) {
+                    received.deinit(self.allocator);
+                    continue;
+                }
                 if (self.pending_control.items.len == 32) {
                     received.deinit(self.allocator);
                     return error.TooManyPendingFrames;
@@ -584,6 +624,10 @@ pub const Peer = struct {
                 continue;
             }
             defer received.deinit(self.allocator);
+            if (received.frame.flags.rst) {
+                if (received.frame.stream_id == id) return error.StreamReset;
+                continue;
+            }
             if (received.frame.kind == .window_update) {
                 if (received.frame.stream_id == id and received.frame.flags.rst) return error.StreamReset;
                 if (received.frame.stream_id == id and received.frame.flags.fin) finished = true;
@@ -594,7 +638,7 @@ pub const Peer = struct {
             if (received.frame.kind != .data or received.frame.stream_id != id or received.frame.flags.syn) return error.InvalidRequest;
             if (received.frame.data.len > 256 * 1024 - request_bytes.items.len) return error.InvalidRequest;
             try request_bytes.appendSlice(self.allocator, received.frame.data);
-            if (received.frame.data.len != 0) try self.connection.send(.{ .kind = .window_update, .stream_id = id, .value = @intCast(received.frame.data.len) });
+            try self.creditWindow(id, received.frame.data.len);
             finished = received.frame.flags.fin;
         }
         switch (protocol) {
@@ -748,13 +792,34 @@ pub const Peer = struct {
         }
     }
 
-    /// Select an inbound gossip stream and consume its first subscription RPC.
+    /// Move an already negotiated inbound gossip stream into the active slot.
+    fn adoptInboundGossip(self: *Peer) void {
+        const session = self.inbound_gossip_stream orelse return;
+        if (self.gossip_stream) |*existing| existing.deinit();
+        self.gossip_stream = session;
+        self.gossip_id = self.inbound_gossip_id.?;
+        self.inbound_gossip_stream = null;
+        self.inbound_gossip_id = null;
+    }
+
+    /// Accept the peer's inbound gossip stream on whichever Yamux stream it opens.
     fn acceptGossip(self: *Peer) !void {
         const deadline_at = self.connection.deadline();
-        const opening = try self.controlFrame(self.gossip_id, deadline_at);
-        defer opening.deinit(self.allocator);
-        if (!opening.frame.flags.syn) return error.InvalidNegotiation;
-        try self.feedGossip(opening.frame.data);
+        while (true) {
+            if (self.inbound_gossip_stream != null) {
+                self.adoptInboundGossip();
+                return;
+            }
+            const received = try self.connection.receive(deadline_at);
+            defer received.deinit(self.allocator);
+            if (received.frame.flags.rst) continue;
+            if (received.frame.kind == .window_update) continue;
+            if (received.frame.kind != .data or !received.frame.flags.syn) {
+                if (try self.dispatchGossip(received.frame)) continue;
+                return error.InvalidNegotiation;
+            }
+            _ = try self.dispatchInbound(received.frame);
+        }
     }
 
     /// Bind an already negotiated inbound gossip stream and consume any RPC tail.
@@ -819,7 +884,7 @@ pub const Peer = struct {
 
     /// Serve a new inbound stream discovered while waiting for another reply.
     fn dispatchInbound(self: *Peer, frame: yamux.Frame) anyerror!bool {
-        if ((frame.kind != .data and frame.kind != .window_update) or !frame.flags.syn or frame.flags.fin) return false;
+        if ((frame.kind != .data and frame.kind != .window_update) or !frame.flags.syn) return false;
         self.serveRequest(frame) catch |err| switch (err) {
             error.StreamReset => {},
             else => return err,
@@ -948,6 +1013,7 @@ test "discovered peers exchange Status Metadata block and attestation over TCP" 
                 else => return err,
             };
             defer peer.deinit();
+            try peer.connection.send(.{ .kind = .window_update, .flags = .{ .rst = true }, .stream_id = 77 });
             while (true) {
                 peer.step() catch |err| switch (err) {
                     error.Timeout => continue,
@@ -998,6 +1064,38 @@ test "discovered peers exchange Status Metadata block and attestation over TCP" 
     var ranged = try peer_a.fetchBlocksByRange(block.message.slot, 1, 1);
     defer ranged.deinit();
     try std.testing.expectEqual(@as(usize, 1), ranged.items.items.len);
+    const combined_offer = try multistream.offer(allocator, .status);
+    defer allocator.free(combined_offer);
+    const combined_request = try control.encodeStatus(allocator, status);
+    defer allocator.free(combined_request);
+    const combined = try std.mem.concat(allocator, u8, &.{ combined_offer, combined_request });
+    defer allocator.free(combined);
+    const combined_id: u32 = 101;
+    try peer_a.sendBytes(combined_id, true, true, combined);
+    var combined_selector = multistream.Initiator{ .protocol = .status };
+    var combined_selected = false;
+    var combined_response: std.ArrayList(u8) = .empty;
+    defer combined_response.deinit(allocator);
+    while (true) {
+        const received = try peer_a.connection.receive(peer_a.connection.deadline());
+        defer received.deinit(allocator);
+        if (received.frame.stream_id != combined_id or received.frame.kind != .data or received.frame.flags.syn) continue;
+        var bytes = received.frame.data;
+        while (!combined_selected and bytes.len != 0) {
+            const parsed = try combined_selector.feed(bytes);
+            if (parsed.consumed == 0) return error.InvalidNegotiation;
+            bytes = bytes[parsed.consumed..];
+            if (parsed.selected) combined_selected = true;
+        }
+        if (combined_selected) try combined_response.appendSlice(allocator, bytes);
+        if (received.frame.flags.fin) {
+            if (!combined_selected) return error.InvalidNegotiation;
+            break;
+        }
+    }
+    const combined_chunk = try wire.decodeResponseChunk(allocator, .status, combined_response.items, null, 92);
+    defer allocator.free(combined_chunk.payload);
+    _ = try control.decodeStatusResponse(allocator, &combined_chunk);
     const known = ingress.ColumnLookup{ .context = &lookup, .resolve = struct {
         /// Let the verified column gate match a sidecar to the known fixture block.
         fn resolve(ctx: *anyopaque, _: *const fulu.SignedBeaconBlockHeader) ?ingress.ColumnBlock {

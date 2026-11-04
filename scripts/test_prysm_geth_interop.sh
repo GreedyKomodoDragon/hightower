@@ -168,15 +168,22 @@ wait_enr http://127.0.0.1:13501/eth/v1/node/identity "$interop_dir/fresh.enr" "$
 relay_pid=$!
 wait_file "$interop_dir/relay.json" "$relay_pid"
 python3 - "$interop_dir/relay.json" http://127.0.0.1:13501 <<'PY' || fail 'Fresh Prysm did not import relayed block and columns'
-import json, sys, urllib.request
+import json, sys, time, urllib.error, urllib.request
 with open(sys.argv[1]) as stream: relay = json.load(stream)
 assert relay['slot'] == 1 and relay['columns'] == 128
-with urllib.request.urlopen(sys.argv[2] + '/eth/v2/beacon/blocks/1', timeout=5) as response:
-    block = json.load(response)['data']
-assert int(block['message']['slot']) == 1
-assert len(block['message']['body']['blob_kzg_commitments']) == 1
-with urllib.request.urlopen(sys.argv[2] + '/eth/v1/beacon/headers/1', timeout=5) as response:
-    header = json.load(response)['data']
-assert header['root'].lower() == relay['block_root'].lower()
+deadline = time.time() + 45
+while True:
+    try:
+        with urllib.request.urlopen(sys.argv[2] + '/eth/v2/beacon/blocks/1', timeout=5) as response:
+            block = json.load(response)['data']
+        with urllib.request.urlopen(sys.argv[2] + '/eth/v1/beacon/headers/1', timeout=5) as response:
+            header = json.load(response)['data']
+        assert int(block['message']['slot']) == 1
+        assert len(block['message']['body']['blob_kzg_commitments']) == 1
+        assert header['root'].lower() == relay['block_root'].lower()
+        break
+    except (OSError, urllib.error.HTTPError, KeyError, ValueError, AssertionError):
+        if time.time() >= deadline: raise
+        time.sleep(1)
 print('Prysm imported Fulu slot 1 with one blob through Hightower; 128 columns relayed')
 PY

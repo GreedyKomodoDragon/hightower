@@ -176,17 +176,25 @@ pub fn main(init: std.process.Init) !void {
     defer consumer.deinit();
     const block_ssz = try ssz.serializeAlloc(allocator, block.*);
     defer allocator.free(block_ssz);
-    try consumer.publish(service.block_topic, block_ssz);
-    for (0..columns.column_count) |index| {
-        const sidecar_bytes = (try store.get(block_root, index)) orelse return error.MissingColumn;
-        defer allocator.free(sidecar_bytes);
-        const topic = try wire.topicName(allocator, digest, .data_column, @intCast(index));
-        defer allocator.free(topic);
-        try consumer.publish(topic, sidecar_bytes);
-    }
 
     const started = std.Io.Clock.awake.now(init.io).nanoseconds;
+    // Prysm rotates its custody-column subscriptions at the slot boundary.
+    // Wait for the post-rotation set before publishing so it is not handed
+    // columns for the previous custody assignment.
+    const publish_at = started + 15 * std.time.ns_per_s;
+    var published = false;
     while (std.Io.Clock.awake.now(init.io).nanoseconds - started < 60 * std.time.ns_per_s) {
+        if (!published and std.Io.Clock.awake.now(init.io).nanoseconds >= publish_at) {
+            try consumer.publish(service.block_topic, block_ssz);
+            for (0..columns.column_count) |index| {
+                const sidecar_bytes = (try store.get(block_root, index)) orelse return error.MissingColumn;
+                defer allocator.free(sidecar_bytes);
+                const topic = try wire.topicName(allocator, digest, .data_column, @intCast(index));
+                defer allocator.free(topic);
+                try consumer.publish(topic, sidecar_bytes);
+            }
+            published = true;
+        }
         consumer.step() catch |err| switch (err) {
             error.Timeout => continue,
             else => return err,

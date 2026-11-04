@@ -19,6 +19,9 @@ node_modules/
 # SSZ test vectors (fetched via `just ssz-vectors`)
 testdata/
 *.tar.gz
+# Local interop fixture binaries
+scripts/prysm-interop/blobtx/prysm-interop-blobtx
+
 # Debug / profiling output
 *.log
 callgrind.out.*
