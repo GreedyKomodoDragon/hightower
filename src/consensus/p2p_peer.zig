@@ -187,7 +187,10 @@ pub const Peer = struct {
     /// Process one authenticated gossip frame and reject unexpected stream data.
     pub fn step(self: *Peer) !void {
         while (true) {
-            const received = try self.connection.receive(self.connection.deadline());
+            const received = if (self.pending_control.items.len != 0)
+                self.pending_control.orderedRemove(0)
+            else
+                try self.connection.receive(self.connection.deadline());
             if (received.frame.flags.rst) {
                 const closed_gossip = received.frame.stream_id == self.gossip_id or
                     (self.inbound_gossip_id != null and received.frame.stream_id == self.inbound_gossip_id.?);
@@ -1071,6 +1074,12 @@ test "discovered peers exchange Status Metadata block and attestation over TCP" 
     var peer_a = try Peer.dial(allocator, io, key_a, &discovery_a, &service_a, status, metadata, discovery_b.local_record.node_id, null);
     var peer_a_closed = false;
     defer if (!peer_a_closed) peer_a.deinit();
+    const queued_rpc = try gossip.encodeSubscription(allocator, service_a.block_topic, false);
+    defer allocator.free(queued_rpc);
+    const queued_bytes = try gossip.encodeFrame(allocator, queued_rpc);
+    try peer_a.pending_control.append(allocator, .{ .bytes = queued_bytes, .frame = .{ .kind = .data, .stream_id = peer_a.gossip_id, .data = queued_bytes } });
+    while (peer_a.pending_control.items.len != 0) try peer_a.step();
+    try std.testing.expect(!peer_a.remoteBlockSubscribed());
     try peer_a.publish(service_a.block_topic, raw_block);
     try peer_a.publish(service_a.attestation_topics[3].?, raw_attestation);
     var fetched = try peer_a.fetchBlocksByRoot(&.{block_root});
