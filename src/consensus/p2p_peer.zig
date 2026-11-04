@@ -76,9 +76,15 @@ pub const Peer = struct {
 
     /// Dial a discovered ENR and complete both control exchanges before gossip.
     pub fn dial(allocator: std.mem.Allocator, io: std.Io, identity: Ecdsa.KeyPair, peers: *discovery.Service, service: *gossip.Service, status: control.Status, metadata: control.MetaData, peer_id: [32]u8, routes: ?Routes) !Peer {
-        var connection = try tcp.Connection.dial(allocator, io, identity, peers, peer_id);
-        errdefer connection.deinit();
-        var self = Peer{ .allocator = allocator, .connection = connection, .gossip_service = service, .send_windows = std.AutoHashMap(u32, u32).init(allocator), .next_stream_id = 7, .local_status = status, .local_metadata = metadata, .routes = routes };
+        const connection = try tcp.Connection.dial(allocator, io, identity, peers, peer_id);
+        return finishDial(allocator, connection, peers, service, status, metadata, peer_id, routes);
+    }
+
+    /// Complete control and gossip setup for an owned authenticated outbound transport.
+    pub fn finishDial(allocator: std.mem.Allocator, connection: tcp.Connection, peers: *discovery.Service, service: *gossip.Service, status: control.Status, metadata: control.MetaData, peer_id: [32]u8, routes: ?Routes) !Peer {
+        var connection_owned = connection;
+        errdefer connection_owned.deinit();
+        var self = Peer{ .allocator = allocator, .connection = connection_owned, .gossip_service = service, .send_windows = std.AutoHashMap(u32, u32).init(allocator), .next_stream_id = 7, .local_status = status, .local_metadata = metadata, .routes = routes };
         errdefer self.send_windows.deinit();
         errdefer if (self.inbound_gossip_stream) |*session| session.deinit();
         errdefer {
@@ -87,7 +93,10 @@ pub const Peer = struct {
         }
         const status_request = try control.encodeStatus(allocator, status);
         defer allocator.free(status_request);
-        const status_response = try self.requestControl(1, .status, status_request);
+        const status_response = self.requestControl(1, .status, status_request) catch |err| {
+            if (err == error.Timeout) return error.StatusTimeout;
+            return err;
+        };
         defer allocator.free(status_response);
         const status_chunk = try wire.decodeResponseChunk(allocator, .status, status_response, null, 92);
         defer allocator.free(status_chunk.payload);
@@ -107,9 +116,15 @@ pub const Peer = struct {
 
     /// Accept a discovered peer and verify its Status and Metadata before gossip.
     pub fn accept(allocator: std.mem.Allocator, io: std.Io, stream: std.Io.net.Stream, identity: Ecdsa.KeyPair, peers: *discovery.Service, service: *gossip.Service, status: control.Status, metadata: control.MetaData, routes: ?Routes) !Peer {
-        var connection = try tcp.Connection.accept(allocator, io, stream, identity, peers);
-        errdefer connection.deinit();
-        var self = Peer{ .allocator = allocator, .connection = connection, .gossip_service = service, .send_windows = std.AutoHashMap(u32, u32).init(allocator), .next_stream_id = 4, .local_status = status, .local_metadata = metadata, .routes = routes };
+        const connection = try tcp.Connection.accept(allocator, io, stream, identity, peers);
+        return finishAccept(allocator, connection, peers, service, status, metadata, routes);
+    }
+
+    /// Complete control and gossip setup for an owned authenticated inbound transport.
+    pub fn finishAccept(allocator: std.mem.Allocator, connection: tcp.Connection, peers: *discovery.Service, service: *gossip.Service, status: control.Status, metadata: control.MetaData, routes: ?Routes) !Peer {
+        var connection_owned = connection;
+        errdefer connection_owned.deinit();
+        var self = Peer{ .allocator = allocator, .connection = connection_owned, .gossip_service = service, .send_windows = std.AutoHashMap(u32, u32).init(allocator), .next_stream_id = 4, .local_status = status, .local_metadata = metadata, .routes = routes };
         errdefer self.send_windows.deinit();
         errdefer if (self.inbound_gossip_stream) |*session| session.deinit();
         errdefer {

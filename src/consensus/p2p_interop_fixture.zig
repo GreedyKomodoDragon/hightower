@@ -172,7 +172,17 @@ pub fn main(init: std.process.Init) !void {
     };
     const consumer_enr = try waitForEnr(allocator, init.io, consumer_enr_path);
     try discovery.addTrusted(consumer_enr);
-    var consumer = try consensus.P2PPeer.Peer.dial(allocator, init.io, key, &discovery, &service, fresh_status, metadata, consumer_enr.node_id, routes);
+    var consumer = connected: {
+        for (0..3) |attempt| {
+            const current = consensus.P2PPeer.Peer.dial(allocator, init.io, key, &discovery, &service, fresh_status, metadata, consumer_enr.node_id, routes) catch |err| {
+                std.log.warn("fresh Prysm handshake attempt {d}: {s}", .{ attempt + 1, @errorName(err) });
+                if (err != error.StatusTimeout or attempt == 2) return err;
+                continue;
+            };
+            break :connected current;
+        }
+        unreachable;
+    };
     defer consumer.deinit();
     const block_ssz = try ssz.serializeAlloc(allocator, block.*);
     defer allocator.free(block_ssz);
