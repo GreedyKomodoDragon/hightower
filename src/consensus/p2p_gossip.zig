@@ -237,7 +237,7 @@ pub const Service = struct {
         };
         const remote = self.subscriptions.getPtr(peer_id).?;
         for (parsed.subscriptions[0..parsed.subscription_len]) |subscription| {
-            const selected = self.classify(subscription.topic) orelse continue;
+            const selected = self.classify(subscription.topic) orelse TopicSelection{ .column = self.remoteColumnIndex(subscription.topic) orelse continue };
             switch (selected) {
                 .block => remote.block = subscription.subscribe,
                 .aggregate => remote.aggregate = subscription.subscribe,
@@ -293,6 +293,19 @@ pub const Service = struct {
             if (std.mem.eql(u8, name, topic_name)) return .{ .column = @intCast(subnet) };
         }
         return null;
+    }
+
+    /// Recognize a remote column subscription even when this node does not follow it.
+    fn remoteColumnIndex(self: *const Service, name: []const u8) ?u8 {
+        const hex = std.fmt.bytesToHex(self.digest, .lower);
+        var buffer: [64]u8 = undefined;
+        const prefix = std.fmt.bufPrint(&buffer, "/eth2/{s}/data_column_sidecar_", .{&hex}) catch unreachable;
+        const suffix = "/ssz_snappy";
+        if (name.len < prefix.len + suffix.len or !std.mem.startsWith(u8, name, prefix) or !std.mem.endsWith(u8, name, suffix)) return null;
+        const digits = name[prefix.len .. name.len - suffix.len];
+        if (digits.len == 0 or (digits.len > 1 and digits[0] == '0')) return null;
+        const index = std.fmt.parseInt(u8, digits, 10) catch return null;
+        return if (index < columns.column_count) index else null;
     }
 };
 
@@ -687,7 +700,7 @@ fn collectGraftTopics(allocator: std.mem.Allocator, frame: []const u8) ![][]cons
     return topics.toOwnedSlice(allocator);
 }
 
-test "local subscriptions announce GRAFT inside the control message" {
+test "local subscriptions announce GRAFT and remote columns are tracked" {
     const fulu = @import("fulu");
     const allocator = std.testing.allocator;
     const config = ingress.Config{ .genesis_validators_root = [_]u8{1} ** 32, .fulu_version = .{ 6, 0, 0, 0 }, .fulu_epoch = 0, .blob_schedule = &@import("helpers.zig").BLOB_SCHEDULE };
@@ -713,6 +726,20 @@ test "local subscriptions announce GRAFT inside the control message" {
     try std.testing.expectEqual(@as(usize, 2), topics.len);
     try std.testing.expectEqualStrings(service.block_topic, topics[0]);
     try std.testing.expectEqualStrings(service.aggregate_topic, topics[1]);
+
+    const peer_id = [_]u8{2} ** 32;
+    try service.connect(peer_id);
+    const first_topic = try wire.topicName(allocator, service.digest, .data_column, 0);
+    defer allocator.free(first_topic);
+    const last_topic = try wire.topicName(allocator, service.digest, .data_column, 127);
+    defer allocator.free(last_topic);
+    const first_rpc = try encodeSubscription(allocator, first_topic, true);
+    defer allocator.free(first_rpc);
+    const last_rpc = try encodeSubscription(allocator, last_topic, true);
+    defer allocator.free(last_rpc);
+    try service.receive(peer_id, first_rpc);
+    try service.receive(peer_id, last_rpc);
+    try std.testing.expectEqual([2]u64{ 1, @as(u64, 1) << 63 }, service.remoteColumnMask(peer_id).?);
 }
 
 test "gossip stream assembles split RPCs and rejects bad length prefixes" {

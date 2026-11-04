@@ -251,12 +251,14 @@ test "two live services discover and connect without a transport address" {
     try a.addBootstrap(b_uri);
     const Context = struct {
         service: *Service,
-        attempts: usize = 200,
         err: ?anyerror = null,
+        done: std.atomic.Value(bool) = .init(false),
 
         /// Drive the second node until its authenticated peer is connected.
         fn run(self: *@This()) void {
-            for (0..self.attempts) |_| {
+            defer self.done.store(true, .release);
+            const deadline = now(self.service.io) + 15 * std.time.ns_per_s;
+            while (now(self.service.io) < deadline) {
                 self.service.step(10) catch |err| {
                     self.err = err;
                     return;
@@ -270,9 +272,9 @@ test "two live services discover and connect without a transport address" {
     const thread = try std.Thread.spawn(.{}, Context.run, .{&context});
     var first_joined = false;
     defer if (!first_joined) thread.join();
-    for (0..200) |_| {
+    const initial_deadline = now(io) + 20 * std.time.ns_per_s;
+    while (!context.done.load(.acquire) and now(io) < initial_deadline) {
         try a.step(10);
-        if (a.connected()) break;
     }
     thread.join();
     first_joined = true;
@@ -284,19 +286,20 @@ test "two live services discover and connect without a transport address" {
     gossip_a.peers.noteInvalid(b.discovery_service.local_record.node_id);
     b.connection.?.deinit();
     b.connection = null;
-    for (0..200) |_| {
+    const disconnect_deadline = now(io) + 15 * std.time.ns_per_s;
+    while (now(io) < disconnect_deadline) {
         try a.step(10);
         if (!a.connected()) break;
     }
     try std.testing.expect(!a.connected());
     context.err = null;
-    context.attempts = 400;
+    context.done.store(false, .release);
     const retry_thread = try std.Thread.spawn(.{}, Context.run, .{&context});
     var retry_joined = false;
     defer if (!retry_joined) retry_thread.join();
-    for (0..400) |_| {
+    const retry_deadline = now(io) + 20 * std.time.ns_per_s;
+    while (!context.done.load(.acquire) and now(io) < retry_deadline) {
         try a.step(10);
-        if (a.connected()) break;
     }
     retry_thread.join();
     retry_joined = true;
