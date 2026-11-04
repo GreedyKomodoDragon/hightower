@@ -102,6 +102,7 @@ pub const Connection = struct {
 
     /// Encrypt and write one bounded Yamux frame on this connection.
     pub fn send(self: *Connection, frame: yamux.Frame) !void {
+        std.log.scoped(.p2p_transport).debug("send peer={x} stream={d} kind={s} syn={} ack={} fin={} rst={} len={d} prefix={x}", .{ self.peer_id[0..4], frame.stream_id, @tagName(frame.kind), frame.flags.syn, frame.flags.ack, frame.flags.fin, frame.flags.rst, frame.data.len, frame.data[0..@min(frame.data.len, 96)] });
         const bytes = try yamux.encode(self.allocator, frame);
         defer self.allocator.free(bytes);
         return self.sendRaw(bytes);
@@ -115,6 +116,7 @@ pub const Connection = struct {
             const bytes = try self.receiveRaw(deadline_ns);
             errdefer self.allocator.free(bytes);
             const frame = try yamux.decode(bytes);
+            std.log.scoped(.p2p_transport).debug("recv peer={x} stream={d} kind={s} syn={} ack={} fin={} rst={} len={d} prefix={x}", .{ self.peer_id[0..4], frame.stream_id, @tagName(frame.kind), frame.flags.syn, frame.flags.ack, frame.flags.fin, frame.flags.rst, frame.data.len, frame.data[0..@min(frame.data.len, 96)] });
             switch (frame.kind) {
                 .ping => {
                     self.allocator.free(bytes);

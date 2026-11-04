@@ -19,6 +19,7 @@ const Ecdsa = std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
 const wire = consensus.P2PWire;
 const requests = consensus.P2PRequests;
 const columns = consensus.DataColumns;
+pub const std_options: std.Options = .{ .log_level = .debug };
 
 /// Relay one slot from a trusted producer ENR to a fresh consumer ENR.
 pub fn main(init: std.process.Init) !void {

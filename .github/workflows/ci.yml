@@ -117,3 +117,9 @@ jobs:
       - run: bash scripts/test_prysm_geth_interop.sh
         env:
           KEEP_INTEROP_DIR: '1'
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: prysm-p2p-logs
+          path: /tmp/hightower-prysm-geth.*/*.log
+          retention-days: 3
