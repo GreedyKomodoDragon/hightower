@@ -196,7 +196,11 @@ pub fn main(init: std.process.Init) !void {
         else
             false;
         if (consumer.remoteBlockSubscribed() and columns_ready) break;
-        if (std.Io.Clock.awake.now(init.io).nanoseconds >= ready_deadline) return error.ConsumerSubscriptionsNotReady;
+        if (std.Io.Clock.awake.now(init.io).nanoseconds >= ready_deadline) {
+            const mask = consumer.remoteColumnMask() orelse .{ 0, 0 };
+            std.log.err("consumer subscriptions: block={}, columns={x:0>16}/{x:0>16}", .{ consumer.remoteBlockSubscribed(), mask[0], mask[1] });
+            return error.ConsumerSubscriptionsNotReady;
+        }
         consumer.step() catch |err| switch (err) {
             error.Timeout => continue,
             else => return err,
