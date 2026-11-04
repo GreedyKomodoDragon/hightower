@@ -159,6 +159,11 @@ test "two authenticated gossip sessions negotiate, subscribe, and validate Fulu 
     const b_subscription = try outgoing.feed(second.subscription.?);
     try std.testing.expectEqual(echo_protocol.subscription.?.len, a_subscription.consumed);
     try std.testing.expectEqual(second.subscription.?.len, b_subscription.consumed);
+    try std.testing.expect(a.remoteBlockSubscribed(b_id));
+    try std.testing.expect(b.remoteBlockSubscribed(a_id));
+    try std.testing.expectEqual([2]u64{ 0, 0 }, a.remoteColumnMask(b_id).?);
+    try std.testing.expect(!a.remoteBlockSubscribed([_]u8{9} ** 32));
+    try std.testing.expectEqual(@as(?[2]u64, null), a.remoteColumnMask([_]u8{9} ** 32));
     var recipients: [1][32]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 1), try a.recipients(a.block_topic, &recipients));
     try std.testing.expectEqual(b_id, recipients[0]);

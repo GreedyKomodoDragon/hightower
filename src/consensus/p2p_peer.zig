@@ -148,6 +148,16 @@ pub const Peer = struct {
         self.routes = routes;
     }
 
+    /// Report whether the remote peer subscribed to the Fulu block topic.
+    pub fn remoteBlockSubscribed(self: *const Peer) bool {
+        return self.gossip_service.remoteBlockSubscribed(self.connection.peer_id);
+    }
+
+    /// Return the remote peer's data-column subscription bits, if known.
+    pub fn remoteColumnMask(self: *const Peer) ?[2]u64 {
+        return self.gossip_service.remoteColumnMask(self.connection.peer_id);
+    }
+
     /// Compress one serialized SSZ object and publish it on the gossip stream.
     pub fn publish(self: *Peer, topic: []const u8, ssz_bytes: []const u8) !void {
         const encoded = try wire.encodeGossip(self.allocator, ssz_bytes, self.gossip_service.peers.config.max_encoded_size);

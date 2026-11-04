@@ -161,7 +161,7 @@ with urllib.request.urlopen('http://127.0.0.1:13500/eth/v2/beacon/blocks/1', tim
 assert int(block['slot']) == 1 and len(block['body']['blob_kzg_commitments']) == 1
 PY
 kill "$validator_pid" 2>/dev/null || true; wait "$validator_pid" 2>/dev/null || true; validator_pid=
-"$prysm_dir/beacon-chain" --chain-id=1337 --chain-config-file="$interop_dir/chain.yaml" --genesis-state="$interop_dir/genesis.ssz" --datadir="$interop_dir/fresh" --execution-endpoint=http://127.0.0.1:18551 --jwt-secret="$interop_dir/jwt.hex" --p2p-host-ip=127.0.0.1 --p2p-local-ip=127.0.0.1 --p2p-tcp-port=19001 --p2p-udp-port=19001 --p2p-max-peers=1 --min-sync-peers=0 --grpc-gateway-port=13501 --rpc-port=14001 --accept-terms-of-use > "$interop_dir/fresh.log" 2>&1 &
+"$prysm_dir/beacon-chain" --chain-id=1337 --chain-config-file="$interop_dir/chain.yaml" --genesis-state="$interop_dir/genesis.ssz" --datadir="$interop_dir/fresh" --execution-endpoint=http://127.0.0.1:18551 --jwt-secret="$interop_dir/jwt.hex" --p2p-host-ip=127.0.0.1 --p2p-local-ip=127.0.0.1 --p2p-tcp-port=19001 --p2p-udp-port=19001 --p2p-max-peers=1 --min-sync-peers=0 --supernode --grpc-gateway-port=13501 --rpc-port=14001 --accept-terms-of-use > "$interop_dir/fresh.log" 2>&1 &
 fresh_pid=$!
 wait_enr http://127.0.0.1:13501/eth/v1/node/identity "$interop_dir/fresh.enr" "$fresh_pid"
 ./zig-out/bin/hightower-p2p-interop-fixture "$(cat "$interop_dir/genesis-root")" 0x060000aa "$interop_dir/producer.enr" "$interop_dir/fresh.enr" "$interop_dir/relay.json" > "$interop_dir/relay.log" 2>&1 &

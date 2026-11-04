@@ -1,8 +1,10 @@
 // A live node owns its signed discv5 address and one authenticated consensus
 // TCP peer. Discovery probes bootstrap ENRs and refreshes signed candidates;
 // any discovered TCP address may be dialled so a single configured bootstrap
-// still connects. A lost socket is dropped while the gossip score remains in
-// the caller's service, so a later step may reconnect.
+// still connects. Reciprocal dials are resolved by node ID: the larger ID
+// keeps the inbound stream and both sides discard the duplicate. A lost socket
+// is dropped while the gossip score remains in the caller's service, so a
+// later step may reconnect.
 //
 //   UDP discovery -> verified ENR -> TCP/Noise/Status/Metadata -> Yamux
 // shortcut: one simultaneous TCP peer is supported, expand the connection
@@ -76,6 +78,29 @@ pub const Service = struct {
         return if (self.connection) |*active| active else error.NoPeer;
     }
 
+    /// Authenticate an inbound stream and resolve reciprocal dials by node ID.
+    fn acceptInbound(self: *Service, stream: std.Io.net.Stream) !void {
+        var accepted = peer.Peer.accept(self.allocator, self.io, stream, self.identity, self.discovery_service, self.gossip_service, self.status, self.metadata, self.routes) catch |err| return err;
+        if (self.connection) |*existing| {
+            const same_peer = std.mem.eql(u8, &existing.connection.peer_id, &accepted.connection.peer_id);
+            if (!same_peer or !keepInbound(self.discovery_service.local_record.node_id, accepted.connection.peer_id)) {
+                accepted.deinit();
+                return;
+            }
+            if (self.routes) |routes| accepted.setRoutes(routes);
+            existing.deinit();
+            self.connection = accepted;
+            return;
+        }
+        self.connection = accepted;
+    }
+
+    /// Drop the active peer after a stream-fatal error.
+    fn dropPeer(self: *Service) void {
+        if (self.connection) |*active| active.deinit();
+        self.connection = null;
+    }
+
     /// Poll discovery, listener, and active peer once within a bounded wait.
     pub fn step(self: *Service, timeout_ms: u32) !void {
         try self.discovery_service.maintain();
@@ -104,27 +129,26 @@ pub const Service = struct {
         if (try std.posix.poll(descriptors[0..count], @intCast(@min(timeout_ms, std.math.maxInt(i32)))) == 0) return;
         if (descriptors[0].revents & std.posix.POLL.IN != 0) {
             self.discovery_service.step(.{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(1) } }) catch |err| switch (err) {
-                error.Timeout => {},
+                // Unknown challenges are unauthenticated or stale datagrams;
+                // ignore them so discovery keeps serving valid peers.
+                error.Timeout, error.UnknownChallenge => {},
                 else => return err,
             };
         }
         if (descriptors[1].revents & std.posix.POLL.IN != 0) {
             const stream = try self.listener.accept(self.io);
-            if (self.connection != null) {
-                stream.close(self.io);
-            } else {
-                const active = peer.Peer.accept(self.allocator, self.io, stream, self.identity, self.discovery_service, self.gossip_service, self.status, self.metadata, self.routes) catch |err| switch (err) {
-                    error.OutOfMemory => return err,
-                    else => return,
-                };
-                self.connection = active;
-            }
+            self.acceptInbound(stream) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => return,
+            };
+            return;
         }
         if (count == 3 and descriptors[2].revents != 0) {
             const active = if (self.connection) |*value| value else return;
+            // Every peer error invalidates the stream: receive may have
+            // consumed part of a transport record before failing.
             active.step() catch |err| {
-                active.deinit();
-                self.connection = null;
+                self.dropPeer();
                 if (err == error.OutOfMemory) return err;
             };
         }
@@ -136,6 +160,11 @@ pub const Service = struct {
         return active.publish(topic, ssz_bytes);
     }
 };
+
+/// Return whether the larger local node ID should retain a reciprocal inbound stream.
+fn keepInbound(local_id: [32]u8, remote_id: [32]u8) bool {
+    return std.mem.order(u8, &local_id, &remote_id) == .gt;
+}
 
 /// Return the awake monotonic clock used to space connection retries.
 fn now(io: std.Io) i96 {
@@ -215,9 +244,12 @@ test "two live services discover and connect without a transport address" {
     defer a.deinit();
     var b = try Service.init(allocator, io, try Ecdsa.KeyPair.generateDeterministic([_]u8{122} ** 32), local, 2, &gossip_b, status, metadata);
     defer b.deinit();
+    const a_uri = try a.localUri();
+    defer allocator.free(a_uri);
     const b_uri = try b.localUri();
     defer allocator.free(b_uri);
     try a.addBootstrap(b_uri);
+    try b.addBootstrap(a_uri);
     const Context = struct {
         service: *Service,
         attempts: usize = 200,
@@ -248,6 +280,7 @@ test "two live services discover and connect without a transport address" {
     if (context.err) |err| return err;
     try std.testing.expect(a.connected());
     try std.testing.expect(b.connected());
+    try std.testing.expect(a.connection.?.connection.initiator != b.connection.?.connection.initiator);
     try std.testing.expectEqual(b.discovery_service.local_record.tcp_port, a.discovery_service.discoveredRecord(b.discovery_service.local_record.node_id).?.tcp_port);
     gossip_a.peers.noteInvalid(b.discovery_service.local_record.node_id);
     b.connection.?.deinit();
@@ -272,4 +305,16 @@ test "two live services discover and connect without a transport address" {
     try std.testing.expect(a.connected());
     try std.testing.expect(b.connected());
     try std.testing.expectEqual(@as(u8, 1), gossip_a.peers.state(b.discovery_service.local_record.node_id).?.invalid_messages);
+    try b.connection.?.connection.send(.{ .kind = .data, .stream_id = 99 });
+    for (0..100) |_| {
+        try a.step(10);
+        if (!a.connected()) break;
+    }
+    try std.testing.expect(!a.connected());
+}
+
+test "larger node id keeps the inbound side of a reciprocal dial" {
+    try std.testing.expect(!keepInbound([_]u8{1} ** 32, [_]u8{2} ** 32));
+    try std.testing.expect(keepInbound([_]u8{2} ** 32, [_]u8{1} ** 32));
+    try std.testing.expect(!keepInbound([_]u8{1} ** 32, [_]u8{1} ** 32));
 }

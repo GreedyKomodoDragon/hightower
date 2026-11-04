@@ -190,6 +190,18 @@ pub const Service = struct {
         return count;
     }
 
+    /// Report whether one connected peer announced the Fulu block topic.
+    pub fn remoteBlockSubscribed(self: *const Service, peer_id: [32]u8) bool {
+        const remote = self.subscriptions.get(peer_id) orelse return false;
+        return remote.block;
+    }
+
+    /// Return one connected peer's data-column subscription bits, if known.
+    pub fn remoteColumnMask(self: *const Service, peer_id: [32]u8) ?[2]u64 {
+        const remote = self.subscriptions.get(peer_id) orelse return null;
+        return remote.columns;
+    }
+
     /// Encode this node's block and selected attestation subscriptions as one
     /// framed RPC to send when a peer's gossip stream opens or reconnects.
     pub fn localSubscriptionFrame(self: *const Service) ![]u8 {
