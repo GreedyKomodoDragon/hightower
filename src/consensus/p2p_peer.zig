@@ -856,9 +856,13 @@ pub const Peer = struct {
         var session = try gossip_session.Session.init(self.allocator, self.gossip_service, self.connection.peer_id, .responder);
         errdefer session.deinit();
         session.selected = true;
-        const subscription = try self.gossip_service.localSubscriptionFrame();
-        defer self.allocator.free(subscription);
-        try self.sendBytes(id, false, false, subscription);
+        // An existing outbound stream owns our subscriptions; libp2p resets
+        // its outbound stream if application bytes arrive in reverse.
+        if (self.gossip_stream == null) {
+            const subscription = try self.gossip_service.localSubscriptionFrame();
+            defer self.allocator.free(subscription);
+            try self.sendBytes(id, false, false, subscription);
+        }
         if (bytes.len != 0) try self.feedGossipOn(&session, id, bytes);
         if (fin) {
             session.deinit();
