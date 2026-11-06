@@ -187,3 +187,18 @@ inbound request loops. A focused regression test covers the interleaving. In a
 new direct native Prysm run, both status exchanges completed; the run continued
 to `ConsumerSubscriptionsNotReady`. The status timeout is fixed in that run,
 while the subscription failure remains separate work.
+
+## Subscription failure resolved (2026-11-06)
+
+The fresh Prysm log showed Identify negotiation failing, followed by Gossipsub
+reporting no send queue for Hightower. Hightower now answers
+`/ipfs/id/1.0.0` with its Noise-authenticated public key and supported protocol
+IDs in a length-delimited protobuf message, following the
+[libp2p Identify specification](https://github.com/libp2p/specs/blob/master/identify/README.md).
+It sends local subscriptions on its own outbound gossip stream. A reset inbound
+gossip stream is cleared before a replacement is accepted.
+
+The standard consensus suite passed after these changes. In a new direct native
+Prysm/Geth run, both status exchanges completed and fresh Prysm imported Fulu
+slot 1 with one blob and all 128 data columns through Hightower. The run and
+trace are preserved at `/tmp/hightower-prysm-geth.g2cjSX`.

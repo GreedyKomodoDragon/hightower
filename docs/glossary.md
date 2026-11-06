@@ -211,3 +211,4 @@ Chain:      [Block 0] ───────────────────�
 | Authenticated frame trace | A diagnostic record of protocol bytes after their cryptographic authentication succeeds, allowing encrypted peer traffic to be understood without recording session keys. |
 | StatusTimeout | Hightower's error when the initial peer status exchange does not complete within its request deadline; it does not by itself identify which protocol step stalled. |
 | Diagnostic socket override | A local test setting that routes traffic through a capture proxy while retaining the original signed peer record and cryptographic identity checks. |
+| libp2p Identify | A peer protocol that shares its public key and supported protocols after connection authentication, allowing the other node to set up services such as gossip. |

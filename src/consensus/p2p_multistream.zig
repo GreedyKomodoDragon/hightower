@@ -18,6 +18,7 @@ pub const Protocol = enum {
     noise,
     yamux,
     gossip,
+    identify,
     status,
     ping,
     metadata,
@@ -32,6 +33,7 @@ pub const Protocol = enum {
             .noise => "/noise",
             .yamux => "/yamux/1.0.0",
             .gossip => "/meshsub/1.1.0",
+            .identify => "/ipfs/id/1.0.0",
             .status => "/eth2/beacon_chain/req/status/2/ssz_snappy",
             .ping => "/eth2/beacon_chain/req/ping/1/ssz_snappy",
             .metadata => "/eth2/beacon_chain/req/metadata/3/ssz_snappy",
@@ -46,7 +48,7 @@ pub const Protocol = enum {
     pub fn request(self: Protocol) ?wire.Protocol {
         return switch (self) {
             .noise, .yamux => null,
-            .gossip => null,
+            .gossip, .identify => null,
             .status => .status,
             .ping => .ping,
             .metadata => .metadata,

@@ -71,6 +71,7 @@ pub const Peer = struct {
     next_stream_id: u32,
     local_status: control.Status,
     local_metadata: control.MetaData,
+    local_public_key: [33]u8,
     remote_status: control.Status = undefined,
     remote_metadata: control.MetaData = undefined,
     routes: ?Routes = null,
@@ -85,7 +86,7 @@ pub const Peer = struct {
     pub fn finishDial(allocator: std.mem.Allocator, connection: tcp.Connection, peers: *discovery.Service, service: *gossip.Service, status: control.Status, metadata: control.MetaData, peer_id: [32]u8, routes: ?Routes) !Peer {
         var connection_owned = connection;
         errdefer connection_owned.deinit();
-        var self = Peer{ .allocator = allocator, .connection = connection_owned, .gossip_service = service, .send_windows = std.AutoHashMap(u32, u32).init(allocator), .next_stream_id = 7, .local_status = status, .local_metadata = metadata, .routes = routes };
+        var self = Peer{ .allocator = allocator, .connection = connection_owned, .gossip_service = service, .send_windows = std.AutoHashMap(u32, u32).init(allocator), .next_stream_id = 7, .local_status = status, .local_metadata = metadata, .local_public_key = peers.local_record.public_key, .routes = routes };
         errdefer self.send_windows.deinit();
         errdefer if (self.inbound_gossip_stream) |*session| session.deinit();
         errdefer {
@@ -128,7 +129,7 @@ pub const Peer = struct {
     pub fn finishAccept(allocator: std.mem.Allocator, connection: tcp.Connection, peers: *discovery.Service, service: *gossip.Service, status: control.Status, metadata: control.MetaData, routes: ?Routes) !Peer {
         var connection_owned = connection;
         errdefer connection_owned.deinit();
-        var self = Peer{ .allocator = allocator, .connection = connection_owned, .gossip_service = service, .send_windows = std.AutoHashMap(u32, u32).init(allocator), .next_stream_id = 4, .local_status = status, .local_metadata = metadata, .routes = routes };
+        var self = Peer{ .allocator = allocator, .connection = connection_owned, .gossip_service = service, .send_windows = std.AutoHashMap(u32, u32).init(allocator), .next_stream_id = 4, .local_status = status, .local_metadata = metadata, .local_public_key = peers.local_record.public_key, .routes = routes };
         errdefer self.send_windows.deinit();
         errdefer if (self.inbound_gossip_stream) |*session| session.deinit();
         errdefer {
@@ -507,6 +508,7 @@ pub const Peer = struct {
             errdefer received.deinit(self.allocator);
             if (received.frame.flags.rst) {
                 if (received.frame.stream_id == id) return error.StreamReset;
+                self.clearInboundGossip(received.frame.stream_id);
                 received.deinit(self.allocator);
                 continue;
             }
@@ -626,6 +628,12 @@ pub const Peer = struct {
         if (protocol == .gossip) {
             try self.acceptInboundGossip(id, buffer.items[application_offset..], finished);
             return;
+        }
+        if (protocol == .identify) {
+            if (buffer.items[application_offset..].len != 0) return error.InvalidRequest;
+            const response = try encodeIdentify(self.allocator, self.local_public_key);
+            defer self.allocator.free(response);
+            return self.sendBytes(id, false, true, response);
         }
         if (protocol != .status and protocol != .metadata and protocol != .ping and protocol != .blocks_by_root and protocol != .blocks_by_range and protocol != .columns_by_root and protocol != .columns_by_range) return error.InvalidRequest;
         var request_bytes: std.ArrayList(u8) = .empty;
@@ -815,6 +823,15 @@ pub const Peer = struct {
         self.inbound_gossip_id = null;
     }
 
+    /// Forget an inbound gossip stream after its owner resets it.
+    fn clearInboundGossip(self: *Peer, id: u32) void {
+        if (self.inbound_gossip_id != null and self.inbound_gossip_id.? == id) {
+            self.inbound_gossip_stream.?.deinit();
+            self.inbound_gossip_stream = null;
+            self.inbound_gossip_id = null;
+        }
+    }
+
     /// Accept the peer's inbound gossip stream on whichever Yamux stream it opens.
     fn acceptGossip(self: *Peer) !void {
         const deadline_at = self.connection.deadline();
@@ -841,13 +858,6 @@ pub const Peer = struct {
         var session = try gossip_session.Session.init(self.allocator, self.gossip_service, self.connection.peer_id, .responder);
         errdefer session.deinit();
         session.selected = true;
-        // An existing outbound stream owns our subscriptions; libp2p resets
-        // its outbound stream if application bytes arrive in reverse.
-        if (self.gossip_stream == null) {
-            const subscription = try self.gossip_service.localSubscriptionFrame();
-            defer self.allocator.free(subscription);
-            try self.sendBytes(id, false, false, subscription);
-        }
         if (bytes.len != 0) try self.feedGossipOn(&session, id, bytes);
         if (fin) {
             session.deinit();
@@ -1181,4 +1191,48 @@ test "inbound request preserves another control stream's data and FIN" {
     try std.testing.expectEqual(@as(usize, 2), peer.pending_control.items.len);
     try std.testing.expectEqualStrings("status response", peer.pending_control.items[0].frame.data);
     try std.testing.expect(peer.pending_control.items[1].frame.flags.fin);
+}
+
+/// Encode one length-delimited Identify response for the Noise-authenticated key.
+fn encodeIdentify(allocator: std.mem.Allocator, public_key: [33]u8) ![]u8 {
+    var message: std.ArrayList(u8) = .empty;
+    defer message.deinit(allocator);
+    const key = [_]u8{ 0x08, 0x02, 0x12, 33 } ++ public_key;
+    try appendIdentifyField(allocator, &message, 1, &key);
+    for ([_]multistream.Protocol{ .identify, .gossip, .status, .metadata, .ping, .blocks_by_root, .blocks_by_range, .columns_by_root, .columns_by_range }) |protocol| {
+        try appendIdentifyField(allocator, &message, 3, protocol.id());
+    }
+    try appendIdentifyField(allocator, &message, 5, "ipfs/0.1.0");
+    try appendIdentifyField(allocator, &message, 6, "hightower/0.0.0");
+    var result: std.ArrayList(u8) = .empty;
+    errdefer result.deinit(allocator);
+    try appendIdentifyVarint(allocator, &result, message.items.len);
+    try result.appendSlice(allocator, message.items);
+    return result.toOwnedSlice(allocator);
+}
+
+/// Append one length-delimited protobuf field using canonical varints.
+fn appendIdentifyField(allocator: std.mem.Allocator, out: *std.ArrayList(u8), field: u8, bytes: []const u8) !void {
+    try appendIdentifyVarint(allocator, out, @as(usize, field) << 3 | 2);
+    try appendIdentifyVarint(allocator, out, bytes.len);
+    try out.appendSlice(allocator, bytes);
+}
+
+/// Append a nonnegative integer in protobuf's base-128 representation.
+fn appendIdentifyVarint(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: usize) !void {
+    var remaining = value;
+    while (remaining >= 128) {
+        try out.append(allocator, @as(u8, @intCast(remaining & 0x7f)) | 0x80);
+        remaining >>= 7;
+    }
+    try out.append(allocator, @intCast(remaining));
+}
+
+test "identify advertises the authenticated key and gossip protocol" {
+    const bytes = try encodeIdentify(std.testing.allocator, [_]u8{0x42} ** 33);
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expect(bytes.len > 128);
+    try std.testing.expectEqual(@as(u8, 0x0a), bytes[2]);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, &([_]u8{0x42} ** 33)) != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, multistream.Protocol.gossip.id()) != null);
 }
