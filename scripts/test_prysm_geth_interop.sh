@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
+source scripts/network_diagnostics.sh
 
 geth_bin=${GETH_BIN:-geth}
 prysm_dir=${PRYSM_BIN_DIR:-}
@@ -10,11 +12,13 @@ done
 interop_dir=$(mktemp -d /tmp/hightower-prysm-geth.XXXXXX)
 geth_pid= producer_pid= validator_pid= fresh_pid= relay_pid= blob_pid=
 cleanup() {
-    local pid
+    local status=$? pid
     for pid in "$relay_pid" "$blob_pid" "$validator_pid" "$producer_pid" "$fresh_pid" "$geth_pid"; do
         if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
     done
-    if [[ ${KEEP_INTEROP_DIR:-0} != 1 ]]; then rm -rf "$interop_dir"; else echo "Interop files: $interop_dir"; fi
+    network_diagnostics_stop || status=1
+    if [[ $status == 0 && ${KEEP_INTEROP_DIR:-0} != 1 && ${NETWORK_PROXY:-0} != 1 && ${NETWORK_TRACE:-0} != 1 ]]; then rm -rf "$interop_dir"; else echo "Interop files: $interop_dir"; fi
+    exit "$status"
 }
 trap cleanup EXIT
 fail() {
@@ -53,6 +57,16 @@ PY
     fail "Timed out waiting for Prysm ENR at $url"
 }
 
+network_diagnostics_init
+engine_port=18551
+if [[ ${NETWORK_PROXY:-0} == 1 ]]; then
+    network_proxy_start producer-proxy tcp 19500 19000
+    network_proxy_start consumer-proxy tcp 19501 19001
+    network_proxy_start engine-proxy tcp 19551 18551
+    export HIGHTOWER_PRODUCER_PROXY=127.0.0.1:19500
+    export HIGHTOWER_CONSUMER_PROXY=127.0.0.1:19501
+    engine_port=19551
+fi
 zig build -Dpreset=mainnet p2p-interop-fixture p2p-interop-keys
 (
     cd scripts/prysm-interop/blobtx
@@ -123,7 +137,7 @@ geth_pid=$!
 for keyfile in "$interop_dir"/keys/*.hex; do
     "$prysm_dir/validator" accounts import --wallet-dir="$interop_dir/wallet" --wallet-password-file="$interop_dir/password" --keys-dir="$interop_dir/keys" --import-private-key-file="$keyfile" --account-password-file="$interop_dir/password" --accept-terms-of-use > "$interop_dir/import.log" 2>&1 || fail 'Validator key import failed'
 done
-"$prysm_dir/beacon-chain" --chain-id=1337 --chain-config-file="$interop_dir/chain.yaml" --genesis-state="$interop_dir/genesis.ssz" --datadir="$interop_dir/producer" --execution-endpoint=http://127.0.0.1:18551 --jwt-secret="$interop_dir/jwt.hex" --p2p-host-ip=127.0.0.1 --p2p-local-ip=127.0.0.1 --p2p-tcp-port=19000 --p2p-udp-port=19000 --p2p-max-peers=1 --min-sync-peers=0 --supernode --subscribe-all-subnets --grpc-gateway-port=13500 --rpc-port=14000 --accept-terms-of-use > "$interop_dir/producer.log" 2>&1 &
+"$prysm_dir/beacon-chain" --chain-id=1337 --chain-config-file="$interop_dir/chain.yaml" --genesis-state="$interop_dir/genesis.ssz" --datadir="$interop_dir/producer" --execution-endpoint="http://127.0.0.1:$engine_port" --jwt-secret="$interop_dir/jwt.hex" --p2p-host-ip=127.0.0.1 --p2p-local-ip=127.0.0.1 --p2p-tcp-port=19000 --p2p-udp-port=19000 --p2p-max-peers=1 --min-sync-peers=0 --supernode --subscribe-all-subnets --grpc-gateway-port=13500 --rpc-port=14000 --accept-terms-of-use > "$interop_dir/producer.log" 2>&1 &
 producer_pid=$!
 wait_enr http://127.0.0.1:13500/eth/v1/node/identity "$interop_dir/producer.enr" "$producer_pid"
 python3 - "$interop_dir/genesis-root" <<'PY' || fail 'Could not read Prysm genesis root'
@@ -161,7 +175,7 @@ with urllib.request.urlopen('http://127.0.0.1:13500/eth/v2/beacon/blocks/1', tim
 assert int(block['slot']) == 1 and len(block['body']['blob_kzg_commitments']) == 1
 PY
 kill "$validator_pid" 2>/dev/null || true; wait "$validator_pid" 2>/dev/null || true; validator_pid=
-GOLOG_LOG_LEVEL=debug "$prysm_dir/beacon-chain" --verbosity=debug --chain-id=1337 --chain-config-file="$interop_dir/chain.yaml" --genesis-state="$interop_dir/genesis.ssz" --datadir="$interop_dir/fresh" --execution-endpoint=http://127.0.0.1:18551 --jwt-secret="$interop_dir/jwt.hex" --p2p-host-ip=127.0.0.1 --p2p-local-ip=127.0.0.1 --p2p-tcp-port=19001 --p2p-udp-port=19001 --p2p-max-peers=1 --min-sync-peers=0 --supernode --grpc-gateway-port=13501 --rpc-port=14001 --accept-terms-of-use > "$interop_dir/fresh.log" 2>&1 &
+GOLOG_LOG_LEVEL=debug "$prysm_dir/beacon-chain" --verbosity=debug --chain-id=1337 --chain-config-file="$interop_dir/chain.yaml" --genesis-state="$interop_dir/genesis.ssz" --datadir="$interop_dir/fresh" --execution-endpoint="http://127.0.0.1:$engine_port" --jwt-secret="$interop_dir/jwt.hex" --p2p-host-ip=127.0.0.1 --p2p-local-ip=127.0.0.1 --p2p-tcp-port=19001 --p2p-udp-port=19001 --p2p-max-peers=1 --min-sync-peers=0 --supernode --grpc-gateway-port=13501 --rpc-port=14001 --accept-terms-of-use > "$interop_dir/fresh.log" 2>&1 &
 fresh_pid=$!
 wait_enr http://127.0.0.1:13501/eth/v1/node/identity "$interop_dir/fresh.enr" "$fresh_pid"
 ./zig-out/bin/hightower-p2p-interop-fixture "$(cat "$interop_dir/genesis-root")" 0x060000aa "$interop_dir/producer.enr" "$interop_dir/fresh.enr" "$interop_dir/relay.json" > "$interop_dir/relay.log" 2>&1 &

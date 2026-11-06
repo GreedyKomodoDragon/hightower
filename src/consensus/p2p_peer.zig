@@ -7,6 +7,7 @@
 // Control streams carry one response chunk; a request has a five-second read
 // deadline, and gossip RPCs retain the existing 16 MiB limit.
 const std = @import("std");
+const trace = @import("network_trace.zig");
 const discovery = @import("discv5_discovery.zig");
 const tcp = @import("p2p_tcp.zig");
 const yamux = @import("p2p_yamux.zig");
@@ -93,11 +94,14 @@ pub const Peer = struct {
         }
         const status_request = try control.encodeStatus(allocator, status);
         defer allocator.free(status_request);
+        try trace.emit("status_request", .{ .peer = std.fmt.bytesToHex(peer_id, .lower) }, status_request);
         const status_response = self.requestControl(1, .status, status_request) catch |err| {
+            try trace.emit("status_error", .{ .peer = std.fmt.bytesToHex(peer_id, .lower), .reason = @errorName(err) }, "");
             if (err == error.Timeout) return error.StatusTimeout;
             return err;
         };
         defer allocator.free(status_response);
+        try trace.emit("status_response", .{ .peer = std.fmt.bytesToHex(peer_id, .lower) }, status_response);
         const status_chunk = try wire.decodeResponseChunk(allocator, .status, status_response, null, 92);
         defer allocator.free(status_chunk.payload);
         self.remote_status = try control.decodeStatusResponse(allocator, &status_chunk);
@@ -468,6 +472,27 @@ pub const Peer = struct {
         }
     }
 
+    /// Retain another stream's data and FIN while this stream is being served.
+    fn queueOtherFrame(self: *Peer, id: u32, received: tcp.Connection.Received) !bool {
+        if (received.frame.stream_id == id) return false;
+        const data = received.frame.kind == .data and !received.frame.flags.syn;
+        const fin = received.frame.kind == .window_update and received.frame.flags.fin;
+        if (!data and !fin) return false;
+        if (received.frame.flags.rst) {
+            received.deinit(self.allocator);
+            return true;
+        }
+        if (self.pending_control.items.len == 32) {
+            received.deinit(self.allocator);
+            return error.TooManyPendingFrames;
+        }
+        self.pending_control.append(self.allocator, received) catch |err| {
+            received.deinit(self.allocator);
+            return err;
+        };
+        return true;
+    }
+
     /// Read one frame for a control stream, skipping peer window updates.
     fn controlFrame(self: *Peer, id: u32, deadline_at: i96) !tcp.Connection.Received {
         while (true) {
@@ -522,21 +547,7 @@ pub const Peer = struct {
         var state = multistream.Initiator{ .protocol = protocol };
         while (true) {
             const received = try self.connection.receive(deadline_at);
-            if (received.frame.stream_id != id and received.frame.kind == .data and !received.frame.flags.syn) {
-                if (received.frame.flags.rst) {
-                    received.deinit(self.allocator);
-                    continue;
-                }
-                if (self.pending_control.items.len == 32) {
-                    received.deinit(self.allocator);
-                    return error.TooManyPendingFrames;
-                }
-                self.pending_control.append(self.allocator, received) catch |err| {
-                    received.deinit(self.allocator);
-                    return err;
-                };
-                continue;
-            }
+            if (try self.queueOtherFrame(id, received)) continue;
             defer received.deinit(self.allocator);
             if (received.frame.flags.rst) {
                 if (received.frame.stream_id == id) return error.StreamReset;
@@ -593,21 +604,7 @@ pub const Peer = struct {
             }
             if (selected != null or finished) break;
             const received = try self.connection.receive(deadline_at);
-            if (received.frame.stream_id != id and received.frame.kind == .data and !received.frame.flags.syn) {
-                if (received.frame.flags.rst) {
-                    received.deinit(self.allocator);
-                    continue;
-                }
-                if (self.pending_control.items.len == 32) {
-                    received.deinit(self.allocator);
-                    return error.TooManyPendingFrames;
-                }
-                self.pending_control.append(self.allocator, received) catch |err| {
-                    received.deinit(self.allocator);
-                    return err;
-                };
-                continue;
-            }
+            if (try self.queueOtherFrame(id, received)) continue;
             defer received.deinit(self.allocator);
             if (received.frame.flags.rst) {
                 if (received.frame.stream_id == id) return error.StreamReset;
@@ -636,21 +633,7 @@ pub const Peer = struct {
         try request_bytes.appendSlice(self.allocator, buffer.items[application_offset..]);
         while (!finished) {
             const received = try self.connection.receive(deadline_at);
-            if (received.frame.stream_id != id and received.frame.kind == .data and !received.frame.flags.syn) {
-                if (received.frame.flags.rst) {
-                    received.deinit(self.allocator);
-                    continue;
-                }
-                if (self.pending_control.items.len == 32) {
-                    received.deinit(self.allocator);
-                    return error.TooManyPendingFrames;
-                }
-                self.pending_control.append(self.allocator, received) catch |err| {
-                    received.deinit(self.allocator);
-                    return err;
-                };
-                continue;
-            }
+            if (try self.queueOtherFrame(id, received)) continue;
             defer received.deinit(self.allocator);
             if (received.frame.flags.rst) {
                 if (received.frame.stream_id == id) return error.StreamReset;
@@ -671,6 +654,7 @@ pub const Peer = struct {
         }
         switch (protocol) {
             .status => {
+                try trace.emit("status_inbound", .{ .peer = std.fmt.bytesToHex(self.connection.peer_id, .lower) }, request_bytes.items);
                 self.remote_status = try control.decodeStatus(self.allocator, request_bytes.items);
                 try control.checkStatus(self.remote_status, self.local_status.fork_digest);
                 const response = try control.encodeStatusResponse(self.allocator, self.local_status);
@@ -783,6 +767,7 @@ pub const Peer = struct {
     fn serveStatus(self: *Peer, id: u32) !void {
         const request = try self.readControl(id, .status);
         defer self.allocator.free(request);
+        try trace.emit("status_inbound", .{ .peer = std.fmt.bytesToHex(self.connection.peer_id, .lower) }, request);
         self.remote_status = try control.decodeStatus(self.allocator, request);
         try control.checkStatus(self.remote_status, self.local_status.fork_digest);
         const response = try control.encodeStatusResponse(self.allocator, self.local_status);
@@ -1171,4 +1156,29 @@ test "discovered peers exchange Status Metadata block and attestation over TCP" 
     if (context.err) |err| return err;
     try std.testing.expectEqual(@as(usize, 1), counts_b.blocks);
     try std.testing.expectEqual(@as(usize, 1), counts_b.attestations);
+}
+
+// An unrelated identify request can interleave with the status response's FIN.
+test "inbound request preserves another control stream's data and FIN" {
+    const allocator = std.testing.allocator;
+    var peer: Peer = undefined;
+    peer.allocator = allocator;
+    peer.pending_control = .empty;
+    defer {
+        for (peer.pending_control.items) |received| received.deinit(allocator);
+        peer.pending_control.deinit(allocator);
+    }
+    const data = try allocator.dupe(u8, "status response");
+    try std.testing.expect(try peer.queueOtherFrame(2, .{
+        .bytes = data,
+        .frame = .{ .kind = .data, .stream_id = 1, .data = data },
+    }));
+    const fin = try allocator.dupe(u8, "fin");
+    try std.testing.expect(try peer.queueOtherFrame(2, .{
+        .bytes = fin,
+        .frame = .{ .kind = .window_update, .flags = .{ .fin = true }, .stream_id = 1 },
+    }));
+    try std.testing.expectEqual(@as(usize, 2), peer.pending_control.items.len);
+    try std.testing.expectEqualStrings("status response", peer.pending_control.items[0].frame.data);
+    try std.testing.expect(peer.pending_control.items[1].frame.flags.fin);
 }

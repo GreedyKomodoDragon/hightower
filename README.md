@@ -103,3 +103,5 @@ See [ROADMAP.md](ROADMAP.md) for the current codebase assessment and the propose
 ## License
 
 TBD — no license file yet.
+
+Local TCP/UDP captures, opt-in protocol traces, and native direct-versus-proxied interoperability runs are described in [network diagnostics](docs/network-diagnostics.md).

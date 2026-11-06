@@ -14,13 +14,15 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
     if (args.len != 1) return error.UnexpectedArgument;
+    if (init.environ_map.get("HIGHTOWER_NETWORK_TRACE")) |path| try consensus.NetworkTrace.enable(init.io, path);
+    defer consensus.NetworkTrace.close();
     var seed: [32]u8 = undefined;
     init.io.random(&seed);
     const key = try Ecdsa.KeyPair.generateDeterministic(seed);
     const local = consensus.ENR.Local{
         .sequence = 1,
         .ip = .{ 127, 0, 0, 1 },
-        .udp_port = 0,
+        .udp_port = if (init.environ_map.get("HIGHTOWER_DISCOVERY_PORT")) |value| try std.fmt.parseInt(u16, value, 10) else 0,
         .tcp_port = 9001,
         .fork_id = .{ 1, 2, 3, 4, 6, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255 },
         .next_fork_digest = .{0} ** 4,

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 
 	"github.com/ethereum/go-ethereum/crypto"
@@ -54,14 +55,33 @@ func probe(uri string) error {
 	}
 	defer conn.Close()
 	port := conn.LocalAddr().(*net.UDPAddr).Port
+	advertisedIP := net.IPv4(127, 0, 0, 1)
+	var transport discover.UDPConn = conn
+	if value := os.Getenv("HIGHTOWER_DISCOVERY_PROXY"); value != "" {
+		proxy, err := netip.ParseAddrPort(value)
+		if err != nil || !proxy.Addr().Is4() || !proxy.Addr().IsLoopback() || proxy.Port() == 0 {
+			return fmt.Errorf("invalid loopback discovery proxy: %q", value)
+		}
+		source, err := netip.ParseAddrPort(os.Getenv("HIGHTOWER_DISCOVERY_SOURCE"))
+		if err != nil || !source.Addr().Is4() || !source.Addr().IsLoopback() || source.Port() == 0 {
+			return fmt.Errorf("invalid discovery proxy source")
+		}
+		remoteAddr, ok := remote.UDPEndpoint()
+		if !ok || !remoteAddr.Addr().Is4() || !remoteAddr.Addr().IsLoopback() {
+			return fmt.Errorf("diagnostic discovery peer must be loopback")
+		}
+		port = int(source.Port())
+		advertisedIP = net.IP(source.Addr().AsSlice())
+		transport = &proxyConn{UDPConn: conn, proxy: proxy, remote: remoteAddr}
+	}
 	local := enode.NewLocalNode(db, key)
-	local.SetStaticIP(net.IPv4(127, 0, 0, 1))
+	local.SetStaticIP(advertisedIP)
 	local.Set(enr.UDP(port))
 	local.Set(enr.TCP(9002))
 	local.Set(enr.WithEntry("eth2", forkID))
 	local.Set(enr.WithEntry("cgc", uint64(4)))
 	local.Set(enr.WithEntry("nfd", []byte{0, 0, 0, 0}))
-	service, err := discover.ListenV5(conn, local, discover.Config{PrivateKey: key})
+	service, err := discover.ListenV5(transport, local, discover.Config{PrivateKey: key})
 	if err != nil {
 		return fmt.Errorf("start Geth discovery: %w", err)
 	}
@@ -70,7 +90,7 @@ func probe(uri string) error {
 	if err != nil {
 		return fmt.Errorf("Geth PING: %w", err)
 	}
-	if pong.ENRSeq != remote.Seq() || !pong.ToIP.Equal(net.IPv4(127, 0, 0, 1)) || pong.ToPort != uint16(port) {
+	if pong.ENRSeq != remote.Seq() || !pong.ToIP.Equal(advertisedIP) || pong.ToPort != uint16(port) {
 		return fmt.Errorf("Geth PONG had wrong sequence or observed endpoint: %+v", pong)
 	}
 	resolved, err := service.RequestENR(remote)
@@ -81,4 +101,32 @@ func probe(uri string) error {
 		return fmt.Errorf("Geth NODES returned a different peer")
 	}
 	return nil
+}
+
+// proxyConn changes socket destinations only; Geth still authenticates the signed remote ENR.
+// Its own ENR advertises the proxy's dedicated upstream port, preserving Hightower's endpoint gate.
+type proxyConn struct {
+	*net.UDPConn
+	proxy  netip.AddrPort
+	remote netip.AddrPort
+}
+
+// WriteToUDPAddrPort routes only the configured verified peer through the diagnostic proxy.
+func (c *proxyConn) WriteToUDPAddrPort(b []byte, addr netip.AddrPort) (int, error) {
+	if addr != c.remote {
+		return 0, fmt.Errorf("unexpected diagnostic destination: %s", addr)
+	}
+	return c.UDPConn.WriteToUDPAddrPort(b, c.proxy)
+}
+
+// ReadFromUDPAddrPort maps only proxy replies back to the original peer endpoint.
+func (c *proxyConn) ReadFromUDPAddrPort(b []byte) (int, netip.AddrPort, error) {
+	n, addr, err := c.UDPConn.ReadFromUDPAddrPort(b)
+	if err != nil {
+		return n, addr, err
+	}
+	if addr != c.proxy {
+		return 0, addr, fmt.Errorf("unexpected diagnostic source: %s", addr)
+	}
+	return n, c.remote, nil
 }

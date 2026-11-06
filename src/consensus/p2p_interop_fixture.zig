@@ -26,6 +26,8 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
     if (args.len != 6) return error.UnexpectedArgument;
+    if (init.environ_map.get("HIGHTOWER_NETWORK_TRACE")) |path| try consensus.NetworkTrace.enable(init.io, path);
+    defer consensus.NetworkTrace.close();
     const producer_enr_path = args[3];
     const consumer_enr_path = args[4];
     const result_path = args[5];
@@ -107,7 +109,9 @@ pub fn main(init: std.process.Init) !void {
         .custody_group_count = 128,
     };
 
-    var producer = try consensus.P2PPeer.Peer.dial(allocator, init.io, key, &discovery, &service, status, metadata, producer_enr.node_id, null);
+    const producer_destination = if (init.environ_map.get("HIGHTOWER_PRODUCER_PROXY")) |value| try std.Io.net.IpAddress.parseLiteral(value) else null;
+    const producer_connection = try consensus.P2PTcp.Connection.dialAt(allocator, init.io, key, &discovery, producer_enr.node_id, producer_destination);
+    var producer = try consensus.P2PPeer.Peer.finishDial(allocator, producer_connection, &discovery, &service, status, metadata, producer_enr.node_id, null);
     var fetched = try producer.fetchBlocksByRange(0, 2, 1);
     defer fetched.deinit();
     var selected: ?usize = null;
@@ -173,7 +177,9 @@ pub fn main(init: std.process.Init) !void {
     };
     const consumer_enr = try waitForEnr(allocator, init.io, consumer_enr_path);
     try discovery.addTrusted(consumer_enr);
-    var consumer = try consensus.P2PPeer.Peer.dial(allocator, init.io, key, &discovery, &service, fresh_status, metadata, consumer_enr.node_id, routes);
+    const consumer_destination = if (init.environ_map.get("HIGHTOWER_CONSUMER_PROXY")) |value| try std.Io.net.IpAddress.parseLiteral(value) else null;
+    const consumer_connection = try consensus.P2PTcp.Connection.dialAt(allocator, init.io, key, &discovery, consumer_enr.node_id, consumer_destination);
+    var consumer = try consensus.P2PPeer.Peer.finishDial(allocator, consumer_connection, &discovery, &service, fresh_status, metadata, consumer_enr.node_id, routes);
     defer consumer.deinit();
     const block_ssz = try ssz.serializeAlloc(allocator, block.*);
     defer allocator.free(block_ssz);

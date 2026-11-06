@@ -12,6 +12,7 @@
 // At most 256 peers and challenges are retained; challenges expire after 1 s.
 // FINDNODE replies have 10 s for a caller-driven, multi-packet exchange.
 const std = @import("std");
+const trace = @import("network_trace.zig");
 const enr = @import("enr.zig");
 const bootstrap = @import("discovery_bootstrap.zig");
 const udp = @import("discv5_udp.zig");
@@ -204,6 +205,8 @@ pub const Service = struct {
     /// Route one bounded datagram through its packet-specific authentication gate.
     fn handle(self: *Service, datagram: udp.Datagram) !void {
         const header = try packets.inspect(self.local_record.node_id, datagram.bytes);
+        var endpoint_buf: [64]u8 = undefined;
+        try trace.emit("discovery_packet", .{ .kind = @tagName(header.kind), .from = try std.fmt.bufPrint(&endpoint_buf, "{f}", .{datagram.from}) }, datagram.bytes);
         return switch (header.kind) {
             .ordinary => self.handleOrdinary(datagram),
             .whoareyou => self.handleWhoAreYou(datagram, header),
@@ -223,6 +226,7 @@ pub const Service = struct {
             else => return err,
         };
         defer decoded.deinit(self.allocator);
+        try trace.emit("discovery_authenticated", .{ .peer = std.fmt.bytesToHex(source_id, .lower) }, decoded.plaintext);
         if (decoded.plaintext.len > 0 and decoded.plaintext[0] == 4) return self.handleNodes(peer, decoded.plaintext);
         const message = try messages.decode(self.allocator, decoded.plaintext);
         switch (message) {
@@ -278,6 +282,7 @@ pub const Service = struct {
             const accepted = try handshake.decodePacket(self.allocator, self.local_record.node_id, self.key_pair.secret_key, pending.data, self.candidates.get(source_id), self.candidates.fork_digest, datagram.bytes);
             defer accepted.deinit(self.allocator);
             try udp.requireEndpoint(accepted.record, datagram.from);
+            try trace.emit("discovery_handshake_authenticated", .{ .peer = std.fmt.bytesToHex(source_id, .lower) }, accepted.plaintext);
             const message = try messages.decode(self.allocator, accepted.plaintext);
             const ping = switch (message) {
                 .ping => |value| value,

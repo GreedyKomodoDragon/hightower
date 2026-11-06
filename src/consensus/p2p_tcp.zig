@@ -7,6 +7,7 @@
 //   TCP -> /noise -> XX identity -> /yamux/1.0.0 -> bounded streams
 // This IPv4 transport allows at most 16 KiB of stream data per Yamux frame.
 const std = @import("std");
+const trace = @import("network_trace.zig");
 const enr = @import("enr.zig");
 const discovery = @import("discv5_discovery.zig");
 const multistream = @import("p2p_multistream.zig");
@@ -38,8 +39,13 @@ pub const Connection = struct {
 
     /// Dial only an authenticated discovery result at its signed TCP address.
     pub fn dial(allocator: std.mem.Allocator, io: std.Io, identity: Ecdsa.KeyPair, peers: *discovery.Service, peer_id: [32]u8) !Connection {
+        return dialAt(allocator, io, identity, peers, peer_id, null);
+    }
+
+    /// Override only the socket destination; authenticate against the original signed ENR.
+    pub fn dialAt(allocator: std.mem.Allocator, io: std.Io, identity: Ecdsa.KeyPair, peers: *discovery.Service, peer_id: [32]u8, destination: ?std.Io.net.IpAddress) !Connection {
         const record = peers.discoveredRecord(peer_id) orelse return error.UnknownPeer;
-        const address: std.Io.net.IpAddress = .{ .ip4 = .{ .bytes = record.ip, .port = record.tcp_port } };
+        const address: std.Io.net.IpAddress = destination orelse .{ .ip4 = .{ .bytes = record.ip, .port = record.tcp_port } };
         const stream = try address.connect(io, .{ .mode = .stream });
         errdefer stream.close(io);
         const deadline_at = now(io) + default_deadline_ns;
@@ -55,6 +61,7 @@ pub const Connection = struct {
         const third = try state.writeThird();
         try writeAll(io, stream, third.frame.slice());
         var result = Connection{ .allocator = allocator, .io = io, .stream = stream, .peer_id = peer_id, .cipher = .init(third.keys), .initiator = true };
+        try trace.emit("noise_authenticated", .{ .peer = std.fmt.bytesToHex(peer_id, .lower), .initiator = true }, "");
         try result.selectSecure(.yamux, true, deadline_at);
         return result;
     }
@@ -91,6 +98,7 @@ pub const Connection = struct {
         }
         const authenticated = selected orelse return error.InvalidPeerIdentity;
         var result = Connection{ .allocator = allocator, .io = io, .stream = stream, .peer_id = authenticated.id, .cipher = .init(authenticated.keys), .initiator = false };
+        try trace.emit("noise_authenticated", .{ .peer = std.fmt.bytesToHex(authenticated.id, .lower), .initiator = false }, "");
         try result.selectSecure(.yamux, false, deadline_at);
         return result;
     }
@@ -102,9 +110,9 @@ pub const Connection = struct {
 
     /// Encrypt and write one bounded Yamux frame on this connection.
     pub fn send(self: *Connection, frame: yamux.Frame) !void {
-        std.log.scoped(.p2p_transport).debug("send peer={x} stream={d} kind={s} syn={} ack={} fin={} rst={} len={d} prefix={x}", .{ self.peer_id[0..4], frame.stream_id, @tagName(frame.kind), frame.flags.syn, frame.flags.ack, frame.flags.fin, frame.flags.rst, frame.data.len, frame.data[0..@min(frame.data.len, 96)] });
         const bytes = try yamux.encode(self.allocator, frame);
         defer self.allocator.free(bytes);
+        try trace.emit("yamux_send", .{ .peer = std.fmt.bytesToHex(self.peer_id, .lower), .stream = frame.stream_id, .kind = @tagName(frame.kind), .flags = frame.flags, .value = frame.value }, bytes);
         return self.sendRaw(bytes);
     }
 
@@ -116,7 +124,7 @@ pub const Connection = struct {
             const bytes = try self.receiveRaw(deadline_ns);
             errdefer self.allocator.free(bytes);
             const frame = try yamux.decode(bytes);
-            std.log.scoped(.p2p_transport).debug("recv peer={x} stream={d} kind={s} syn={} ack={} fin={} rst={} len={d} prefix={x}", .{ self.peer_id[0..4], frame.stream_id, @tagName(frame.kind), frame.flags.syn, frame.flags.ack, frame.flags.fin, frame.flags.rst, frame.data.len, frame.data[0..@min(frame.data.len, 96)] });
+            try trace.emit("yamux_receive", .{ .peer = std.fmt.bytesToHex(self.peer_id, .lower), .stream = frame.stream_id, .kind = @tagName(frame.kind), .flags = frame.flags, .value = frame.value }, "");
             switch (frame.kind) {
                 .ping => {
                     self.allocator.free(bytes);
@@ -152,11 +160,15 @@ pub const Connection = struct {
         const body = try self.allocator.alloc(u8, length);
         defer self.allocator.free(body);
         try readExact(self.io, self.stream, body, deadline_ns);
-        return self.cipher.decodeBody(self.allocator, body);
+        const plaintext = try self.cipher.decodeBody(self.allocator, body);
+        errdefer self.allocator.free(plaintext);
+        try trace.emit("authenticated_frame", .{ .peer = std.fmt.bytesToHex(self.peer_id, .lower), .nonce = self.cipher.receive_nonce - 1 }, plaintext);
+        return plaintext;
     }
 
     /// Negotiate a secure application protocol before interpreting any frame.
     fn selectSecure(self: *Connection, protocol: multistream.Protocol, outgoing: bool, deadline_ns: i96) !void {
+        try trace.emit("secure_negotiation", .{ .peer = std.fmt.bytesToHex(self.peer_id, .lower), .protocol = @tagName(protocol), .outgoing = outgoing }, "");
         if (outgoing) {
             const offer = try multistream.offer(self.allocator, protocol);
             defer self.allocator.free(offer);
@@ -193,6 +205,7 @@ pub const Connection = struct {
 
 /// Negotiate an exact plaintext protocol before starting Noise XX.
 fn selectPlain(allocator: std.mem.Allocator, io: std.Io, stream: std.Io.net.Stream, protocol: multistream.Protocol, outgoing: bool, deadline_ns: i96) !void {
+    try trace.emit("plain_negotiation", .{ .protocol = @tagName(protocol), .outgoing = outgoing }, "");
     if (outgoing) {
         const offer = try multistream.offer(allocator, protocol);
         defer allocator.free(offer);

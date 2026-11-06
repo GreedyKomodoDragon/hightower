@@ -48,6 +48,7 @@ pub const P2PNoiseIdentity = @import("p2p_noise_identity.zig");
 pub const P2PNoiseXX = @import("p2p_noise_xx.zig");
 pub const P2PNoiseTransport = @import("p2p_noise_transport.zig");
 pub const P2PYamux = @import("p2p_yamux.zig");
+pub const NetworkTrace = @import("network_trace.zig");
 pub const P2PTcp = @import("p2p_tcp.zig");
 pub const P2PPeer = @import("p2p_peer.zig");
 pub const P2PService = @import("p2p_service.zig");

@@ -1,19 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
+source scripts/network_diagnostics.sh
 
 interop_dir=$(mktemp -d /tmp/hightower-discv5-geth.XXXXXX)
 fixture_pid=
 
 # Stop the loopback fixture and remove its temporary output.
 cleanup() {
+    local status=$?
     if [[ -n "$fixture_pid" ]]; then
         kill "$fixture_pid" 2>/dev/null || true
         wait "$fixture_pid" 2>/dev/null || true
     fi
-    rm -rf "$interop_dir"
+    network_diagnostics_stop || status=1
+    if [[ $status == 0 && ${KEEP_INTEROP_DIR:-0} != 1 && ${NETWORK_PROXY:-0} != 1 && ${NETWORK_TRACE:-0} != 1 ]]; then rm -rf "$interop_dir"; else echo "Interop files: $interop_dir"; fi
+    exit "$status"
 }
 trap cleanup EXIT
 
+network_diagnostics_init
+if [[ ${NETWORK_PROXY:-0} == 1 ]]; then
+    export HIGHTOWER_DISCOVERY_PORT=19004
+    export HIGHTOWER_DISCOVERY_PROXY=127.0.0.1:19504
+    export HIGHTOWER_DISCOVERY_SOURCE=127.0.0.1:19505
+    network_proxy_start discovery-proxy udp 19504 19004 "$HIGHTOWER_DISCOVERY_SOURCE"
+fi
 zig build discv5-interop-fixture
 (
     cd scripts/geth-discovery-probe

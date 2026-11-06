@@ -208,3 +208,6 @@ Chain:      [Block 0] ───────────────────�
 | Beacon roots contract | The Cancun system contract that stores each block's parent beacon root alongside its timestamp for later EVM reads. |
 | History storage contract | The Prague system contract that stores recent parent execution block hashes for EVM reads. |
 | Execution request queue | A Prague system contract that collects withdrawal or consolidation requests from transactions and releases them after block execution. |
+| Authenticated frame trace | A diagnostic record of protocol bytes after their cryptographic authentication succeeds, allowing encrypted peer traffic to be understood without recording session keys. |
+| StatusTimeout | Hightower's error when the initial peer status exchange does not complete within its request deadline; it does not by itself identify which protocol step stalled. |
+| Diagnostic socket override | A local test setting that routes traffic through a capture proxy while retaining the original signed peer record and cryptographic identity checks. |

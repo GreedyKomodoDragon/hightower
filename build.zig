@@ -121,6 +121,30 @@ pub fn build(b: *std.Build) void {
     // This will evaluate the `run` step rather than the default step.
     // For a top level step to actually do something, it must depend on other
     // steps (e.g. a Run step, as we will see in a moment).
+    const network_proxy = b.addExecutable(.{
+        .name = "hightower-network-proxy",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/network_proxy.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    const proxy_step = b.step("network-proxy", "Build the local TCP/UDP recording proxy");
+    proxy_step.dependOn(&b.addInstallArtifact(network_proxy, .{}).step);
+    const proxy_tests = b.addRunArtifact(b.addTest(.{ .root_module = network_proxy.root_module }));
+    const proxy_test_step = b.step("test-network-proxy", "Test local network diagnostics");
+    proxy_test_step.dependOn(&proxy_tests.step);
+    const trace_tests = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/consensus/network_trace.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) }));
+    proxy_test_step.dependOn(&trace_tests.step);
+    const proxy_integration = b.addSystemCommand(&.{ "python3", "scripts/test_network_proxy.py" });
+    proxy_integration.addArtifactArg(network_proxy);
+    proxy_test_step.dependOn(&proxy_integration.step);
+
     const run_step = b.step("run", "Run the app");
 
     // This creates a RunArtifact step in the build graph. A RunArtifact step
@@ -556,6 +580,7 @@ pub fn build(b: *std.Build) void {
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
     const test_step = b.step("test", "Run tests");
+    test_step.dependOn(proxy_test_step);
     test_step.dependOn(&run_tests.step);
     test_step.dependOn(&run_storage_tests.step);
     const storage_test_step = b.step("test-storage", "Run durable key-value storage tests");
