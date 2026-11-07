@@ -7,6 +7,12 @@ that their state roots match, but it cannot establish the history before the
 anchor. Keep both files and the genesis, fork schedule, and execution client
 for the same network. Do not use the bundled test fixture as a live anchor.
 
+> [!WARNING]
+> This JSON config is **not secure for handling secrets**. It stores the Engine
+> JWT secret and node key as plaintext. Use only disposable local credentials.
+> [FULU-072 (#175)](https://github.com/GreedyKomodoDragon/hightower/issues/175)
+> tracks moving both values to environment-injected secrets.
+
 Create a JSON config with these fields. The 32-byte `node_key` and
 `engine_jwt_secret` are lowercase hex without `0x`; use different node keys
 for two nodes and keep each key stable across restarts. The sample values below

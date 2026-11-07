@@ -15,6 +15,7 @@ comptime {
 }
 
 const version = "0.0.0";
+// shortcut: live credentials are plaintext in JSON, move them to environment-injected secrets in #175.
 const Config = struct {
     listen_address: []const u8,
     anchor_state: []const u8 = "",
