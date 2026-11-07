@@ -15,6 +15,7 @@ pub fn deserializeByteVector(
     comptime T: type,
     reader: *std.Io.Reader,
 ) !T {
+    // SAFETY: This value is fully initialized before any read.
     var result: T = undefined;
     const n = try reader.readSliceShort(result.data[0..]);
     if (n != T.byte_length) return error.EndOfStream;

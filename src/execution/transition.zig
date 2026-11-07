@@ -146,7 +146,7 @@ pub fn validatePending(allocator: std.mem.Allocator, world: *state.State, contex
     const sender = try execution.recoverSender(allocator, decoded.value, context.chain_id);
     if (f.nonce < world.getNonce(sender)) return error.InvalidNonce;
     const snap = try world.snapshot();
-    defer world.revert(snap) catch {};
+    defer world.revert(snap) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
     try world.setNonce(sender, f.nonce);
     _ = try validateTransaction(allocator, world, context, decoded.value, context.gas_limit);
     return .{ .sender = sender, .nonce = f.nonce, .gas_limit = f.gas_limit, .max_fee = f.max_fee, .priority_fee = f.priority_fee, .blob_fee_cap = f.blob_fee_cap, .blob_count = @intCast(f.blob_hashes.len) };
@@ -211,6 +211,7 @@ fn applyAuthorizations(allocator: std.mem.Allocator, world: *state.State, chain_
         defer allocator.free(message);
         message[0] = 5;
         @memcpy(message[1..], encoded);
+        // SAFETY: This value is fully initialized before any read.
         var hash: execution.Hash = undefined;
         std.crypto.hash.sha3.Keccak256.hash(message, &hash, .{});
         const authority = execution.crypto.recoverAddress(hash, auth.r, auth.s, auth.y_parity) catch continue;
@@ -237,7 +238,7 @@ fn applyAuthorizations(allocator: std.mem.Allocator, world: *state.State, chain_
 fn executeFrame(allocator: std.mem.Allocator, owner: std.mem.Allocator, world: *state.State, context: Context, tx: ValidatedTx, effects: AuthorizationEffects) !FrameOutcome {
     const frame = try world.snapshot();
     var frame_open = true;
-    errdefer if (frame_open) world.revert(frame) catch {};
+    errdefer if (frame_open) world.revert(frame) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
     if (tx.fields.value != 0) {
         try world.setBalance(tx.sender, world.getBalance(tx.sender) - tx.fields.value);
         try world.setBalance(tx.recipient, std.math.add(u256, world.getBalance(tx.recipient), tx.fields.value) catch return error.BalanceOverflow);
@@ -288,7 +289,7 @@ pub fn applyTransaction(allocator: std.mem.Allocator, world: *state.State, conte
     errdefer arena.deinit();
     const snap = try world.snapshot();
     var open = true;
-    errdefer if (open) world.revert(snap) catch {};
+    errdefer if (open) world.revert(snap) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
     try world.setBalance(tx.sender, world.getBalance(tx.sender) - tx.max_cost);
     try world.setNonce(tx.sender, tx.fields.nonce + 1);
     const effects = try applyAuthorizations(arena.allocator(), world, context.chain_id, tx.fields.authorizations);
@@ -332,6 +333,7 @@ pub fn headerHash(allocator: std.mem.Allocator, fork: Fork, header: execution.He
         .prague, .osaka, .fulu => try execution.encode(allocator, prefix ++ .{ header.withdrawals_root, header.blob_gas_used, header.excess_blob_gas, header.parent_beacon_block_root, header.requests_hash }),
     };
     defer allocator.free(encoded);
+    // SAFETY: This value is fully initialized before any read.
     var hash: execution.Hash = undefined;
     std.crypto.hash.sha3.Keccak256.hash(encoded, &hash, .{});
     return hash;
@@ -523,6 +525,7 @@ pub fn requestsHash(allocator: std.mem.Allocator, requests: []const []const u8) 
         if (raw.len < 2) return error.InvalidExecutionRequests;
         std.crypto.hash.sha2.Sha256.hash(raw, hashes[i * 32 ..][0..32], .{});
     }
+    // SAFETY: This value is fully initialized before any read.
     var result: execution.Hash = undefined;
     std.crypto.hash.sha2.Sha256.hash(hashes, &result, .{});
     return result;
@@ -540,7 +543,7 @@ pub fn applyBlock(allocator: std.mem.Allocator, world: *state.State, block: Bloc
     @memcpy(block_hashes[1..], block.older_hashes);
     const snapshot = try world.snapshot();
     var open = true;
-    errdefer if (open) world.revert(snapshot) catch {};
+    errdefer if (open) world.revert(snapshot) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
     const context: Context = .{ .fork = block.fork, .chain_id = block.chain_id, .coinbase = header.fee_recipient, .number = header.number, .timestamp = header.timestamp, .gas_limit = header.gas_limit, .base_fee = header.base_fee_per_gas, .prev_randao = header.prev_randao, .difficulty = header.difficulty, .blob_base_fee = if (@intFromEnum(block.fork) < @intFromEnum(Fork.cancun)) null else try blobBaseFee(block.fork, header.excess_blob_gas), .block_hashes = block_hashes };
     try applySystemTransitions(arena.allocator(), world, context, parent_hash, header.parent_beacon_block_root);
     const gas_used = try applyBlockTransactions(arena.allocator(), world, context, transactions, receipts);

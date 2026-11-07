@@ -68,6 +68,7 @@ fn signTransaction(a: std.mem.Allocator, tx: *execution.Transaction, sender: exe
     var hasher = std.crypto.hash.sha3.Keccak256.init(.{});
     hasher.update(&.{2});
     hasher.update(payload);
+    // SAFETY: This value is fully initialized before any read.
     var hash: execution.Hash = undefined;
     hasher.final(&hash);
     const Scheme = std.crypto.sign.ecdsa.Ecdsa(std.crypto.ecc.Secp256k1, std.crypto.hash.sha3.Keccak256);

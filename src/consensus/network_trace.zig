@@ -5,6 +5,7 @@
 // Each JSONL event is serialized and synced before the protocol proceeds.
 const std = @import("std");
 var output: ?std.Io.File = null;
+// SAFETY: Set by enable before workers start and read until they stop.
 var trace_io: std.Io = undefined;
 var mutex: std.Io.Mutex = .init;
 

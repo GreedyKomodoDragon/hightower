@@ -59,6 +59,7 @@ pub const Pool = struct {
         const sidecar: ?[]u8 = if (is_blob) try self.allocator.dupe(u8, network_raw) else null;
         errdefer if (owned) if (sidecar) |bytes| self.allocator.free(bytes);
         const admission = try transition.validatePending(self.allocator, world, context, raw);
+        // SAFETY: This value is fully initialized before any read.
         var hash: execution.Hash = undefined;
         std.crypto.hash.sha3.Keccak256.hash(raw, &hash, .{});
         if (self.findHash(hash) != null) return error.AlreadyKnown;
@@ -125,7 +126,7 @@ pub const Pool = struct {
         defer allocator.free(used);
         @memset(used, false);
         const snap = try world.snapshot();
-        defer world.revert(snap) catch {};
+        defer world.revert(snap) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
         var remaining = gas_limit;
         var blobs_remaining = max_blobs;
         while (true) {

@@ -61,7 +61,7 @@ pub const Chain = struct {
         defer self.allocator.free(older_hashes);
         const snap = try world.snapshot();
         var open = true;
-        errdefer if (open) world.revert(snap) catch {};
+        errdefer if (open) world.revert(snap) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
         const max_blobs: u64 = switch (self.fork) {
             .cancun => 6,
             .prague, .osaka => 9,
@@ -74,7 +74,7 @@ pub const Chain = struct {
         result_owned = false;
         errdefer record.deinit(self.allocator);
         try self.records.append(self.allocator, record);
-        world.commit(snap) catch unreachable;
+        try world.commit(snap);
         open = false;
     }
 
@@ -106,6 +106,7 @@ pub const Chain = struct {
     /// Locates a transaction and its zero-based index in canonical history.
     pub fn transaction(self: *const Chain, hash: execution.Hash) ?struct { record: *const Record, index: usize } {
         for (self.records.items) |*record| for (record.transactions, 0..) |raw, index| {
+            // SAFETY: This value is fully initialized before any read.
             var candidate: execution.Hash = undefined;
             std.crypto.hash.sha3.Keccak256.hash(raw, &candidate, .{});
             if (std.mem.eql(u8, &candidate, &hash)) return .{ .record = record, .index = index };

@@ -24,6 +24,7 @@ pub fn upgradeToFulu(allocator: std.mem.Allocator, pre: *const fulu.ElectraBeaco
         pre.validators.data.len != pre.inactivity_scores.data.len)
         return error.InvalidPreState;
 
+    // SAFETY: This value is fully initialized before any read.
     var borrowed: fulu.BeaconState = undefined;
     inline for (@typeInfo(fulu.ElectraBeaconState).@"struct".fields) |field| {
         @field(borrowed, field.name) = @field(pre.*, field.name);
@@ -34,6 +35,7 @@ pub fn upgradeToFulu(allocator: std.mem.Allocator, pre: *const fulu.ElectraBeaco
         .current_version = preset.FULU_FORK_VERSION,
         .epoch = epoch,
     };
+    // SAFETY: This value is fully initialized before any read.
     borrowed.proposer_lookahead = undefined;
     for (0..2) |offset| {
         const target_epoch = std.math.add(u64, epoch, offset) catch return error.InvalidPreState;

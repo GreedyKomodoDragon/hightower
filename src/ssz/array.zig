@@ -50,6 +50,7 @@ pub fn deserializeArrayVar(
     const offsets = try offset_mod.splitVariable(allocator, bytes, info.len);
     defer allocator.free(offsets);
 
+    // SAFETY: This value is fully initialized before any read.
     var result: T = undefined;
     var done: usize = 0;
     errdefer {

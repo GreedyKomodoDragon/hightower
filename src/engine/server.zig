@@ -224,7 +224,7 @@ pub const Server = struct {
     pub fn serve(self: *Server, allocator: std.mem.Allocator, io: std.Io, listener: *std.Io.net.Server) !void {
         while (true) {
             const stream = try listener.accept(io);
-            self.serveConnection(allocator, io, stream) catch {};
+            self.serveConnection(allocator, io, stream) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
         }
     }
 
@@ -418,6 +418,7 @@ pub const Server = struct {
         var gas_used: u64 = 0;
         for (selected, 0..) |raw, i| {
             if (raw.len != 0 and raw[0] == 3) {
+                // SAFETY: This value is fully initialized before any read.
                 var tx_hash: execution.Hash = undefined;
                 std.crypto.hash.sha3.Keccak256.hash(raw, &tx_hash, .{});
                 const entry = self.pool.get(tx_hash) orelse return error.MissingBlobSidecar;
@@ -497,6 +498,7 @@ pub const Server = struct {
 
 /// Returns the request commitment for no execution requests.
 fn emptyRequestsHash() !execution.Hash {
+    // SAFETY: This value is fully initialized before any read.
     var hash: execution.Hash = undefined;
     std.crypto.hash.sha2.Sha256.hash(&.{}, &hash, .{});
     return hash;
@@ -508,6 +510,7 @@ fn payloadHeader(a: std.mem.Allocator, p: fulu.ExecutionPayload, beacon_root: ex
     for (p.transactions.data, txs) |raw, *out| out.* = raw.data;
     const ws = try a.alloc([]const u8, p.withdrawals.data.len);
     for (p.withdrawals.data, ws) |w, *out| out.* = try execution.encode(a, execution.Withdrawal{ .index = w.index, .validator_index = w.validator_index, .address = w.address, .amount = w.amount });
+    // SAFETY: This value is fully initialized before any read.
     var ommers: execution.Hash = undefined;
     std.crypto.hash.sha3.Keccak256.hash(&.{0xc0}, &ommers, .{});
     return .{ .parent_hash = p.parent_hash, .ommers_hash = ommers, .fee_recipient = p.fee_recipient, .state_root = p.state_root, .transactions_root = try execution.trie.orderedRoot(a, txs), .receipts_root = p.receipts_root, .logs_bloom = p.logs_bloom, .difficulty = 0, .number = p.block_number, .gas_limit = p.gas_limit, .gas_used = p.gas_used, .timestamp = p.timestamp, .extra_data = p.extra_data.data, .prev_randao = p.prev_randao, .nonce = .{0} ** 8, .base_fee_per_gas = p.base_fee_per_gas, .withdrawals_root = try execution.trie.orderedRoot(a, ws), .blob_gas_used = p.blob_gas_used, .excess_blob_gas = p.excess_blob_gas, .parent_beacon_block_root = beacon_root, .requests_hash = requests_hash };

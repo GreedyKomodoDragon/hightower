@@ -64,7 +64,7 @@ const Event = union(enum) { header, unavailable, protocol: Protocol, unsupported
 
 /// Hold at most one partial multistream line across transport reads.
 pub const Decoder = struct {
-    bytes: [max_line_size]u8 = undefined,
+    bytes: [max_line_size]u8 = .{0} ** max_line_size,
     length: usize = 0,
     received: usize = 0,
     prefix: u8 = 0,

@@ -326,6 +326,7 @@ fn expectFixtureSender(json_bytes: []const u8, fork: []const u8, expected_chain_
     defer transaction.deinit();
     const sender = try execution.recoverSender(testing.allocator, transaction.value, expected_chain_id);
     const expected_hex = test_case.object.get("result").?.object.get(fork).?.object.get("sender").?.string;
+    // SAFETY: This value is fully initialized before any read.
     var expected: execution.Address = undefined;
     _ = try std.fmt.hexToBytes(&expected, expected_hex[2..]);
     try testing.expectEqualSlices(u8, &expected, &sender);
@@ -422,6 +423,7 @@ fn signedAuthorization(a: std.mem.Allocator, target: execution.Address, nonce: u
     defer a.free(message);
     message[0] = 5;
     @memcpy(message[1..], encoded);
+    // SAFETY: This value is fully initialized before any read.
     var hash: execution.Hash = undefined;
     std.crypto.hash.sha3.Keccak256.hash(message, &hash, .{});
     const Scheme = std.crypto.sign.ecdsa.Ecdsa(std.crypto.ecc.Secp256k1, std.crypto.hash.sha3.Keccak256);

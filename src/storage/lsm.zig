@@ -56,6 +56,7 @@ pub const Database = struct {
         errdefer dir.close(io);
         const lock_file = try dir.createFile(io, "LOCK", .{ .read = true, .truncate = false, .lock = .exclusive, .lock_nonblocking = true });
         errdefer lock_file.close(io);
+        // SAFETY: This value is fully initialized before any read.
         var db = Database{ .allocator = allocator, .io = io, .dir = dir, .lock_file = lock_file, .wal = undefined, .wal_id = 1, .wal_end = wal_magic.len, .next_id = 2 };
         errdefer db.freeIndex();
         errdefer db.tables.deinit(allocator);
@@ -424,7 +425,7 @@ pub const Database = struct {
         self.mem_bytes = 0;
         const old_name = try fileName(self.allocator, "wal", old_wal);
         defer self.allocator.free(old_name);
-        self.dir.deleteFile(self.io, old_name) catch {};
+        self.dir.deleteFile(self.io, old_name) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
         try self.compactLocked();
     }
 
@@ -470,12 +471,12 @@ pub const Database = struct {
             for (selected) |id| {
                 const name = try fileName(self.allocator, "sst", id);
                 defer self.allocator.free(name);
-                self.dir.deleteFile(self.io, name) catch {};
+                self.dir.deleteFile(self.io, name) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
             }
             if (moves.items.len == 0) {
                 const name = try fileName(self.allocator, "sst", new_id);
                 defer self.allocator.free(name);
-                self.dir.deleteFile(self.io, name) catch {};
+                self.dir.deleteFile(self.io, name) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
             }
             level = 0;
         }
@@ -493,7 +494,7 @@ pub const Database = struct {
             const name = fileName(self.allocator, "sst", new_id) catch null;
             if (name) |path| {
                 defer self.allocator.free(path);
-                self.dir.deleteFile(self.io, path) catch {};
+                self.dir.deleteFile(self.io, path) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
             }
         };
         var iter = self.index.iterator();
@@ -515,7 +516,7 @@ pub const Database = struct {
         for (self.tables.items) |table| {
             const name = fileName(self.allocator, "sst", table.id) catch continue;
             defer self.allocator.free(name);
-            self.dir.deleteFile(self.io, name) catch {};
+            self.dir.deleteFile(self.io, name) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
         }
         self.tables.clearRetainingCapacity();
         self.tables.appendAssumeCapacity(replacement[0]);
@@ -541,7 +542,7 @@ pub const Database = struct {
         const name = try fileName(self.allocator, "sst", id);
         defer self.allocator.free(name);
         var file = try self.dir.createFile(self.io, name, .{ .read = true, .exclusive = true });
-        errdefer self.dir.deleteFile(self.io, name) catch {};
+        errdefer self.dir.deleteFile(self.io, name) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
         defer file.close(self.io);
         try file.writeStreamingAll(self.io, table_magic);
         var offset: u64 = table_magic.len;

@@ -56,7 +56,7 @@ fn checkSStore(allocator: std.mem.Allocator, case: SStoreCase) !void {
     defer machine.deinit();
     var result = try machine.run(.{ .code = code, .gas = 100_000, .callee = address });
     defer result.deinit(allocator);
-    errdefer std.debug.print("SSTORE fixture failed: {s}\n", .{case.name});
+    errdefer std.log.err("SSTORE fixture failed: {s}", .{case.name});
     try std.testing.expect(result.status == .success);
     try std.testing.expectEqual(@as(u64, 100_000 - case.gas_used), result.gas_remaining);
     try std.testing.expectEqual(case.refund, machine.refund);
@@ -84,7 +84,7 @@ fn checkMCopy(allocator: std.mem.Allocator, case: MCopyCase) !void {
     defer machine.deinit();
     var result = try machine.run(.{ .code = code.items, .gas = 100_000 });
     defer result.deinit(allocator);
-    errdefer std.debug.print("MCOPY fixture failed: {s}\n", .{case.name});
+    errdefer std.log.err("MCOPY fixture failed: {s}", .{case.name});
     try std.testing.expect(result.status == .success);
     try std.testing.expectEqualSlices(u8, expected, result.output);
     try std.testing.expectEqual(@as(u64, 100_000 - case.gas_used), result.gas_remaining);
@@ -101,5 +101,5 @@ test "pinned EVM storage and memory fixtures" {
     try std.testing.expectEqual(@as(usize, 4), fixture.mcopy.len);
     for (fixture.sstore) |case| try checkSStore(allocator, case);
     for (fixture.mcopy) |case| try checkMCopy(allocator, case);
-    std.debug.print("EVM fixtures: {d} SSTORE and {d} MCOPY cases passed\n", .{ fixture.sstore.len, fixture.mcopy.len });
+    std.log.info("EVM fixtures: {d} SSTORE and {d} MCOPY cases passed", .{ fixture.sstore.len, fixture.mcopy.len });
 }

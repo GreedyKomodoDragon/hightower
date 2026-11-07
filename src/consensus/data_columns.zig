@@ -48,7 +48,7 @@ pub const CanonicalRoots = struct {
 };
 
 pub const Groups = struct {
-    values: [column_count]u8 = undefined,
+    values: [column_count]u8 = .{0} ** column_count,
     len: usize,
 
     /// Tell whether a column is in this group selection.

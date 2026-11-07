@@ -45,6 +45,7 @@ pub fn encode(identity: Ecdsa.KeyPair, noise_static_key: [32]u8) !Payload {
     }
     var der_buffer: [max_signature_size]u8 = undefined;
     const der = signature.toDer(&der_buffer);
+    // SAFETY: This value is fully initialized before any read.
     var payload: Payload = .{ .bytes = undefined, .len = 2 + public_key_size + 2 + der.len };
     payload.bytes[0] = identity_key_tag;
     payload.bytes[1] = public_key_size;

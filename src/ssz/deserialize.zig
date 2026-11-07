@@ -80,6 +80,7 @@ pub fn deserializeFixed(
             return bit_vector_mod.deserializeBitVector(T, reader);
         },
         .Array => {
+            // SAFETY: This value is fully initialized before any read.
             var result: T = undefined;
             const info = @typeInfo(T).array;
             for (&result) |*item| {
@@ -88,6 +89,7 @@ pub fn deserializeFixed(
             return result;
         },
         .Container, .ProgressiveContainer => {
+            // SAFETY: This value is fully initialized before any read.
             var result: T = undefined;
             inline for (@typeInfo(T).@"struct".fields) |field| {
                 @field(result, field.name) = try deserializeFixed(field.type, reader);

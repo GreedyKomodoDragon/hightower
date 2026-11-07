@@ -8,7 +8,7 @@ const merkle = @import("merkle");
 
 test "vectors.test_uint256_mid" {
     const allocator = testing.allocator;
-    const value: u256 = @as(u256, 57896044618658097711785492504343953926634992332820282019728792003956564819968);
+    const value: u256 = 57896044618658097711785492504343953926634992332820282019728792003956564819968;
 
     const expected_serialized_hex = "0000000000000000000000000000000000000000000000000000000000000080";
     var expected_serialized: [expected_serialized_hex.len / 2]u8 = undefined;

@@ -25,7 +25,7 @@ const max_outbound_size = 256;
 const max_inbound_size = 2048;
 
 pub const Frame = struct {
-    bytes: [max_outbound_size]u8 = undefined,
+    bytes: [max_outbound_size]u8 = .{0} ** max_outbound_size,
     len: usize,
 
     /// Borrow this complete framed handshake message for one transport write.
@@ -125,7 +125,7 @@ pub const Initiator = struct {
     static_key: X25519.KeyPair,
     ephemeral_key: X25519.KeyPair,
     remote: enr.Record,
-    remote_ephemeral: [key_size]u8 = undefined,
+    remote_ephemeral: [key_size]u8 = .{0} ** key_size,
     phase: enum { first, second, third, complete, failed } = .first,
 
     /// Borrow a verified remote ENR and fresh, distinct Noise keypairs.
@@ -186,7 +186,7 @@ pub const Responder = struct {
     static_key: X25519.KeyPair,
     ephemeral_key: X25519.KeyPair,
     remote: enr.Record,
-    remote_ephemeral: [key_size]u8 = undefined,
+    remote_ephemeral: [key_size]u8 = .{0} ** key_size,
     phase: enum { first, second, third, complete, failed } = .first,
 
     /// Borrow a verified remote ENR and fresh, distinct Noise keypairs.
@@ -273,7 +273,7 @@ fn testRecord(allocator: std.mem.Allocator, key: Ecdsa.KeyPair) !enr.Record {
 /// Decode a compile-time hex fixture into its exact byte array.
 fn hex(comptime input: []const u8) [input.len / 2]u8 {
     var result: [input.len / 2]u8 = undefined;
-    _ = std.fmt.hexToBytes(&result, input) catch unreachable;
+    _ = std.fmt.hexToBytes(&result, input) catch @panic("invalid compile-time Noise vector hex");
     return result;
 }
 

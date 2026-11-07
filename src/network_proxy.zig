@@ -49,7 +49,7 @@ fn address(text: []const u8) !c.struct_sockaddr_in {
 /// Format a numeric endpoint without allocation.
 fn endpoint(a: c.struct_sockaddr_in, buf: *[64]u8) []const u8 {
     const ip: [4]u8 = @bitCast(a.sin_addr.s_addr);
-    return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}:{d}", .{ ip[0], ip[1], ip[2], ip[3], std.mem.bigToNative(u16, a.sin_port) }) catch unreachable;
+    return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}:{d}", .{ ip[0], ip[1], ip[2], ip[3], std.mem.bigToNative(u16, a.sin_port) }) catch @panic("endpoint buffer is sized for IPv4 text");
 }
 /// Create a nonblocking socket; SIGPIPE is ignored process-wide.
 fn socket(udp: bool) !c_int {
@@ -149,7 +149,7 @@ const Recorder = struct {
     }
 };
 const Pending = struct {
-    bytes: [65535]u8 = undefined,
+    bytes: [65535]u8 = .{0} ** 65535,
     len: usize = 0,
     sent: usize = 0,
     offset: u64 = 0,
@@ -252,8 +252,8 @@ fn run(io: std.Io, udp: bool, listen: c.struct_sockaddr_in, upstream: c.struct_s
     defer r.deinit();
     errdefer |err| {
         const failure = Session{};
-        r.event(&failure, 0, "fatal", 0, 0, @errorName(err)) catch {};
-        r.flush() catch {};
+        r.event(&failure, 0, "fatal", 0, 0, @errorName(err)) catch |event_err| std.log.err("best-effort operation failed: {s}", .{@errorName(event_err)});
+        r.flush() catch |flush_err| std.log.err("best-effort operation failed: {s}", .{@errorName(flush_err)});
     }
     const sessions = try std.heap.page_allocator.alloc(Session, max_sessions);
     defer std.heap.page_allocator.free(sessions);
@@ -266,7 +266,7 @@ fn run(io: std.Io, udp: bool, listen: c.struct_sockaddr_in, upstream: c.struct_s
     try r.event(&marker, 0, "ready", 0, 0, null);
     try r.flush();
     var ready_buf: [64]u8 = undefined;
-    std.debug.print("ready {s} {s}\n", .{ if (udp) "udp" else "tcp", endpoint(actual, &ready_buf) });
+    std.log.info("ready {s} {s}", .{ if (udp) "udp" else "tcp", endpoint(actual, &ready_buf) });
     loop: while (!stopping.load(.acquire)) {
         var polls: [1 + max_sessions * 2]c.struct_pollfd = undefined;
         polls[0] = .{ .fd = listener, .events = c.POLLIN, .revents = 0 };
@@ -403,7 +403,7 @@ fn run(io: std.Io, udp: bool, listen: c.struct_sockaddr_in, upstream: c.struct_s
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len != 5 and args.len != 6) {
-        std.debug.print("usage: hightower-network-proxy tcp|udp LISTEN_IP:PORT UPSTREAM_IP:PORT NEW_OUTPUT_DIR [UDP_SOURCE_IP:PORT]\n", .{});
+        std.log.info("usage: hightower-network-proxy tcp|udp LISTEN_IP:PORT UPSTREAM_IP:PORT NEW_OUTPUT_DIR [UDP_SOURCE_IP:PORT]", .{});
         return error.InvalidArguments;
     }
     const udp = std.mem.eql(u8, args[1], "udp");

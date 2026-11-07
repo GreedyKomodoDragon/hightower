@@ -279,6 +279,7 @@ fn fromValue(comptime T: type, allocator: std.mem.Allocator, value: decode.Value
         .@"struct" => {
             const fields = std.meta.fields(T);
             const items = try asList(value, fields.len);
+            // SAFETY: This value is fully initialized before any read.
             var out: T = undefined;
             inline for (fields, 0..) |field, i| @field(out, field.name) = try fromValue(field.type, allocator, items[i]);
             return out;
@@ -415,6 +416,7 @@ fn typedDetails(allocator: std.mem.Allocator, expected_chain_id: u256, envelope:
 fn hashRlp(allocator: std.mem.Allocator, envelope: ?u8, payload: anytype) !Hash {
     const encoded = try encode(allocator, payload);
     defer allocator.free(encoded);
+    // SAFETY: This value is fully initialized before any read.
     var hash: Hash = undefined;
     if (envelope) |tag| {
         var hasher = std.crypto.hash.sha3.Keccak256.init(.{});

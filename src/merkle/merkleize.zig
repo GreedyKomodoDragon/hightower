@@ -82,7 +82,7 @@ fn hashPair(left: [32]u8, right: [32]u8) [32]u8 {
 /// Smallest power of two greater than or equal to x. Returns 1 for 0.
 fn nextPow2(x: usize) usize {
     if (x <= 1) return 1;
-    return std.math.ceilPowerOfTwo(usize, x) catch unreachable;
+    return std.math.ceilPowerOfTwo(usize, x) catch @panic("Merkle chunk count exceeds addressable capacity");
 }
 
 /// Root of the all-zero perfect binary tree spanning `width` leaves.

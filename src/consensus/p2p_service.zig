@@ -39,7 +39,7 @@ pub const Service = struct {
         identity: Ecdsa.KeyPair,
         peers: *discovery.Service,
         peer_id: [32]u8,
-        thread: std.Thread = undefined,
+        thread: ?std.Thread = null,
         done: std.atomic.Value(bool) = .init(false),
         connection: ?tcp.Connection = null,
         err: ?anyerror = null,
@@ -72,7 +72,7 @@ pub const Service = struct {
     /// Close the active peer, discovery socket, TCP listener, and owned table.
     pub fn deinit(self: *Service) void {
         if (self.pending_dial) |dial| {
-            dial.thread.join();
+            dial.thread.?.join();
             if (dial.connection) |*connection| connection.deinit();
             self.allocator.destroy(dial);
         }
@@ -183,7 +183,7 @@ pub const Service = struct {
         }
         if (self.pending_dial) |dial| {
             if (dial.done.load(.acquire)) {
-                dial.thread.join();
+                dial.thread.?.join();
                 self.pending_dial = null;
                 defer self.allocator.destroy(dial);
                 if (dial.connection) |transport| {

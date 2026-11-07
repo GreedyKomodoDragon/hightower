@@ -85,6 +85,7 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) !Record {
     if (items.len < 4 or items.len % 2 != 0) return error.InvalidRecord;
     const signature = try string(items[0]);
     if (signature.len != 64) return error.InvalidSignature;
+    // SAFETY: All fields are decoded and assigned before the record is returned.
     var record: Record = undefined;
     record.sequence = try integer(u64, try string(items[1]));
     var seen: u8 = 0;

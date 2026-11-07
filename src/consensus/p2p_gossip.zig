@@ -59,9 +59,9 @@ const Subscription = struct { topic: []const u8, subscribe: bool };
 const RemoteSubscriptions = struct { block: bool = false, aggregate: bool = false, attestations: u64 = 0, columns: [2]u64 = .{ 0, 0 } };
 const TopicSelection = union(enum) { block, aggregate, attestation: u8, column: u8 };
 const Parsed = struct {
-    publishes: [max_publishes]Publish = undefined,
+    publishes: [max_publishes]Publish = std.mem.zeroes([max_publishes]Publish),
     publish_len: usize = 0,
-    subscriptions: [max_subscriptions]Subscription = undefined,
+    subscriptions: [max_subscriptions]Subscription = std.mem.zeroes([max_subscriptions]Subscription),
     subscription_len: usize = 0,
 };
 
@@ -87,7 +87,7 @@ pub const Service = struct {
     subscriptions: std.AutoHashMap([32]u8, RemoteSubscriptions),
     connection_counts: std.AutoHashMap([32]u8, u32),
     seen: std.AutoHashMap([20]u8, void),
-    seen_order: [seen_capacity][20]u8 = undefined,
+    seen_order: [seen_capacity][20]u8 = .{.{0} ** 20} ** seen_capacity,
     seen_len: usize = 0,
     seen_next: usize = 0,
 
@@ -299,7 +299,7 @@ pub const Service = struct {
     fn remoteColumnIndex(self: *const Service, name: []const u8) ?u8 {
         const hex = std.fmt.bytesToHex(self.digest, .lower);
         var buffer: [64]u8 = undefined;
-        const prefix = std.fmt.bufPrint(&buffer, "/eth2/{s}/data_column_sidecar_", .{&hex}) catch unreachable;
+        const prefix = std.fmt.bufPrint(&buffer, "/eth2/{s}/data_column_sidecar_", .{&hex}) catch return null;
         const suffix = "/ssz_snappy";
         if (name.len < prefix.len + suffix.len or !std.mem.startsWith(u8, name, prefix) or !std.mem.endsWith(u8, name, suffix)) return null;
         const digits = name[prefix.len .. name.len - suffix.len];
