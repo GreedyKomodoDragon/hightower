@@ -15,7 +15,10 @@ const unavailable = "na";
 const max_line_size = 128;
 
 pub const Protocol = enum {
+    noise,
+    yamux,
     gossip,
+    identify,
     status,
     ping,
     metadata,
@@ -27,7 +30,10 @@ pub const Protocol = enum {
     /// Return the exact protocol ID, including the Req/Resp encoding suffix.
     pub fn id(self: Protocol) []const u8 {
         return switch (self) {
+            .noise => "/noise",
+            .yamux => "/yamux/1.0.0",
             .gossip => "/meshsub/1.1.0",
+            .identify => "/ipfs/id/1.0.0",
             .status => "/eth2/beacon_chain/req/status/2/ssz_snappy",
             .ping => "/eth2/beacon_chain/req/ping/1/ssz_snappy",
             .metadata => "/eth2/beacon_chain/req/metadata/3/ssz_snappy",
@@ -41,7 +47,8 @@ pub const Protocol = enum {
     /// Map a negotiated Req/Resp ID to its existing payload codec.
     pub fn request(self: Protocol) ?wire.Protocol {
         return switch (self) {
-            .gossip => null,
+            .noise, .yamux => null,
+            .gossip, .identify => null,
             .status => .status,
             .ping => .ping,
             .metadata => .metadata,

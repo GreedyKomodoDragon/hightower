@@ -36,6 +36,11 @@ test {
     _ = @import("p2p_gossip_session.zig");
     _ = @import("p2p_noise_identity.zig");
     _ = @import("p2p_noise_xx.zig");
+    _ = @import("p2p_noise_transport.zig");
+    _ = @import("p2p_yamux.zig");
+    _ = @import("p2p_tcp.zig");
+    _ = @import("p2p_peer.zig");
+    _ = @import("p2p_service.zig");
     _ = @import("discv5_messages.zig");
     _ = @import("discv5_packets.zig");
     _ = @import("discv5_session.zig");

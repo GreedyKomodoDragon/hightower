@@ -9,6 +9,7 @@ const rlp = @import("rlp");
 const columns = @import("data_columns.zig");
 
 const Ecdsa = std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
+const Scalar = std.crypto.ecc.Secp256k1.scalar;
 const Keccak = std.crypto.hash.sha3.Keccak256;
 const Field = enum { cgc, eth2, id, ip, nfd, secp256k1, tcp, udp, unknown };
 
@@ -55,7 +56,11 @@ pub fn encode(allocator: std.mem.Allocator, key_pair: Ecdsa.KeyPair, record: Loc
     defer allocator.free(content);
     var digest: [32]u8 = undefined;
     Keccak.hash(content, &digest, .{});
-    const signature = (try key_pair.signPrehashed(digest, null)).toBytes();
+    var signed_digest = try key_pair.signPrehashed(digest, null);
+    if (std.mem.readInt(u256, &signed_digest.s, .big) > Scalar.field_order / 2) {
+        signed_digest.s = try Scalar.neg(signed_digest.s, .big);
+    }
+    const signature = signed_digest.toBytes();
     var signed = std.Io.Writer.Allocating.init(allocator);
     defer signed.deinit();
     try rlp.encoding.encodeString(&signed.writer, &signature);
@@ -229,4 +234,19 @@ test "signed Fulu ENR verifies its identity, fork, and custody promise" {
     const malformed = try wrapList(allocator, malformed_payload.written());
     defer allocator.free(malformed);
     try std.testing.expectError(error.InvalidRecord, decode(allocator, malformed));
+}
+
+test "all locally signed ENRs use low-S signatures accepted by external secp256k1 verifiers" {
+    const allocator = std.testing.allocator;
+    const local = Local{ .sequence = 1, .ip = .{ 127, 0, 0, 1 }, .udp_port = 9000, .tcp_port = 9001, .fork_id = .{ 1, 2, 3, 4, 6, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255 }, .next_fork_digest = .{0} ** 4, .custody_group_count = columns.custody_requirement };
+    for (1..17) |value| {
+        const key = try Ecdsa.KeyPair.generateDeterministic([_]u8{@intCast(value)} ** 32);
+        const bytes = try encode(allocator, key, local);
+        defer allocator.free(bytes);
+        var decoded = try rlp.decode.decodeAll(allocator, bytes);
+        defer decoded.deinit(allocator);
+        const signature = try string(decoded.list[0]);
+        try std.testing.expect(std.mem.readInt(u256, signature[32..64], .big) <= Scalar.field_order / 2);
+        _ = try decode(allocator, bytes);
+    }
 }

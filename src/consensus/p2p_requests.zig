@@ -67,7 +67,10 @@ pub fn serveBlocksByRoot(allocator: std.mem.Allocator, config: ingress.Config, e
     errdefer result.deinit();
     for (request.data) |root| {
         const block = lookup.by_root(lookup.context, root) orelse continue;
-        try appendBlock(allocator, config, &result, .blocks_by_root, root, block);
+        appendBlock(allocator, config, &result, .blocks_by_root, root, block) catch |err| switch (err) {
+            error.ResponseLimitReached => break,
+            else => return err,
+        };
     }
     return result;
 }
@@ -90,7 +93,10 @@ pub fn serveBlocksByRange(allocator: std.mem.Allocator, config: ingress.Config, 
         const root = lookup.root_at_slot(lookup.context, slot) orelse continue;
         const block = lookup.by_root(lookup.context, root) orelse continue;
         if (block.message.slot != slot) return error.InconsistentStore;
-        try appendBlock(allocator, config, &result, .blocks_by_range, root, block);
+        appendBlock(allocator, config, &result, .blocks_by_range, root, block) catch |err| switch (err) {
+            error.ResponseLimitReached => break,
+            else => return err,
+        };
     }
     return result;
 }
@@ -147,6 +153,9 @@ fn appendBlock(allocator: std.mem.Allocator, config: ingress.Config, result: *En
     const digest = try config.digestAtSlot(block.message.slot);
     const chunk = try wire.encodeResponseChunk(allocator, protocol, .success, digest, bytes, wire.max_payload_size);
     errdefer allocator.free(chunk);
+    var total: usize = 0;
+    for (result.items.items) |existing| total += existing.len;
+    if (chunk.len > columns.max_response_bytes - total) return error.ResponseLimitReached;
     try result.items.append(allocator, chunk);
 }
 

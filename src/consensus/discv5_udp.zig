@@ -40,6 +40,8 @@ pub const Socket = struct {
     pub fn send(self: *const Socket, record: enr.Record, packet: []const u8) !void {
         if (packet.len < packets.min_packet_size or packet.len > packets.max_packet_size) return error.InvalidPacketSize;
         const destination = endpoint(record);
+        var endpoint_buf: [64]u8 = undefined;
+        try @import("network_trace.zig").emit("discovery_send", .{ .destination = try std.fmt.bufPrint(&endpoint_buf, "{f}", .{destination}) }, packet);
         try self.socket.send(self.io, &destination, packet);
     }
 

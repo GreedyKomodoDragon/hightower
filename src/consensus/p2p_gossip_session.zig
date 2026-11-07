@@ -34,12 +34,9 @@ pub const Session = struct {
         }
     };
 
-    /// Bind one authenticated peer identity and admit it to the gossip service.
-    /// Only one session per peer may be active in a service at a time.
+    /// Bind one authenticated peer identity and admit this stream to the
+    /// gossip service. A peer may have one initiator and one responder stream.
     pub fn init(allocator: std.mem.Allocator, service: *gossip.Service, peer_id: [32]u8, role: Role) !Session {
-        if (service.peers.state(peer_id)) |state| {
-            if (state.connected) return error.PeerAlreadyConnected;
-        }
         try service.connect(peer_id);
         return .{
             .allocator = allocator,
@@ -162,6 +159,11 @@ test "two authenticated gossip sessions negotiate, subscribe, and validate Fulu 
     const b_subscription = try outgoing.feed(second.subscription.?);
     try std.testing.expectEqual(echo_protocol.subscription.?.len, a_subscription.consumed);
     try std.testing.expectEqual(second.subscription.?.len, b_subscription.consumed);
+    try std.testing.expect(a.remoteBlockSubscribed(b_id));
+    try std.testing.expect(b.remoteBlockSubscribed(a_id));
+    try std.testing.expectEqual([2]u64{ 0, 0 }, a.remoteColumnMask(b_id).?);
+    try std.testing.expect(!a.remoteBlockSubscribed([_]u8{9} ** 32));
+    try std.testing.expectEqual(@as(?[2]u64, null), a.remoteColumnMask([_]u8{9} ** 32));
     var recipients: [1][32]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 1), try a.recipients(a.block_topic, &recipients));
     try std.testing.expectEqual(b_id, recipients[0]);
@@ -225,7 +227,9 @@ test "failed negotiation is scored and disconnect clears partial stream state" {
     defer service.deinit();
     const peer_id = [_]u8{9} ** 32;
     var first = try Session.init(allocator, &service, peer_id, .responder);
-    try std.testing.expectError(error.PeerAlreadyConnected, Session.init(allocator, &service, peer_id, .responder));
+    var second_stream = try Session.init(allocator, &service, peer_id, .responder);
+    second_stream.deinit();
+    try std.testing.expect(service.peers.state(peer_id).?.connected);
     try std.testing.expectError(error.InvalidLength, first.feed(&.{0}));
     try std.testing.expectEqual(@as(u8, 1), service.peers.state(peer_id).?.invalid_messages);
     first.deinit();

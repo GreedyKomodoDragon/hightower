@@ -121,6 +121,30 @@ pub fn build(b: *std.Build) void {
     // This will evaluate the `run` step rather than the default step.
     // For a top level step to actually do something, it must depend on other
     // steps (e.g. a Run step, as we will see in a moment).
+    const network_proxy = b.addExecutable(.{
+        .name = "hightower-network-proxy",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/network_proxy.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    const proxy_step = b.step("network-proxy", "Build the local TCP/UDP recording proxy");
+    proxy_step.dependOn(&b.addInstallArtifact(network_proxy, .{}).step);
+    const proxy_tests = b.addRunArtifact(b.addTest(.{ .root_module = network_proxy.root_module }));
+    const proxy_test_step = b.step("test-network-proxy", "Test local network diagnostics");
+    proxy_test_step.dependOn(&proxy_tests.step);
+    const trace_tests = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/consensus/network_trace.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) }));
+    proxy_test_step.dependOn(&trace_tests.step);
+    const proxy_integration = b.addSystemCommand(&.{ "python3", "scripts/test_network_proxy.py" });
+    proxy_integration.addArtifactArg(network_proxy);
+    proxy_test_step.dependOn(&proxy_integration.step);
+
     const run_step = b.step("run", "Run the app");
 
     // This creates a RunArtifact step in the build graph. A RunArtifact step
@@ -314,6 +338,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "blst", .module = blst },
             .{ .name = "ssz", .module = ssz_mod },
             .{ .name = "merkle", .module = merkle_mod },
+            .{ .name = "types", .module = types_mod },
             .{ .name = "consensus_preset", .module = consensus_preset_mod },
         },
     });
@@ -399,6 +424,44 @@ pub fn build(b: *std.Build) void {
     });
     const engine_test_server_step = b.step("engine-test-server", "Build the loopback Engine API test server");
     engine_test_server_step.dependOn(&b.addInstallArtifact(engine_test_server, .{}).step);
+    const discv5_interop_fixture = b.addExecutable(.{
+        .name = "hightower-discv5-interop-fixture",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/consensus/discv5_interop_fixture.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "consensus", .module = consensus_mod }},
+        }),
+    });
+    const discv5_interop_step = b.step("discv5-interop-fixture", "Build the loopback discv5 interoperability fixture");
+    discv5_interop_step.dependOn(&b.addInstallArtifact(discv5_interop_fixture, .{}).step);
+    const p2p_interop_fixture = b.addExecutable(.{
+        .name = "hightower-p2p-interop-fixture",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/consensus/p2p_interop_fixture.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "consensus", .module = consensus_mod },
+                .{ .name = "fulu", .module = fulu_mod },
+                .{ .name = "ssz", .module = ssz_mod },
+                .{ .name = "merkle", .module = merkle_mod },
+            },
+        }),
+    });
+    const p2p_interop_step = b.step("p2p-interop-fixture", "Build the loopback Prysm/Geth P2P interoperability fixture");
+    p2p_interop_step.dependOn(&b.addInstallArtifact(p2p_interop_fixture, .{}).step);
+    const p2p_interop_keys = b.addExecutable(.{
+        .name = "hightower-p2p-interop-keys",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/consensus/p2p_interop_keys.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "blst", .module = blst }},
+        }),
+    });
+    const p2p_interop_keys_step = b.step("p2p-interop-keys", "Build the mock-genesis validator key generator");
+    p2p_interop_keys_step.dependOn(&b.addInstallArtifact(p2p_interop_keys, .{}).step);
     const api_mod = b.addModule("hightower_api", .{
         .root_source_file = b.path("src/api/root.zig"),
         .target = target,
@@ -517,6 +580,7 @@ pub fn build(b: *std.Build) void {
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
     const test_step = b.step("test", "Run tests");
+    test_step.dependOn(proxy_test_step);
     test_step.dependOn(&run_tests.step);
     test_step.dependOn(&run_storage_tests.step);
     const storage_test_step = b.step("test-storage", "Run durable key-value storage tests");

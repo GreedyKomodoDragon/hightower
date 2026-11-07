@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
+source scripts/network_diagnostics.sh
 
 geth_version=${1:-v1.17.10}
 geth_version=${geth_version#v}
@@ -11,6 +13,7 @@ fixture_pid=
 
 # Stop Geth and the fixture server, then remove the temporary chain.
 cleanup() {
+    local status=$?
     if [[ -n "$fixture_pid" ]]; then
         kill "$fixture_pid" 2>/dev/null || true
         wait "$fixture_pid" 2>/dev/null || true
@@ -19,7 +22,9 @@ cleanup() {
         kill "$geth_pid" 2>/dev/null || true
         wait "$geth_pid" 2>/dev/null || true
     fi
-    rm -rf "$interop_dir"
+    network_diagnostics_stop || status=1
+    if [[ $status == 0 && ${KEEP_INTEROP_DIR:-0} != 1 && ${NETWORK_PROXY:-0} != 1 ]]; then rm -rf "$interop_dir"; else echo "Interop files: $interop_dir"; fi
+    exit "$status"
 }
 trap cleanup EXIT
 
@@ -53,4 +58,13 @@ if ! curl --silent --max-time 1 --output /dev/null http://127.0.0.1:18551/ || ! 
     exit 1
 fi
 cat "$interop_dir/fixture.log"
-./zig-out/bin/hightower-engine-probe http://127.0.0.1:18552 http://127.0.0.1:18551 "$interop_dir/jwt.hex" "$genesis_hash"
+network_diagnostics_init
+fixture_port=18552
+geth_port=18551
+if [[ ${NETWORK_PROXY:-0} == 1 ]]; then
+    network_proxy_start engine-fixture-proxy tcp 19552 18552
+    network_proxy_start engine-geth-proxy tcp 19551 18551
+    fixture_port=19552
+    geth_port=19551
+fi
+./zig-out/bin/hightower-engine-probe "http://127.0.0.1:$fixture_port" "http://127.0.0.1:$geth_port" "$interop_dir/jwt.hex" "$genesis_hash"
