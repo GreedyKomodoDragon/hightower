@@ -102,7 +102,7 @@ pub const Minimal = struct {
     pub const GENESIS_FORK_VERSION: [4]u8 = .{ 0, 0, 0, 1 };
     pub const ELECTRA_FORK_VERSION: [4]u8 = .{ 5, 0, 0, 1 };
     pub const FULU_FORK_VERSION: [4]u8 = .{ 6, 0, 0, 1 };
-    pub const FULU_FORK_EPOCH: u64 = std.math.maxInt(u64);
+    pub const FULU_FORK_EPOCH: u64 = 0;
     pub const CAPELLA_FORK_VERSION: [4]u8 = .{ 3, 0, 0, 1 };
     pub const ELECTRA_FORK_EPOCH: u64 = std.math.maxInt(u64);
 };
