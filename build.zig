@@ -322,6 +322,7 @@ pub fn build(b: *std.Build) void {
         },
     });
     exe.root_module.addImport("ssz", ssz_mod);
+    exe.root_module.addImport("merkle", merkle_mod);
     mod.addImport("ssz", ssz_mod);
     mod.addImport("merkle", merkle_mod);
     const storage_mod = b.addModule("storage", .{

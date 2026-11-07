@@ -157,6 +157,7 @@ Chain:      [Block 0] ───────────────────�
 | Weak subjectivity checkpoint | A recent, trusted point in Ethereum's history that a new or long-offline node uses to identify the correct chain. |
 | Fork choice | The rule a node uses to select one chain head when multiple valid branches exist. |
 | Canonical chain | The branch currently selected by fork choice, traced backward from its head. |
+| Trusted anchor | An operator-verified block and matching state used as the starting point for peer import; the node cannot prove the history before it. |
 | Block root | The SSZ hash that identifies a beacon block. |
 | State root | The SSZ hash that commits to a beacon state after processing. |
 | Beacon API | HTTP endpoints through which clients query a beacon node's consensus data and status. |
