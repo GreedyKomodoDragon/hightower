@@ -22,3 +22,8 @@
 - Use GitHub milestones for the Fulu work phases and labels for areas such as `ssz`, `fixtures`, `beacon-types`, `state-transition`, `fork-choice`, `execution-api`, and `networking`.
 - Record technical decisions and implementation artifacts in the repository; keep ticket details in their GitHub issues.
 - Do not use Linear for this repository.
+
+## Branch naming and CI
+
+- Name Fulu work branches `fulu-<issue-number(s)>-<short-description>` (for example, `fulu-028-043-runtime`). CI runs on pushes to `main` and `fulu-*` branches, and on pull requests targeting `main`.
+- Keep the branch name local and on `origin` identical so pushes trigger the same CI workflow.

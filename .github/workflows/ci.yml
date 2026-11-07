@@ -2,8 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'fulu-*']
   pull_request:
+    branches: [main]
 
 permissions:
   contents: read
