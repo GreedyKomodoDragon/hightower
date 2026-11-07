@@ -245,6 +245,9 @@ test "genesis accepts duplicate deposits, ignores invalid new signatures, and re
     try @import("transition.zig").processSlots(allocator, &first_slot, 1, null);
     try std.testing.expectEqual(@as(u64, 1), first_slot.slot);
     const genesis_root = try merkle.HashTreeRoot(allocator, state);
+    var expected_genesis_root: fulu.Root = undefined;
+    _ = try std.fmt.hexToBytes(&expected_genesis_root, "423503404efc851f213bab65c3916903d05d29a2cd8f024f56ae3ed0d8f9d809");
+    try std.testing.expectEqual(expected_genesis_root, genesis_root);
     const first_slot_root = try merkle.HashTreeRoot(allocator, first_slot);
     try std.testing.expect(!std.mem.eql(u8, &genesis_root, &first_slot_root));
     const again = try initializeBeaconStateFromEth1(allocator, eth1_hash, 1_600_000_000, &.{ first, second });
