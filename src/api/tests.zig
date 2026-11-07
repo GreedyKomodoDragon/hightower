@@ -149,6 +149,26 @@ test "Beacon API returns a JSON response over a local connection" {
     try std.testing.expect(parsed.value.object.get("data").?.object.contains("head_slot"));
 }
 
+test "metrics scrape reports fork-choice state" {
+    const allocator = std.testing.allocator;
+    const state = try fixtures.decodeState(allocator, fixtures.fork_choice_anchor_state);
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
+    const block_bytes = try fixtures.decode(allocator, fixtures.fork_choice_anchor_block);
+    defer allocator.free(block_bytes);
+    var reader: std.Io.Reader = .fixed(block_bytes);
+    const block = try ssz.deserialize(allocator, fulu.BeaconBlock, &reader);
+    defer ssz.freeDecoded(allocator, fulu.BeaconBlock, block);
+    var store = try consensus.initForkChoiceStore(allocator, &state, &block);
+    defer store.deinit();
+    const response = try api.dispatch(allocator, &store, .{ .genesis_fork_version = .{ 0, 0, 0, 0 } }, "/metrics");
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(std.http.Status.ok, response.status);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "hightower_slot 0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "hightower_head_slot 0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "hightower_finalized_epoch 0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "hightower_peers 0\n") != null);
+}
+
 test "Beacon API accepts stored noncanonical block and state roots" {
     const allocator = std.testing.allocator;
     const state = try fixtures.decodeState(allocator, fixtures.fork_choice_anchor_state);

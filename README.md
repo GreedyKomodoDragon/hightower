@@ -94,6 +94,11 @@ Run `zig build test` for RLP, SSZ, Merkle, Fulu type, and library tests; `zig bu
 
 See [ROADMAP.md](ROADMAP.md) for the current codebase assessment and the proposed path from SSZ/Merkle primitives to a Beacon Chain state transition, fork choice, and node.
 
+## Running the local runtime
+
+See [docs/runtime.md](docs/runtime.md) for the current `--config` run procedure
+and the Beacon API and metrics endpoints.
+
 ## References
 
 - [Ethereum RLP spec](https://ethereum.org/en/developers/docs/data-structures-and-encoding/rlp/)

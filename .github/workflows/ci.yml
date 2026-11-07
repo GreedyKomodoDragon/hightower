@@ -30,6 +30,7 @@ jobs:
           version: 0.16.0
       - run: zig fmt --check build.zig build.zig.zon src
       - run: zig build
+      - run: bash scripts/test_runtime.sh
       - run: zig build test
       - run: zig build test-transition
       - run: bash scripts/test_engine_local.sh
