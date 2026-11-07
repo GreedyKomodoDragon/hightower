@@ -31,6 +31,9 @@ printed in its log into the second node's `bootstrap_enr`. Give the second
 node its own `listen_address`, `node_key`, `data_dir`, and local execution
 client. Start each with `zig build run -- --config <path>`.
 
+An existing config containing only `listen_address` still serves the bundled
+test anchor through the read-only API. It does not join P2P or import blocks.
+
 The Beacon API and `/metrics` use `listen_address`. The node requests at most
 16 slots per round from its one active peer. It checks response order, parent
 roots, selected KZG-proven columns, execution validity, and the full consensus
@@ -60,4 +63,5 @@ Run the same checks with `zig build test-transition` and `zig build test`, then
 repeat each command with `-Doptimize=ReleaseSafe`. The network tests need
 permission to bind loopback TCP and UDP sockets. This local run used
 `ZIG_GLOBAL_CACHE_DIR=.zig-global-cache` so Zig could write its cache inside
-the repository sandbox.
+the repository sandbox. `bash scripts/test_runtime.sh` checks the compatible
+read-only config and Beacon API health endpoint.

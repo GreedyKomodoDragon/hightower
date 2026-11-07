@@ -17,14 +17,14 @@ comptime {
 const version = "0.0.0";
 const Config = struct {
     listen_address: []const u8,
-    anchor_state: []const u8,
-    anchor_block: []const u8,
-    bootstrap_enr: []const u8,
-    node_key: []const u8,
-    data_dir: []const u8,
-    trusted_setup: []const u8,
-    engine_url: []const u8,
-    engine_jwt_secret: []const u8,
+    anchor_state: []const u8 = "",
+    anchor_block: []const u8 = "",
+    bootstrap_enr: []const u8 = "",
+    node_key: []const u8 = "",
+    data_dir: []const u8 = "",
+    trusted_setup: []const u8 = "",
+    engine_url: []const u8 = "",
+    engine_jwt_secret: []const u8 = "",
 };
 const ParsedConfig = struct { address: std.Io.net.IpAddress, config: Config };
 
@@ -37,8 +37,12 @@ fn parseConfig(allocator: std.mem.Allocator, bytes: []const u8) !ParsedConfig {
     if (separator == 0 or separator + 1 == value.listen_address.len) return error.InvalidListenAddress;
     const port = try std.fmt.parseInt(u16, value.listen_address[separator + 1 ..], 10);
     if (port == 0) return error.InvalidListenAddress;
-    if (value.node_key.len != 64 or value.engine_jwt_secret.len != 64) return error.InvalidSecret;
-    if (value.anchor_state.len == 0 or value.anchor_block.len == 0 or value.data_dir.len == 0 or value.trusted_setup.len == 0 or value.engine_url.len == 0) return error.MissingConfig;
+    if (value.anchor_state.len != 0) {
+        if (value.node_key.len != 64 or value.engine_jwt_secret.len != 64) return error.InvalidSecret;
+        if (value.anchor_block.len == 0 or value.data_dir.len == 0 or value.trusted_setup.len == 0 or value.engine_url.len == 0) return error.MissingConfig;
+    } else if (value.anchor_block.len != 0 or value.bootstrap_enr.len != 0 or value.node_key.len != 0 or value.data_dir.len != 0 or value.trusted_setup.len != 0 or value.engine_url.len != 0 or value.engine_jwt_secret.len != 0) {
+        return error.MissingConfig;
+    }
     return .{ .address = try std.Io.net.IpAddress.parseIp4(value.listen_address[0..separator], port), .config = value };
 }
 
@@ -66,6 +70,10 @@ pub fn main(init: std.process.Init) !void {
     defer arena.deinit();
     const config = try loadConfig(init.io, arena.allocator(), args[2]);
     const settings = config.config;
+    if (settings.anchor_state.len == 0) {
+        try serveBundledAnchor(allocator, init.io, config.address);
+        return;
+    }
     var seed: [32]u8 = undefined;
     _ = try std.fmt.hexToBytes(&seed, settings.node_key);
     const key = try Ecdsa.KeyPair.generateDeterministic(seed);
@@ -147,6 +155,23 @@ pub fn main(init: std.process.Init) !void {
         p2p.status.head_root = coordinator.head;
         p2p.status.head_slot = store.blocks.get(coordinator.head).?.slot;
     }
+}
+
+/// Keep the original read-only fixture mode for existing minimal configs.
+fn serveBundledAnchor(allocator: std.mem.Allocator, io: std.Io, address: std.Io.net.IpAddress) !void {
+    const fixtures = hightower.consensus.fixtureRunner;
+    const state = try fixtures.decodeState(allocator, fixtures.fork_choice_anchor_state);
+    defer ssz.freeDecoded(allocator, hightower.fulu.BeaconState, state);
+    const bytes = try fixtures.decode(allocator, fixtures.fork_choice_anchor_block);
+    defer allocator.free(bytes);
+    var reader: std.Io.Reader = .fixed(bytes);
+    const block = try ssz.deserialize(allocator, hightower.fulu.BeaconBlock, &reader);
+    defer ssz.freeDecoded(allocator, hightower.fulu.BeaconBlock, block);
+    var store = try hightower.consensus.initForkChoiceStore(allocator, &state, &block);
+    defer store.deinit();
+    var listener = try address.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    try hightower.api.serve(allocator, io, &listener, &store, .{ .genesis_fork_version = .{ 0, 0, 0, 0 } });
 }
 
 const Api = struct {
