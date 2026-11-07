@@ -52,6 +52,7 @@ pub const NetworkTrace = @import("network_trace.zig");
 pub const P2PTcp = @import("p2p_tcp.zig");
 pub const P2PPeer = @import("p2p_peer.zig");
 pub const P2PService = @import("p2p_service.zig");
+pub const PeerSync = @import("peer_sync.zig");
 pub const Discv5Messages = @import("discv5_messages.zig");
 pub const Discv5Packets = @import("discv5_packets.zig");
 pub const Discv5Session = @import("discv5_session.zig");

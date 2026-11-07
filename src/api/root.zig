@@ -34,7 +34,8 @@ pub fn dispatch(allocator: std.mem.Allocator, store: ?*const consensus.ForkChoic
         const chain = store orelse return reply(allocator, .service_unavailable, "service unavailable");
         const head = consensus.getForkChoiceHead(chain) catch return reply(allocator, .service_unavailable, "service unavailable");
         const block = chain.blocks.get(head) orelse return reply(allocator, .service_unavailable, "service unavailable");
-        const body = try std.fmt.allocPrint(allocator,
+        const body = try std.fmt.allocPrint(
+            allocator,
             "# HELP hightower_slot Current fork-choice slot.\n# TYPE hightower_slot gauge\nhightower_slot {d}\n# HELP hightower_head_slot Slot of the selected head block.\n# TYPE hightower_head_slot gauge\nhightower_head_slot {d}\n# HELP hightower_finalized_epoch Finalized checkpoint epoch.\n# TYPE hightower_finalized_epoch gauge\nhightower_finalized_epoch {d}\n# HELP hightower_peers Connected peers.\n# TYPE hightower_peers gauge\nhightower_peers 0\n# HELP hightower_syncing Whether the node is syncing.\n# TYPE hightower_syncing gauge\nhightower_syncing {d}\n",
             .{ chain.currentSlot(), block.slot, chain.finalized_checkpoint.epoch, @intFromBool(metadata.is_syncing) },
         );
@@ -103,6 +104,11 @@ pub fn dispatch(allocator: std.mem.Allocator, store: ?*const consensus.ForkChoic
 
 /// Serve one TCP connection with an 8 KiB header bound and no request body.
 pub fn serveConnection(allocator: std.mem.Allocator, io: std.Io, stream: std.Io.net.Stream, store: ?*const consensus.ForkChoiceStore, metadata: Metadata) !void {
+    return serveConnectionWithLock(allocator, io, stream, store, metadata, null);
+}
+
+/// Serve one request while protecting the shared store during response construction.
+fn serveConnectionWithLock(allocator: std.mem.Allocator, io: std.Io, stream: std.Io.net.Stream, store: ?*const consensus.ForkChoiceStore, metadata: Metadata, mutex: ?*std.Io.Mutex) !void {
     defer stream.close(io);
     var read_buffer: [8192]u8 = undefined;
     var write_buffer: [8192]u8 = undefined;
@@ -110,12 +116,16 @@ pub fn serveConnection(allocator: std.mem.Allocator, io: std.Io, stream: std.Io.
     var writer = stream.writer(io, &write_buffer);
     var server = std.http.Server.init(&reader.interface, &writer.interface);
     var request = server.receiveHead() catch return;
-    const result = if (request.head.method != .GET)
-        try reply(allocator, .method_not_allowed, "GET required")
-    else if (request.head.content_length orelse 0 != 0 or request.head.transfer_encoding != .none)
-        try reply(allocator, .payload_too_large, "request body unsupported")
-    else
-        try dispatch(allocator, store, metadata, request.head.target);
+    const result = result: {
+        if (mutex) |lock| try lock.lock(io);
+        defer if (mutex) |lock| lock.unlock(io);
+        break :result if (request.head.method != .GET)
+            try reply(allocator, .method_not_allowed, "GET required")
+        else if (request.head.content_length orelse 0 != 0 or request.head.transfer_encoding != .none)
+            try reply(allocator, .payload_too_large, "request body unsupported")
+        else
+            try dispatch(allocator, store, metadata, request.head.target);
+    };
     defer result.deinit(allocator);
     const content_type = if (std.mem.startsWith(u8, request.head.target, "/metrics")) "text/plain; version=0.0.4" else "application/json";
     try request.respond(result.body, .{ .status = result.status, .keep_alive = false, .extra_headers = &.{.{ .name = "content-type", .value = content_type }} });
@@ -126,6 +136,14 @@ pub fn serve(allocator: std.mem.Allocator, io: std.Io, listener: *std.Io.net.Ser
     while (true) {
         const stream = try listener.accept(io);
         serveConnection(allocator, io, stream, store, metadata) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
+    }
+}
+
+/// Accept API requests with a lock shared by the peer importer.
+pub fn serveLocked(allocator: std.mem.Allocator, io: std.Io, listener: *std.Io.net.Server, store: *const consensus.ForkChoiceStore, metadata: Metadata, mutex: *std.Io.Mutex) !void {
+    while (true) {
+        const stream = try listener.accept(io);
+        serveConnectionWithLock(allocator, io, stream, store, metadata, mutex) catch |err| std.log.err("API request failed: {s}", .{@errorName(err)});
     }
 }
 
