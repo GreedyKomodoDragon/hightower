@@ -39,6 +39,7 @@ pub fn deserializeBitVector(
         if (raw[byte_count - 1] & mask != 0) return error.NonZeroPaddingBits;
     }
 
+    // SAFETY: This value is fully initialized before any read.
     var result: T = undefined;
     for (&result.data, 0..) |*bit, i| {
         bit.* = (raw[i / 8] >> @as(u3, @intCast(i % 8)) & 1) != 0;

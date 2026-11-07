@@ -508,6 +508,7 @@ fn totalForValidator(withdrawals: []const fulu.Withdrawal, index: fulu.Validator
 }
 
 fn addressFromCredentials(credentials: fulu.Bytes32) fulu.ExecutionAddress {
+    // SAFETY: This value is fully initialized before any read.
     var address: fulu.ExecutionAddress = undefined;
     @memcpy(&address, credentials[12..32]);
     return address;

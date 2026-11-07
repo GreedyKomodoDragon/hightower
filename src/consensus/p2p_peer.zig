@@ -72,8 +72,8 @@ pub const Peer = struct {
     local_status: control.Status,
     local_metadata: control.MetaData,
     local_public_key: [33]u8,
-    remote_status: control.Status = undefined,
-    remote_metadata: control.MetaData = undefined,
+    remote_status: control.Status = std.mem.zeroes(control.Status),
+    remote_metadata: control.MetaData = std.mem.zeroes(control.MetaData),
     routes: ?Routes = null,
 
     /// Dial a discovered ENR and complete both control exchanges before gossip.

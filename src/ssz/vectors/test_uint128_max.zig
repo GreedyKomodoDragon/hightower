@@ -8,7 +8,7 @@ const merkle = @import("merkle");
 
 test "vectors.test_uint128_max" {
     const allocator = testing.allocator;
-    const value: u128 = @as(u128, 340282366920938463463374607431768211455);
+    const value: u128 = 340282366920938463463374607431768211455;
 
     const expected_serialized_hex = "ffffffffffffffffffffffffffffffff";
     var expected_serialized: [expected_serialized_hex.len / 2]u8 = undefined;

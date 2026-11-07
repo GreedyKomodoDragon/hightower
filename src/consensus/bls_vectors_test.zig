@@ -7,7 +7,7 @@ const bls = @import("bls.zig");
 
 fn hex(comptime value: []const u8) [value.len / 2]u8 {
     var bytes: [value.len / 2]u8 = undefined;
-    _ = std.fmt.hexToBytes(&bytes, value) catch unreachable;
+    _ = std.fmt.hexToBytes(&bytes, value) catch @panic("invalid compile-time BLS vector hex");
     return bytes;
 }
 

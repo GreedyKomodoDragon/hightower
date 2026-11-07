@@ -15,6 +15,7 @@ fn loadGenesis(a: std.mem.Allocator, io: std.Io, path: []const u8, world: *execu
     if (accounts != .object) return error.InvalidGenesis;
     var it = accounts.object.iterator();
     while (it.next()) |entry| {
+        // SAFETY: This value is fully initialized before any read.
         var address: execution.Address = undefined;
         if (entry.key_ptr.*.len != 40) return error.InvalidGenesis;
         _ = try std.fmt.hexToBytes(&address, entry.key_ptr.*);
@@ -28,8 +29,10 @@ fn loadGenesis(a: std.mem.Allocator, io: std.Io, path: []const u8, world: *execu
         }
     }
     const empty_root = try execution.trie.orderedRoot(a, &.{});
+    // SAFETY: This value is fully initialized before any read.
     var ommers: execution.Hash = undefined;
     std.crypto.hash.sha3.Keccak256.hash(&.{0xc0}, &ommers, .{});
+    // SAFETY: This value is fully initialized before any read.
     var requests: execution.Hash = undefined;
     std.crypto.hash.sha2.Sha256.hash(&.{}, &requests, .{});
     var header = std.mem.zeroes(execution.Header);

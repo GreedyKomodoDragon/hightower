@@ -316,7 +316,7 @@ const Frame = struct {
     input: Input,
     gas: u64,
     pc: usize = 0,
-    stack: [1024]u256 = undefined,
+    stack: [1024]u256 = .{0} ** 1024,
     sp: usize = 0,
     memory: std.ArrayList(u8) = .empty,
     return_data: std.ArrayList(u8) = .empty,
@@ -614,7 +614,7 @@ const Frame = struct {
         try self.charge(forwarded);
         const snap = try self.machine.world.snapshot();
         var snap_open = true;
-        errdefer if (snap_open) self.machine.world.revert(snap) catch {};
+        errdefer if (snap_open) self.machine.world.revert(snap) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
         const recipient = if (op == Op.CALL or op == Op.STATICCALL) target else self.input.callee;
         if (op == Op.CALL and value != 0) {
             try self.machine.world.setBalance(self.input.callee, self.machine.world.getBalance(self.input.callee) - value);
@@ -678,14 +678,14 @@ const Frame = struct {
             }
             if (op >= Op.DUP1 and op <= Op.DUP16) {
                 try self.charge(3);
-                const n = @as(usize, op - Op.PUSH32);
+                const n: usize = op - Op.PUSH32;
                 if (self.sp < n) return error.StackUnderflow;
                 try self.push(self.stack[self.sp - n]);
                 continue;
             }
             if (op >= Op.SWAP1 and op <= Op.SWAP16) {
                 try self.charge(3);
-                const n = @as(usize, op - Op.DUP16);
+                const n: usize = op - Op.DUP16;
                 if (self.sp <= n) return error.StackUnderflow;
                 std.mem.swap(u256, &self.stack[self.sp - 1], &self.stack[self.sp - 1 - n]);
                 continue;

@@ -102,6 +102,7 @@ pub fn computeForkDigest(
     var fork_data = [_]u8{0} ** 64;
     @memcpy(fork_data[0..4], &fork_version);
     @memcpy(fork_data[32..64], &genesis_validators_root);
+    // SAFETY: This value is fully initialized before any read.
     var fork_data_root: fulu.Root = undefined;
     std.crypto.hash.sha2.Sha256.hash(&fork_data, &fork_data_root, .{});
 
@@ -110,6 +111,7 @@ pub fn computeForkDigest(
     // SSZ uint64 values are encoded little-endian before hashing.
     std.mem.writeInt(u64, blob_data[0..8], parameters.epoch, .little);
     std.mem.writeInt(u64, blob_data[8..16], parameters.max_blobs_per_block, .little);
+    // SAFETY: This value is fully initialized before any read.
     var blob_hash: fulu.Root = undefined;
     std.crypto.hash.sha2.Sha256.hash(&blob_data, &blob_hash, .{});
 
@@ -242,7 +244,7 @@ pub fn computeShuffledIndex(index: usize, index_count: usize, seed: [32]u8) erro
         pivot_input[32] = round_byte;
         var pivot_hash: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(&pivot_input, &pivot_hash, .{});
-        const pivot = @as(usize, @intCast(std.mem.readInt(u64, pivot_hash[0..8], .little) % index_count));
+        const pivot: usize = @intCast(std.mem.readInt(u64, pivot_hash[0..8], .little) % index_count);
 
         const flip = (pivot + index_count - current) % index_count;
         const position = @max(current, flip);

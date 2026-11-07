@@ -40,7 +40,7 @@ pub fn getDomain(state: fulu.BeaconState, domain_type: [4]u8, epoch: fulu.Epoch)
 
 fn hex(comptime value: []const u8) [value.len / 2]u8 {
     var bytes: [value.len / 2]u8 = undefined;
-    _ = std.fmt.hexToBytes(&bytes, value) catch unreachable;
+    _ = std.fmt.hexToBytes(&bytes, value) catch @panic("invalid compile-time domain vector hex");
     return bytes;
 }
 

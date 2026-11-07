@@ -77,6 +77,7 @@ pub fn deserializeContainer(
         // Decode each field from its exact slice: nested values
         // slurp their own reader, so sequential streaming would
         // over-read into following fields.
+        // SAFETY: This value is fully initialized before any read.
         var result: T = undefined;
         var pos: usize = 0;
         inline for (info.fields) |field| {
@@ -113,6 +114,7 @@ pub fn deserializeContainer(
         if (end < start or end > bytes.len) return error.InvalidOffset;
     }
 
+    // SAFETY: This value is fully initialized before any read.
     var result: T = undefined;
     var done: usize = 0;
     errdefer {

@@ -9,6 +9,18 @@ permissions:
   contents: read
 
 jobs:
+  zlint:
+    name: Zig lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install verified zlint v0.10.0
+        run: |
+          curl --fail --location --silent --show-error https://github.com/DonIsaac/zlint/releases/download/v0.10.0/zlint-linux-x86_64 --output "$RUNNER_TEMP/zlint"
+          echo "0b331646d5e40bec3cfcb0694c5da0b13b9de8b10af12937a777ab3144b70b65  $RUNNER_TEMP/zlint" | sha256sum --check
+          chmod +x "$RUNNER_TEMP/zlint"
+      - run: "$RUNNER_TEMP/zlint" --deny-warnings src
+
   checks:
     runs-on: ubuntu-latest
     steps:

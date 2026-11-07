@@ -225,7 +225,7 @@ fn runFixture(allocator: std.mem.Allocator, fixture: Fixture, bytes: []const u8)
             else => null,
         };
         if (expected_error != null and err == expected_error.?) return true;
-        std.debug.print("FAIL {s}: transaction decode returned {s}\n", .{ fixture.name, @errorName(err) });
+        std.log.err("FAIL {s}: transaction decode returned {s}", .{ fixture.name, @errorName(err) });
         return err;
     };
     defer decoded.deinit();
@@ -244,7 +244,7 @@ pub fn run(allocator: std.mem.Allocator) !Counts {
             counts.passed += 1;
         } else {
             counts.skipped += 1;
-            std.debug.print("SKIP {s}: {s}\n", .{ fixture.name, fixture.skip_reason.? });
+            std.log.warn("SKIP {s}: {s}", .{ fixture.name, fixture.skip_reason.? });
         }
     }
     return counts;
@@ -257,7 +257,7 @@ test "pinned execution fixtures pass and unsupported processors are explicit" {
     const counts = try run(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 93), counts.passed);
     try std.testing.expectEqual(@as(usize, 0), counts.skipped);
-    std.debug.print("execution fixtures: {d} passed, {d} skipped\n", .{ counts.passed, counts.skipped });
+    std.log.info("execution fixtures: {d} passed, {d} skipped", .{ counts.passed, counts.skipped });
     const core = [_]u8{ 0x00, 0x20, 0xf3, 0xfd };
     for (core) |op| try std.testing.expect(seen[op]);
     for (0x01..0x0c) |op| try std.testing.expect(seen[op]);
@@ -605,6 +605,7 @@ fn londonBlockTransactions(allocator: std.mem.Allocator, block: std.json.Value, 
     const body = raw[outer.header_len..];
     const raw_header = try rlpItem(body);
     if (raw_header.kind != .list) return error.MalformedRlp;
+    // SAFETY: This value is fully initialized before any read.
     var actual_hash: execution.Hash = undefined;
     std.crypto.hash.sha3.Keccak256.hash(body[0..raw_header.length], &actual_hash, .{});
     if (!std.mem.eql(u8, &actual_hash, &(try execution.transition.headerHash(allocator, .london, header)))) return error.HeaderMismatch;
@@ -656,6 +657,7 @@ fn runBlockchainFixture(allocator: std.mem.Allocator, root: std.json.Value, fixt
     const genesis_body = genesis_rlp[genesis_item.header_len..];
     const genesis_header = try rlpItem(genesis_body);
     if (genesis_header.kind != .list) return error.MalformedRlp;
+    // SAFETY: This value is fully initialized before any read.
     var raw_genesis_hash: execution.Hash = undefined;
     std.crypto.hash.sha3.Keccak256.hash(genesis_body[0..genesis_header.length], &raw_genesis_hash, .{});
     if (!std.mem.eql(u8, &raw_genesis_hash, &genesis_hash)) return error.HeaderMismatch;

@@ -308,6 +308,7 @@ fn decodeCompact(allocator: std.mem.Allocator, bytes: []const u8) !CompactPath {
 
 /// Converts a byte key into high/low nibbles, optionally hashing it first.
 fn keyNibbles(allocator: std.mem.Allocator, key: []const u8, secure: bool) ![]u8 {
+    // SAFETY: This value is fully initialized before any read.
     var digest: Hash = undefined;
     const bytes = if (secure) blk: {
         digest = keccak(key);
@@ -365,6 +366,7 @@ fn lessPrepared(_: void, lhs: Prepared, rhs: Prepared) bool {
 
 /// Computes Keccak-256, Ethereum's legacy Keccak padding rather than SHA3 padding.
 fn keccak(bytes: []const u8) Hash {
+    // SAFETY: This value is fully initialized before any read.
     var digest: Hash = undefined;
     std.crypto.hash.sha3.Keccak256.hash(bytes, &digest, .{});
     return digest;

@@ -33,6 +33,7 @@ pub fn main(init: std.process.Init) !void {
     const result_path = args[5];
     if (args[1].len != 66 or !std.mem.startsWith(u8, args[1], "0x")) return error.InvalidGenesisRoot;
     if (args[2].len != 10 or !std.mem.startsWith(u8, args[2], "0x")) return error.InvalidForkVersion;
+    // SAFETY: This value is fully initialized before any read.
     var genesis_root: fulu.Root = undefined;
     _ = try std.fmt.hexToBytes(&genesis_root, args[1][2..]);
     var fulu_version: [4]u8 = undefined;
@@ -89,7 +90,7 @@ pub fn main(init: std.process.Init) !void {
     const store_path = try std.fmt.allocPrint(allocator, "hightower-p2p-interop-{d}", .{std.Io.Clock.awake.now(init.io).nanoseconds});
     var store = try columns.Store.open(allocator, init.io, std.Io.Dir.cwd(), store_path, genesis_root, discovery.local_record.node_id, columns.column_count);
     defer store.deinit();
-    defer std.Io.Dir.cwd().deleteTree(init.io, store_path) catch {};
+    defer std.Io.Dir.cwd().deleteTree(init.io, store_path) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
 
     const producer_enr = try waitForEnr(allocator, init.io, producer_enr_path);
     try discovery.addTrusted(producer_enr);

@@ -345,8 +345,8 @@ pub fn main(init: std.process.Init) !void {
 
     const dir = std.Io.Dir.cwd();
     const path = ".zig-cache/bench-lsm";
-    dir.deleteTree(io, path) catch {};
-    defer dir.deleteTree(io, path) catch {};
+    dir.deleteTree(io, path) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
+    defer dir.deleteTree(io, path) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
     var db = try storage.Database.open(allocator, io, dir, path);
     defer db.close();
     var counter: u64 = 0;

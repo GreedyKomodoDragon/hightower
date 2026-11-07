@@ -37,9 +37,9 @@ pub const Message = union(enum) { ping: Ping, pong: Pong, findnode: FindNode };
 pub const Nodes = struct {
     request_id: RequestId,
     total: u8,
-    records: [16]enr.Record = undefined,
-    encoded: [16][300]u8 = undefined,
-    encoded_len: [16]u16 = undefined,
+    records: [16]enr.Record = std.mem.zeroes([16]enr.Record),
+    encoded: [16][300]u8 = .{.{0} ** 300} ** 16,
+    encoded_len: [16]u16 = .{0} ** 16,
     count: u8 = 0,
 
     /// Return the canonical signed ENR bytes at a validated reply index.

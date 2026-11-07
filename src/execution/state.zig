@@ -358,6 +358,7 @@ pub const State = struct {
     /// Frees one account entry and its storage list.
     fn deinitAccount(self: *const State, entry: *AccountEntry) void {
         entry.storage.deinit(self.allocator);
+        // SAFETY: This value is fully initialized before any read.
         entry.* = undefined;
     }
 };
@@ -391,6 +392,7 @@ fn encodeAccount(allocator: std.mem.Allocator, account: Account) ![]u8 {
 
 /// Computes Ethereum's Keccak-256 digest for code bytes.
 fn keccak(bytes: []const u8) Hash {
+    // SAFETY: This value is fully initialized before any read.
     var digest: Hash = undefined;
     std.crypto.hash.sha3.Keccak256.hash(bytes, &digest, .{});
     return digest;

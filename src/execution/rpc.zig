@@ -63,7 +63,7 @@ pub const Server = struct {
             if (length > max_body) {
                 if (length <= 2 * max_body) {
                     const oversized_reader = request.readerExpectContinue(&body_buffer) catch return;
-                    oversized_reader.discardAll64(length) catch {};
+                    oversized_reader.discardAll64(length) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
                 }
                 return request.respond("request too large", .{ .status = .payload_too_large, .keep_alive = false, .extra_headers = headers });
             }
@@ -83,7 +83,7 @@ pub const Server = struct {
     pub fn serve(self: *Server, allocator: std.mem.Allocator, io: std.Io, listener: *std.Io.net.Server) !void {
         while (true) {
             const stream = try listener.accept(io);
-            self.serveConnection(allocator, io, stream) catch {};
+            self.serveConnection(allocator, io, stream) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
         }
     }
 
@@ -252,6 +252,7 @@ pub const Server = struct {
             const decoded = try execution.parse(execution.Transaction, a, raw);
             parsed[i] = decoded.value;
             if (full) try txs.array.append(try self.transactionJson(a, record, i)) else {
+                // SAFETY: This value is fully initialized before any read.
                 var hash: execution.Hash = undefined;
                 std.crypto.hash.sha3.Keccak256.hash(raw, &hash, .{});
                 try txs.array.append(string(try hex(a, &hash)));
@@ -282,6 +283,7 @@ pub const Server = struct {
         const tx = decoded.value;
         const fields = try transition.fields(tx, self.chain.fork);
         const sender = try execution.recoverSender(a, tx, self.chain.chain_id);
+        // SAFETY: This value is fully initialized before any read.
         var hash: execution.Hash = undefined;
         std.crypto.hash.sha3.Keccak256.hash(raw, &hash, .{});
         var out = object(a);
@@ -442,6 +444,7 @@ const Call = struct { from: execution.Address, to: execution.Address, gas: u64, 
 
 /// Serializes a log with block and transaction coordinates.
 fn logJson(a: std.mem.Allocator, record: *const chain_mod.Record, tx_index: usize, log_index: usize, log: execution.Log) !Value {
+    // SAFETY: This value is fully initialized before any read.
     var tx_hash: execution.Hash = undefined;
     std.crypto.hash.sha3.Keccak256.hash(record.transactions[tx_index], &tx_hash, .{});
     var out = object(a);

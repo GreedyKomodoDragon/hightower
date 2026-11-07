@@ -114,7 +114,7 @@ pub fn serveConnection(allocator: std.mem.Allocator, io: std.Io, stream: std.Io.
 pub fn serve(allocator: std.mem.Allocator, io: std.Io, listener: *std.Io.net.Server, store: ?*const consensus.ForkChoiceStore, metadata: Metadata) !void {
     while (true) {
         const stream = try listener.accept(io);
-        serveConnection(allocator, io, stream, store, metadata) catch {};
+        serveConnection(allocator, io, stream, store, metadata) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
     }
 }
 
@@ -125,6 +125,7 @@ fn resolveBlock(store: *const consensus.ForkChoiceStore, head: fulu.Root, id: []
     if (std.mem.eql(u8, id, "genesis")) return genesisRoot(store, head);
     if (std.mem.startsWith(u8, id, "0x")) {
         if (id.len != 66) return error.MalformedId;
+        // SAFETY: This value is fully initialized before any read.
         var root: fulu.Root = undefined;
         _ = std.fmt.hexToBytes(&root, id[2..]) catch return error.MalformedId;
         if (!store.blocks.contains(root)) return error.UnknownId;
@@ -158,6 +159,7 @@ const ResolvedState = struct { root: fulu.Root, block_root: fulu.Root, state: fu
 fn resolveState(store: *const consensus.ForkChoiceStore, head: fulu.Root, id: []const u8) !ResolvedState {
     if (std.mem.startsWith(u8, id, "0x")) {
         if (id.len != 66) return error.MalformedId;
+        // SAFETY: This value is fully initialized before any read.
         var wanted: fulu.Root = undefined;
         _ = std.fmt.hexToBytes(&wanted, id[2..]) catch return error.MalformedId;
         var blocks = store.blocks.iterator();
@@ -214,7 +216,7 @@ fn jsonResponse(allocator: std.mem.Allocator, status: std.http.Status, payload: 
 
 /// Format a consensus integer as the Beacon API's decimal string.
 fn decimal(value: u64, buffer: *[20]u8) []const u8 {
-    return std.fmt.bufPrint(buffer, "{d}", .{value}) catch unreachable;
+    return std.fmt.bufPrint(buffer, "{d}", .{value}) catch @panic("20-byte buffer holds every u64 decimal value");
 }
 
 /// Format fixed bytes as a lower-case 0x-prefixed JSON string.

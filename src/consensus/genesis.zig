@@ -20,9 +20,9 @@ const epoch = @import("epoch.zig");
 // per height; appending and obtaining each length-mixed prefix root take 32
 // hashes regardless of the number of earlier deposits.
 const DepositTree = struct {
-    branch: [32]fulu.Root = undefined,
-    zero_hashes: [32]fulu.Root = undefined,
-    full_root: fulu.Root = undefined,
+    branch: [32]fulu.Root = .{.{0} ** 32} ** 32,
+    zero_hashes: [32]fulu.Root = .{.{0} ** 32} ** 32,
+    full_root: fulu.Root = .{0} ** 32,
     count: u64 = 0,
 
     /// Initialize the empty subtree roots for every height of the contract tree.
@@ -182,6 +182,7 @@ fn hashPair(left: fulu.Root, right: fulu.Root) fulu.Root {
     var input: [64]u8 = undefined;
     @memcpy(input[0..32], &left);
     @memcpy(input[32..64], &right);
+    // SAFETY: This value is fully initialized before any read.
     var root: fulu.Root = undefined;
     std.crypto.hash.sha2.Sha256.hash(&input, &root, .{});
     return root;
