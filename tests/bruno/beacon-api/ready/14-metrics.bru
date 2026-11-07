@@ -1,0 +1,21 @@
+meta {
+  name: Metrics
+  type: http
+  seq: 14
+}
+
+get {
+  url: {{host}}/metrics
+}
+
+tests {
+  test("Prometheus scrape exposes current beacon values", function () {
+    expect(res.status).to.equal(200);
+    expect(res.getHeader("content-type")).to.match(/^text\/plain; version=0\.0\.4/);
+    expect(res.body).to.include("hightower_slot 0\n");
+    expect(res.body).to.include("hightower_head_slot 0\n");
+    expect(res.body).to.include("hightower_finalized_epoch 0\n");
+    expect(res.body).to.include("hightower_peers 0\n");
+    expect(res.body).to.include("hightower_syncing 0\n");
+  });
+}

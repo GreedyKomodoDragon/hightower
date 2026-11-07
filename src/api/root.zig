@@ -30,6 +30,16 @@ pub const Response = struct {
 pub fn dispatch(allocator: std.mem.Allocator, store: ?*const consensus.ForkChoiceStore, metadata: Metadata, target: []const u8) !Response {
     if (target.len > 1024) return reply(allocator, .bad_request, "invalid request target");
     const path = target[0 .. std.mem.indexOfScalar(u8, target, '?') orelse target.len];
+    if (std.mem.eql(u8, path, "/metrics")) {
+        const chain = store orelse return reply(allocator, .service_unavailable, "service unavailable");
+        const head = consensus.getForkChoiceHead(chain) catch return reply(allocator, .service_unavailable, "service unavailable");
+        const block = chain.blocks.get(head) orelse return reply(allocator, .service_unavailable, "service unavailable");
+        const body = try std.fmt.allocPrint(allocator,
+            "# HELP hightower_slot Current fork-choice slot.\n# TYPE hightower_slot gauge\nhightower_slot {d}\n# HELP hightower_head_slot Slot of the selected head block.\n# TYPE hightower_head_slot gauge\nhightower_head_slot {d}\n# HELP hightower_finalized_epoch Finalized checkpoint epoch.\n# TYPE hightower_finalized_epoch gauge\nhightower_finalized_epoch {d}\n# HELP hightower_peers Connected peers.\n# TYPE hightower_peers gauge\nhightower_peers 0\n# HELP hightower_syncing Whether the node is syncing.\n# TYPE hightower_syncing gauge\nhightower_syncing {d}\n",
+            .{ chain.currentSlot(), block.slot, chain.finalized_checkpoint.epoch, @intFromBool(metadata.is_syncing) },
+        );
+        return .{ .status = .ok, .body = body };
+    }
     // shortcut: route matching scans each endpoint, use the router in https://github.com/GreedyKomodoDragon/hightower/issues/111 when implemented.
     if (std.mem.eql(u8, path, "/eth/v1/node/health")) {
         if (!metadata.ready or store == null) return reply(allocator, .service_unavailable, "service unavailable");
@@ -107,7 +117,8 @@ pub fn serveConnection(allocator: std.mem.Allocator, io: std.Io, stream: std.Io.
     else
         try dispatch(allocator, store, metadata, request.head.target);
     defer result.deinit(allocator);
-    try request.respond(result.body, .{ .status = result.status, .keep_alive = false, .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }} });
+    const content_type = if (std.mem.startsWith(u8, request.head.target, "/metrics")) "text/plain; version=0.0.4" else "application/json";
+    try request.respond(result.body, .{ .status = result.status, .keep_alive = false, .extra_headers = &.{.{ .name = "content-type", .value = content_type }} });
 }
 
 /// Accept connections until the caller closes or cancels the listening socket.
