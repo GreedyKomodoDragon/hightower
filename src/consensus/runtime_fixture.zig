@@ -83,17 +83,18 @@ fn writeFixture(init: std.process.Init) !void {
     defer if (client) |*value| value.deinit();
     const engine = if (client) |*value| value.interface() else fake_engine.interface();
     var coordinator = consensus.PeerSync.Coordinator{ .allocator = allocator, .io = init.io, .dir = source, .store = &store, .columns = &columns, .settings = &setup, .engine = engine, .head = try merkle.HashTreeRoot(allocator, block), .next_slot = 1 };
-    var fixture_hashes: [2][64]u8 = undefined;
+    var fixture_hashes: [3][64]u8 = undefined;
+    fixture_hashes[0] = std.fmt.bytesToHex(state.latest_execution_payload_header.block_hash, .lower);
     for (0..2) |index| {
         const next = if (args.len == 8) blk: {
             const bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, args[4 + index], allocator, .limited(16 * 1024 * 1024));
             var input: std.Io.Reader = .fixed(bytes);
             break :blk try ssz.deserialize(allocator, fulu.SignedBeaconBlock, &input);
         } else try fixtures.decodeBlock(allocator, fixtures.fork_choice_heavier_blocks[index]);
-        fixture_hashes[index] = std.fmt.bytesToHex(next.message.body.execution_payload.block_hash, .lower);
+        fixture_hashes[index + 1] = std.fmt.bytesToHex(next.message.body.execution_payload.block_hash, .lower);
         _ = try coordinator.importBlocks(null, &.{next}, index + 1, 1);
     }
-    const hashes = try std.fmt.allocPrint(allocator, "{s}\n{s}\n", .{ fixture_hashes[0], fixture_hashes[1] });
+    const hashes = try std.fmt.allocPrint(allocator, "{s}\n{s}\n{s}\n", .{ fixture_hashes[0], fixture_hashes[1], fixture_hashes[2] });
     try dir.writeFile(init.io, .{ .sub_path = "execution.fixture-hashes", .data = hashes });
     const output = try std.fmt.allocPrint(allocator, "0x{s}\n", .{std.fmt.bytesToHex(coordinator.head, .lower)});
     try std.Io.File.stdout().writeStreamingAll(init.io, output);

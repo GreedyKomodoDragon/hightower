@@ -82,7 +82,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 5) {
         const hashes = try std.Io.Dir.cwd().readFileAlloc(init.io, args[4], a, .limited(1024));
         var lines = std.mem.tokenizeScalar(u8, hashes, '\n');
-        const allowed = try a.alloc(execution.Hash, 2);
+        const allowed = try a.alloc(execution.Hash, 3);
         for (allowed) |*hash| {
             const line = lines.next() orelse return error.InvalidFixtureHashes;
             if (line.len != 64) return error.InvalidFixtureHashes;
