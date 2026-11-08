@@ -160,7 +160,7 @@ fn runRuntime(init: std.process.Init) !void {
     std.log.info("local ENR: {s}", .{uri});
     var listener = try config.address.listen(init.io, .{ .reuse_address = true });
     defer listener.deinit(init.io);
-    var api = Api{ .allocator = allocator, .io = init.io, .listener = &listener, .store = &store, .mutex = &mutex, .version = state.fork.current_version };
+    var api = Api{ .allocator = allocator, .io = init.io, .listener = &listener, .store = &store, .mutex = &mutex, .version = state.fork.current_version, .head = &coordinator.head };
     const thread = try std.Thread.spawn(.{}, Api.run, .{&api});
     thread.detach();
     while (true) {
@@ -204,7 +204,8 @@ fn serveBundledAnchor(allocator: std.mem.Allocator, io: std.Io, address: std.Io.
     defer store.deinit();
     var listener = try address.listen(io, .{ .reuse_address = true });
     defer listener.deinit(io);
-    try hightower.api.serve(allocator, io, &listener, &store, .{ .genesis_fork_version = .{ 0, 0, 0, 0 } });
+    const head = try hightower.consensus.getForkChoiceHead(&store);
+    try hightower.api.serve(allocator, io, &listener, &store, .{ .genesis_fork_version = .{ 0, 0, 0, 0 }, .head = &head });
 }
 
 const Api = struct {
@@ -214,9 +215,10 @@ const Api = struct {
     store: *const hightower.consensus.ForkChoiceStore,
     mutex: *std.Io.Mutex,
     version: [4]u8,
+    head: *const hightower.fulu.Root,
     /// Serve read-only requests against one locked fork-choice view.
     fn run(self: *Api) void {
-        hightower.api.serveLocked(self.allocator, self.io, self.listener, self.store, .{ .genesis_fork_version = self.version }, self.mutex) catch |err| std.log.err("API stopped: {s}", .{@errorName(err)});
+        hightower.api.serveLocked(self.allocator, self.io, self.listener, self.store, .{ .genesis_fork_version = self.version, .head = self.head }, self.mutex) catch |err| std.log.err("API stopped: {s}", .{@errorName(err)});
     }
 };
 
@@ -237,8 +239,8 @@ const Announcements = struct {
         defer if (!self.importing) self.mutex.unlock(self.coordinator.io);
         try hightower.consensus.onForkChoiceAttestation(self.coordinator.store, value.*, false);
         self.coordinator.head = try hightower.consensus.getForkChoiceHead(self.coordinator.store);
-        hightower.consensus.PeerSync.confirmExecutionHead(self.coordinator.store, self.coordinator.engine) catch return error.ForkchoiceUpdateFailed;
-        hightower.consensus.saveForkChoiceStore(self.coordinator.allocator, self.coordinator.io, self.coordinator.dir, "fork-choice.bin", self.coordinator.store) catch return error.ImportCommitFailed;
+        hightower.consensus.PeerSync.confirmExecutionHeadAt(self.coordinator.store, self.coordinator.engine, self.coordinator.head) catch return error.ForkchoiceUpdateFailed;
+        hightower.consensus.saveForkChoiceStoreAt(self.coordinator.allocator, self.coordinator.io, self.coordinator.dir, "fork-choice.bin", self.coordinator.store, self.coordinator.head) catch return error.ImportCommitFailed;
     }
     /// Apply an aggregate's attestation through the same gate.
     fn aggregate(context: *anyopaque, value: *const hightower.fulu.SignedAggregateAndProof) !void {

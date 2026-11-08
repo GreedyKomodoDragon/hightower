@@ -21,6 +21,11 @@ const kzg = @import("execution").kzg;
 /// Select the consensus head in execution before exposing or saving it.
 pub fn confirmExecutionHead(store: *const fork_choice.Store, engine: engine_api.ExecutionEngine) !void {
     const head = fork_choice.getHead(store) catch return error.ForkchoiceUpdateFailed;
+    return confirmExecutionHeadAt(store, engine, head);
+}
+
+/// Confirm a head already selected by the caller to avoid a second weight pass.
+pub fn confirmExecutionHeadAt(store: *const fork_choice.Store, engine: engine_api.ExecutionEngine, head: fulu.Root) !void {
     const head_state = store.block_states.get(head) orelse return error.ForkchoiceUpdateFailed;
     const safe_state = store.block_states.get(store.justified_checkpoint.root) orelse return error.ForkchoiceUpdateFailed;
     const finalized_state = store.block_states.get(store.finalized_checkpoint.root) orelse return error.ForkchoiceUpdateFailed;
@@ -81,8 +86,8 @@ pub const Coordinator = struct {
             try fork_choice.onBlock(self.store, signed.*, self.engine, .{ .context = self.columns, .is_available = columns.Store.check });
             self.head = fork_choice.getHead(self.store) catch return error.ImportCommitFailed;
             if (!std.mem.eql(u8, &self.head, &root)) return error.ImportCommitFailed;
-            try confirmExecutionHead(self.store, self.engine);
-            snapshot.saveForkChoiceStore(self.allocator, self.io, self.dir, "fork-choice.bin", self.store) catch return error.ImportCommitFailed;
+            try confirmExecutionHeadAt(self.store, self.engine, self.head);
+            snapshot.saveForkChoiceStoreAt(self.allocator, self.io, self.dir, "fork-choice.bin", self.store, self.head) catch return error.ImportCommitFailed;
             self.next_slot = try std.math.add(u64, block.slot, 1);
             prior_slot = block.slot;
             imported += 1;

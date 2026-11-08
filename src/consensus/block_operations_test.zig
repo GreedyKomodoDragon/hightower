@@ -55,8 +55,8 @@ fn runIgnored(comptime T: type, process: anytype, comptime directory: []const u8
     try expectStateRoot(allocator, state, expected);
 }
 
-fn processSyncAggregate(_: std.mem.Allocator, state: *fulu.BeaconState, aggregate: fulu.SyncAggregate) !void {
-    try block.processSyncAggregate(state, aggregate);
+fn processSyncAggregate(allocator: std.mem.Allocator, state: *fulu.BeaconState, aggregate: fulu.SyncAggregate) !void {
+    try block.processSyncAggregate(allocator, state, aggregate);
 }
 
 test "pinned Fulu block header fixtures validate proposer and parent" {

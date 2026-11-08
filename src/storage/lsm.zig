@@ -544,7 +544,9 @@ pub const Database = struct {
         var file = try self.dir.createFile(self.io, name, .{ .read = true, .exclusive = true });
         errdefer self.dir.deleteFile(self.io, name) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
         defer file.close(self.io);
-        try file.writeStreamingAll(self.io, table_magic);
+        var write_buffer: [64 * 1024]u8 = undefined;
+        var writer = file.writer(self.io, &write_buffer);
+        try writer.interface.writeAll(table_magic);
         var offset: u64 = table_magic.len;
         var moves: std.ArrayList(Move) = .empty;
         errdefer moves.deinit(self.allocator);
@@ -569,12 +571,13 @@ pub const Database = struct {
             hash.update(key);
             hash.update(value);
             hash.final(header[15..47]);
-            try file.writeStreamingAll(self.io, &header);
-            try file.writeStreamingAll(self.io, key);
-            try file.writeStreamingAll(self.io, value);
+            try writer.interface.writeAll(&header);
+            try writer.interface.writeAll(key);
+            try writer.interface.writeAll(value);
             try moves.append(self.allocator, .{ .key = key, .offset = offset });
             offset += record_header + key.len + value.len;
         }
+        try writer.interface.flush();
         try file.sync(self.io);
         try self.syncDir();
         return moves;

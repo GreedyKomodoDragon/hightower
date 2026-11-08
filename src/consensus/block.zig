@@ -45,7 +45,7 @@ pub fn stateTransition(allocator: std.mem.Allocator, state: *fulu.BeaconState, s
 pub fn processBlock(allocator: std.mem.Allocator, state: *fulu.BeaconState, block: fulu.BeaconBlock, engine: engine_api.ExecutionEngine) !void {
     try processBlockPrefix(allocator, state, block, engine);
     try operations.processOperations(allocator, state, block.body);
-    try processSyncAggregate(state, block.body.sync_aggregate);
+    try processSyncAggregate(allocator, state, block.body.sync_aggregate);
 }
 
 /// Apply the ordered block work before operations, for proposer selection.
@@ -167,7 +167,7 @@ fn processEth1Data(allocator: std.mem.Allocator, state: *fulu.BeaconState, vote:
     if (@as(u64, @intCast(matching)) * preset.ETH1_DATA_VOTE_SUPERMAJORITY_NUMERATOR > voting_period_slots) state.eth1_data = vote;
 }
 
-pub fn processSyncAggregate(state: *fulu.BeaconState, aggregate: fulu.SyncAggregate) !void {
+pub fn processSyncAggregate(allocator: std.mem.Allocator, state: *fulu.BeaconState, aggregate: fulu.SyncAggregate) !void {
     if (state.slot == 0) return error.InvalidSlot;
     const previous_slot = state.slot - 1;
     const domain = domains.getDomain(state.*, helpers.DOMAIN_SYNC_COMMITTEE, helpers.computeEpochAtSlot(previous_slot));
@@ -191,15 +191,16 @@ pub fn processSyncAggregate(state: *fulu.BeaconState, aggregate: fulu.SyncAggreg
     const participant_reward: u64 = @intCast(max_participant_rewards / preset.SYNC_COMMITTEE_SIZE);
     const proposer_reward: u64 = participant_reward * helpers.PROPOSER_WEIGHT / (helpers.WEIGHT_DENOMINATOR - helpers.PROPOSER_WEIGHT);
     const proposer_index = state.proposer_lookahead[state.slot % helpers.SLOTS_PER_EPOCH];
+    // Index the validator set once; the sync committee repeats 512 pubkeys per block.
+    var pubkey_indices = std.AutoHashMap(fulu.BLSPubkey, usize).init(allocator);
+    defer pubkey_indices.deinit();
+    try pubkey_indices.ensureTotalCapacity(@intCast(state.validators.data.len));
+    for (state.validators.data, 0..) |validator, index| {
+        const entry = try pubkey_indices.getOrPut(validator.pubkey);
+        if (!entry.found_existing) entry.value_ptr.* = index;
+    }
     for (state.current_sync_committee.pubkeys, aggregate.sync_committee_bits.data) |pubkey, bit| {
-        var validator_index: ?usize = null;
-        for (state.validators.data, 0..) |validator, index| {
-            if (std.mem.eql(u8, &validator.pubkey, &pubkey)) {
-                validator_index = index;
-                break;
-            }
-        }
-        const index = validator_index orelse return error.InvalidSyncCommittee;
+        const index = pubkey_indices.get(pubkey) orelse return error.InvalidSyncCommittee;
         if (bit) {
             @constCast(state.balances.data)[index] = std.math.add(u64, state.balances.data[index], participant_reward) catch return error.BalanceOverflow;
             @constCast(state.balances.data)[proposer_index] = std.math.add(u64, state.balances.data[proposer_index], proposer_reward) catch return error.BalanceOverflow;
