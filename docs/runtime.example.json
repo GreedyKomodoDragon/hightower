@@ -1,0 +1,9 @@
+{
+  "listen_address": "127.0.0.1:5052",
+  "anchor_state": "anchor-state.ssz",
+  "anchor_block": "anchor-block.ssz",
+  "bootstrap_enr": "",
+  "data_dir": "node-data",
+  "trusted_setup": "src/execution/trusted_setup.txt",
+  "engine_url": "http://127.0.0.1:8551"
+}
