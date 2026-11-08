@@ -31,6 +31,8 @@ jobs:
       - run: zig fmt --check build.zig build.zig.zon src
       - run: zig build
       - run: bash scripts/test_runtime.sh
+      - run: zig build runtime-fixture engine-test-server
+      - run: python3 scripts/test_runtime_network.py
       - run: zig build test
       - run: zig build test-transition
       - run: bash scripts/test_engine_local.sh
@@ -97,7 +99,7 @@ jobs:
   prysm-p2p-interop:
     name: Prysm/Geth Fulu P2P interoperability
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: vercel-labs/setup-zig@v1
@@ -130,6 +132,10 @@ jobs:
       - run: bash scripts/test_prysm_geth_interop.sh
         env:
           KEEP_INTEROP_DIR: '1'
+      - run: zig build -Dpreset=mainnet -Doptimize=ReleaseSafe runtime-fixture p2p-interop-keys
+      - run: zig build -Dpreset=mainnet -Doptimize=ReleaseSafe
+      - name: Runtime crash recovery with Geth
+        run: python3 scripts/test_runtime_geth.py
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
