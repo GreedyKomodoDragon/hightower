@@ -1,5 +1,6 @@
 // A trusted Fulu anchor fixes the initial fork-choice state. Ordered peer
 // blocks pass column, execution, and state checks before the head is saved.
+// Recovery reselects the saved execution head before either listener opens.
 //
 //   anchor/snapshot -> peer range -> verified block -> durable head
 // The runtime has one active peer and one configured bootstrap ENR.
@@ -135,6 +136,7 @@ fn runRuntime(init: std.process.Init) !void {
     defer kzg.deinit();
     var engine = try hightower.engine_client.Client.init(allocator, init.io, settings.engine_url, jwt, .osaka);
     defer engine.deinit();
+    try hightower.consensus.PeerSync.confirmExecutionHead(&store, engine.interface());
     const identity = try nodeId(allocator, key);
     var columns = try hightower.consensus.DataColumns.Store.open(allocator, init.io, dir, "columns", state.genesis_validators_root, identity, 128);
     defer columns.deinit();
@@ -235,7 +237,8 @@ const Announcements = struct {
         defer if (!self.importing) self.mutex.unlock(self.coordinator.io);
         try hightower.consensus.onForkChoiceAttestation(self.coordinator.store, value.*, false);
         self.coordinator.head = try hightower.consensus.getForkChoiceHead(self.coordinator.store);
-        try hightower.consensus.saveForkChoiceStore(self.coordinator.allocator, self.coordinator.io, self.coordinator.dir, "fork-choice.bin", self.coordinator.store);
+        hightower.consensus.PeerSync.confirmExecutionHead(self.coordinator.store, self.coordinator.engine) catch return error.ForkchoiceUpdateFailed;
+        hightower.consensus.saveForkChoiceStore(self.coordinator.allocator, self.coordinator.io, self.coordinator.dir, "fork-choice.bin", self.coordinator.store) catch return error.ImportCommitFailed;
     }
     /// Apply an aggregate's attestation through the same gate.
     fn aggregate(context: *anyopaque, value: *const hightower.fulu.SignedAggregateAndProof) !void {

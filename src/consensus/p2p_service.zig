@@ -209,7 +209,7 @@ pub const Service = struct {
             // consumed part of a transport record before failing.
             active.step() catch |err| {
                 self.dropPeer();
-                if (err == error.OutOfMemory) return err;
+                if (err == error.OutOfMemory or err == error.ForkchoiceUpdateFailed or err == error.ImportCommitFailed) return err;
             };
         }
     }

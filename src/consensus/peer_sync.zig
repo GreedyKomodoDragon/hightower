@@ -18,6 +18,16 @@ const snapshot = @import("fork_choice_snapshot.zig");
 const engine_api = @import("execution_engine.zig");
 const kzg = @import("execution").kzg;
 
+/// Select the consensus head in execution before exposing or saving it.
+pub fn confirmExecutionHead(store: *const fork_choice.Store, engine: engine_api.ExecutionEngine) !void {
+    const head = fork_choice.getHead(store) catch return error.ForkchoiceUpdateFailed;
+    const head_state = store.block_states.get(head) orelse return error.ForkchoiceUpdateFailed;
+    const safe_state = store.block_states.get(store.justified_checkpoint.root) orelse return error.ForkchoiceUpdateFailed;
+    const finalized_state = store.block_states.get(store.finalized_checkpoint.root) orelse return error.ForkchoiceUpdateFailed;
+    const choice = engine.forkchoiceUpdated(.{ .head_block_hash = head_state.latest_execution_payload_header.block_hash, .safe_block_hash = safe_state.latest_execution_payload_header.block_hash, .finalized_block_hash = finalized_state.latest_execution_payload_header.block_hash }, null) catch return error.ForkchoiceUpdateFailed;
+    if (choice.verdict.status != .valid) return error.ForkchoiceUpdateFailed;
+}
+
 pub const Coordinator = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -71,11 +81,7 @@ pub const Coordinator = struct {
             try fork_choice.onBlock(self.store, signed.*, self.engine, .{ .context = self.columns, .is_available = columns.Store.check });
             self.head = fork_choice.getHead(self.store) catch return error.ImportCommitFailed;
             if (!std.mem.eql(u8, &self.head, &root)) return error.ImportCommitFailed;
-            const head_state = self.store.block_states.get(self.head) orelse return error.ImportCommitFailed;
-            const safe_state = self.store.block_states.get(self.store.justified_checkpoint.root) orelse return error.ImportCommitFailed;
-            const finalized_state = self.store.block_states.get(self.store.finalized_checkpoint.root) orelse return error.ImportCommitFailed;
-            const choice = self.engine.forkchoiceUpdated(.{ .head_block_hash = head_state.latest_execution_payload_header.block_hash, .safe_block_hash = safe_state.latest_execution_payload_header.block_hash, .finalized_block_hash = finalized_state.latest_execution_payload_header.block_hash }, null) catch return error.ForkchoiceUpdateFailed;
-            if (choice.verdict.status != .valid) return error.ForkchoiceUpdateFailed;
+            try confirmExecutionHead(self.store, self.engine);
             snapshot.saveForkChoiceStore(self.allocator, self.io, self.dir, "fork-choice.bin", self.store) catch return error.ImportCommitFailed;
             self.next_slot = try std.math.add(u64, block.slot, 1);
             prior_slot = block.slot;
@@ -132,6 +138,16 @@ test "ordered import saves a valid head and rejects a conflicting replay" {
     var setup = kzg.Settings{};
     var engine = engine_api.TestEngine{ .status = .valid };
     var coordinator = Coordinator{ .allocator = allocator, .io = io, .dir = tmp.dir, .store = &chain, .columns = &column_store, .settings = &setup, .engine = engine.interface(), .head = initial_root, .next_slot = 1 };
+    try confirmExecutionHead(&chain, engine.interface());
+    try std.testing.expectEqual(state.latest_execution_payload_header.block_hash, engine.head.?);
+    engine.forkchoice_status = .syncing;
+    try std.testing.expectError(error.ForkchoiceUpdateFailed, confirmExecutionHead(&chain, engine.interface()));
+    engine.forkchoice_status = .invalid;
+    try std.testing.expectError(error.ForkchoiceUpdateFailed, confirmExecutionHead(&chain, engine.interface()));
+    engine.forkchoice_status = null;
+    engine.unavailable = true;
+    try std.testing.expectError(error.ForkchoiceUpdateFailed, confirmExecutionHead(&chain, engine.interface()));
+    engine.unavailable = false;
     const first = try fixtures.decodeBlock(allocator, fixtures.fork_choice_heavier_blocks[0]);
     defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, first);
     try std.testing.expectEqual(@as(usize, 0), first.message.body.blob_kzg_commitments.data.len);
