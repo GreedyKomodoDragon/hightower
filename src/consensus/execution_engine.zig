@@ -85,6 +85,7 @@ fn unsupportedGetPayload(_: *anyopaque, _: u64) anyerror!BuiltPayload {
 
 pub const TestEngine = struct {
     status: PayloadStatus,
+    forkchoice_status: ?PayloadStatus = null,
     unavailable: bool = false,
     built: ?BuiltPayload = null,
     requested_timestamp: ?u64 = null,
@@ -119,7 +120,8 @@ pub const TestEngine = struct {
             self.requested_fee_recipient = value.fee_recipient;
             self.requested_withdrawal_count = value.withdrawals.len;
         }
-        return .{ .verdict = .{ .status = self.status, .latest_valid_hash = self.latest_valid_hash }, .payload_id = if (self.status == .valid and attributes != null) 1 else null };
+        const verdict = self.forkchoice_status orelse self.status;
+        return .{ .verdict = .{ .status = verdict, .latest_valid_hash = self.latest_valid_hash }, .payload_id = if (verdict == .valid and attributes != null) 1 else null };
     }
 
     /// Return configured deterministic builder output.

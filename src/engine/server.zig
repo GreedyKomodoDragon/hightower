@@ -145,6 +145,8 @@ pub const Server = struct {
     pool: *execution.pool.Pool,
     settings: ?*const execution.kzg.Settings = null,
     secret: [32]u8,
+    // shortcut: pinned fixture hashes stand in for EVM execution; use compatible payloads for full execution validation.
+    fixture_payload_hashes: ?[]const execution.Hash = null,
     staged: std.ArrayList(Candidate) = .empty,
     build: ?Build = null,
     next_id: u64 = 1,
@@ -248,6 +250,11 @@ pub const Server = struct {
     fn newPayload(self: *Server, a: std.mem.Allocator, params: []const Value, version: u8) !Value {
         if (params.len != (if (version < 3) @as(usize, 1) else if (version == 3) @as(usize, 3) else @as(usize, 4))) return error.InvalidParams;
         if (version >= 3 and params[1] != .array) return error.InvalidParams;
+        if (self.fixture_payload_hashes) |allowed| {
+            const hash = try wire.fixed(32, try wire.field(params[0], "blockHash"));
+            for (allowed) |candidate| if (std.mem.eql(u8, &hash, &candidate)) return status(a, "VALID", hash);
+            return status(a, "INVALID", null);
+        }
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         var retained = false;
         defer if (!retained) arena.deinit();
@@ -320,6 +327,10 @@ pub const Server = struct {
         if (params.len != 2) return error.InvalidParams;
         const choice = params[0];
         const head = try wire.fixed(32, try wire.field(choice, "headBlockHash"));
+        if (self.fixture_payload_hashes) |allowed| {
+            for (allowed) |candidate| if (std.mem.eql(u8, &head, &candidate)) return choiceResult(a, "VALID", head, null);
+            return choiceResult(a, "INVALID", null, null);
+        }
         const safe = try wire.fixed(32, try wire.field(choice, "safeBlockHash"));
         const finalized = try wire.fixed(32, try wire.field(choice, "finalizedBlockHash"));
         var selected: ?usize = null;

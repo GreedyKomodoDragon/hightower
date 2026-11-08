@@ -12,6 +12,7 @@ pub const upgradeToFulu = @import("fork.zig").upgradeToFulu;
 pub const stateTransitionFromElectra = @import("fork.zig").stateTransitionFromElectra;
 pub const initializeBeaconStateFromEth1 = @import("genesis.zig").initializeBeaconStateFromEth1;
 pub const ExecutionEngine = @import("execution_engine.zig").ExecutionEngine;
+pub const TestEngine = @import("execution_engine.zig").TestEngine;
 pub const NewPayloadRequest = @import("execution_engine.zig").NewPayloadRequest;
 pub const PayloadStatus = @import("execution_engine.zig").PayloadStatus;
 pub const PayloadVerdict = @import("execution_engine.zig").PayloadVerdict;

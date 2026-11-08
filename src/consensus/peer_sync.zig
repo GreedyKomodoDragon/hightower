@@ -69,9 +69,14 @@ pub const Coordinator = struct {
             const at_slot = try std.math.add(u64, self.store.genesis_time, try std.math.mul(u64, block.slot, @import("consensus_preset").Config.SECONDS_PER_SLOT));
             try fork_choice.onTick(self.store, at_slot);
             try fork_choice.onBlock(self.store, signed.*, self.engine, .{ .context = self.columns, .is_available = columns.Store.check });
-            self.head = try fork_choice.getHead(self.store);
-            if (!std.mem.eql(u8, &self.head, &root)) return error.ConflictingHead;
-            try snapshot.saveForkChoiceStore(self.allocator, self.io, self.dir, "fork-choice.bin", self.store);
+            self.head = fork_choice.getHead(self.store) catch return error.ImportCommitFailed;
+            if (!std.mem.eql(u8, &self.head, &root)) return error.ImportCommitFailed;
+            const head_state = self.store.block_states.get(self.head) orelse return error.ImportCommitFailed;
+            const safe_state = self.store.block_states.get(self.store.justified_checkpoint.root) orelse return error.ImportCommitFailed;
+            const finalized_state = self.store.block_states.get(self.store.finalized_checkpoint.root) orelse return error.ImportCommitFailed;
+            const choice = self.engine.forkchoiceUpdated(.{ .head_block_hash = head_state.latest_execution_payload_header.block_hash, .safe_block_hash = safe_state.latest_execution_payload_header.block_hash, .finalized_block_hash = finalized_state.latest_execution_payload_header.block_hash }, null) catch return error.ForkchoiceUpdateFailed;
+            if (choice.verdict.status != .valid) return error.ForkchoiceUpdateFailed;
+            snapshot.saveForkChoiceStore(self.allocator, self.io, self.dir, "fork-choice.bin", self.store) catch return error.ImportCommitFailed;
             self.next_slot = try std.math.add(u64, block.slot, 1);
             prior_slot = block.slot;
             imported += 1;
@@ -149,6 +154,17 @@ test "ordered import saves a valid head and rejects a conflicting replay" {
     invalid.message.state_root[0] ^= 1;
     try std.testing.expectError(error.InvalidStateRoot, resumed.importBlocks(null, &.{invalid}, 2, 1));
     try std.testing.expectEqual(accepted, resumed.head);
+    engine.forkchoice_status = .syncing;
+    try std.testing.expectError(error.ForkchoiceUpdateFailed, resumed.importBlocks(null, &.{second}, 2, 1));
+    var durable = try snapshot.loadForkChoiceStore(allocator, io, tmp.dir, "fork-choice.bin");
+    defer durable.deinit();
+    try std.testing.expectEqual(accepted, try fork_choice.getHead(&durable));
+    const reloaded = try snapshot.loadForkChoiceStore(allocator, io, tmp.dir, "fork-choice.bin");
+    restored.deinit();
+    restored = reloaded;
+    resumed.head = accepted;
+    resumed.next_slot = 2;
+    engine.forkchoice_status = null;
     try std.testing.expectEqual(@as(usize, 1), try resumed.importBlocks(null, &.{second}, 2, 1));
     const next = resumed.head;
     var recovered = try snapshot.loadForkChoiceStore(allocator, io, tmp.dir, "fork-choice.bin");
@@ -256,6 +272,7 @@ test "two peers catch up from an anchor and resume after restart" {
     var resumed = Coordinator{ .allocator = allocator, .io = io, .dir = target_dir.dir, .store = &restored, .columns = &target_columns, .settings = &setup, .engine = target_engine.interface(), .head = try fork_choice.getHead(&restored), .next_slot = 2 };
     try std.testing.expectEqual(@as(usize, 1), try resumed.step(try target_service.activePeer(), 1));
     try std.testing.expectEqual(source_sync.head, resumed.head);
+    try std.testing.expectEqual(second.message.body.execution_payload.block_hash, target_engine.head.?);
     try std.testing.expectEqual(try merkle.HashTreeRoot(allocator, source_chain.block_states.get(source_sync.head).?), try merkle.HashTreeRoot(allocator, restored.block_states.get(resumed.head).?));
     if (worker.err) |err| return err;
 }
