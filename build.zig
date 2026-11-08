@@ -426,6 +426,24 @@ pub fn build(b: *std.Build) void {
     });
     const engine_test_server_step = b.step("engine-test-server", "Build the loopback Engine API test server");
     engine_test_server_step.dependOn(&b.addInstallArtifact(engine_test_server, .{}).step);
+    const runtime_fixture = b.addExecutable(.{
+        .name = "hightower-runtime-fixture",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/consensus/runtime_fixture.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "consensus", .module = consensus_mod },
+                .{ .name = "fulu", .module = fulu_mod },
+                .{ .name = "ssz", .module = ssz_mod },
+                .{ .name = "merkle", .module = merkle_mod },
+                .{ .name = "execution", .module = execution_mod },
+                .{ .name = "engine_client", .module = engine_client_mod },
+            },
+        }),
+    });
+    const runtime_fixture_step = b.step("runtime-fixture", "Build the local runtime fixture exporter");
+    runtime_fixture_step.dependOn(&b.addInstallArtifact(runtime_fixture, .{}).step);
     const discv5_interop_fixture = b.addExecutable(.{
         .name = "hightower-discv5-interop-fixture",
         .root_module = b.createModule(.{
