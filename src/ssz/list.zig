@@ -45,13 +45,10 @@ pub fn serializeList(
 pub fn deserializeList(
     allocator: std.mem.Allocator,
     comptime T: type,
-    reader: *std.Io.Reader,
+    bytes: []const u8,
 ) !T {
     const desc = comptime desc_mod.SszType(T);
     const E = desc.element.?;
-
-    const bytes = try reader.allocRemaining(allocator, .unlimited);
-    defer allocator.free(bytes);
 
     const elem = comptime desc_mod.SszType(E);
     if (comptime !elem.is_variable) {
@@ -109,9 +106,7 @@ pub fn decodeFixedItems(
     // Per-element slices: nested values slurp their own reader,
     // so sequential streaming would over-read into siblings.
     for (data, 0..) |*item, i| {
-        var sub: std.Io.Reader = .fixed(bytes[i * elem_size ..][0..elem_size]);
-        item.* = try deserialize_mod.deserialize(allocator, E, &sub);
-        if (sub.bufferedLen() != 0) return error.TrailingBytes;
+        item.* = try deserialize_mod.deserializeSlice(allocator, E, bytes[i * elem_size ..][0..elem_size]);
         done += 1;
     }
 
@@ -137,10 +132,8 @@ pub fn decodeVariableItems(
     }
 
     for (data, 0..) |*item, i| {
-        var elem_reader: std.Io.Reader = .fixed(bytes[offsets[i]..offsets[i + 1]]);
-        item.* = try deserialize_mod.deserialize(allocator, E, &elem_reader);
-        // Trailing bytes inside an element are malformed.
-        if (elem_reader.bufferedLen() != 0) return error.TrailingBytes;
+        // Nested decoding checks that each element consumes its exact slice.
+        item.* = try deserialize_mod.deserializeSlice(allocator, E, bytes[offsets[i]..offsets[i + 1]]);
         done += 1;
     }
 
@@ -150,27 +143,21 @@ pub fn decodeVariableItems(
 pub fn deserializeByteList(
     allocator: std.mem.Allocator,
     comptime T: type,
-    reader: *std.Io.Reader,
+    bytes: []const u8,
 ) !T {
     const desc = comptime desc_mod.SszType(T);
 
-    const bytes = try reader.allocRemaining(allocator, .unlimited);
-    errdefer allocator.free(bytes);
-
     if (bytes.len > desc.max_bytes.?) return error.ByteListTooLong;
 
-    return T{ .data = bytes };
+    return T{ .data = try allocator.dupe(u8, bytes) };
 }
 
 pub fn deserializeBitList(
     allocator: std.mem.Allocator,
     comptime T: type,
-    reader: *std.Io.Reader,
+    bytes: []const u8,
 ) !T {
     const desc = comptime desc_mod.SszType(T);
-
-    const bytes = try reader.allocRemaining(allocator, .unlimited);
-    defer allocator.free(bytes);
 
     if (bytes.len == 0) return error.EndOfStream;
     // Minimal encoding: the delimiter bit lives in the last byte.

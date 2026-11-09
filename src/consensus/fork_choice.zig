@@ -258,7 +258,8 @@ pub fn onBlock(store: *Store, signed_block: fulu.SignedBeaconBlock, engine: engi
     if (!try availability.check(block_root, &block)) return error.DataUnavailable;
 
     var state = try cloneSSZ(store.allocator, fulu.BeaconState, parent_state.*);
-    defer ssz.freeDecoded(store.allocator, fulu.BeaconState, state);
+    var state_owned = true;
+    defer if (state_owned) ssz.freeDecoded(store.allocator, fulu.BeaconState, state);
     try block_transition.stateTransition(store.allocator, &state, signed_block, engine);
 
     var pulled = try cloneSSZ(store.allocator, fulu.BeaconState, state);
@@ -270,7 +271,8 @@ pub fn onBlock(store: *Store, signed_block: fulu.SignedBeaconBlock, engine: engi
     errdefer if (store.blocks.fetchRemove(block_root)) |entry| ssz.freeDecoded(store.allocator, fulu.BeaconBlock, entry.value);
     try store.signed_block_signatures.put(block_root, signed_block.signature);
     errdefer _ = store.signed_block_signatures.remove(block_root);
-    try putState(store, block_root, state);
+    state_owned = false;
+    try putStateOwned(store, block_root, state);
     errdefer if (store.block_states.fetchRemove(block_root)) |entry| ssz.freeDecoded(store.allocator, fulu.BeaconState, entry.value);
     const seconds_into_slot = (store.time - store.genesis_time) % preset.SECONDS_PER_SLOT;
     const timely = store.currentSlot() == block.slot and seconds_into_slot < preset.PROPOSER_BOOST_WINDOW_SECONDS;
@@ -317,22 +319,30 @@ fn putBlock(store: *Store, root: fulu.Root, block: fulu.BeaconBlock) !void {
     };
 }
 
+/// Take ownership of a block's post-state under its root.
+fn putStateOwned(store: *Store, root: fulu.Root, state: fulu.BeaconState) !void {
+    store.block_states.put(root, state) catch |err| {
+        ssz.freeDecoded(store.allocator, fulu.BeaconState, state);
+        return err;
+    };
+}
+
 /// Insert an owned copy of a block's post-state.
 fn putState(store: *Store, root: fulu.Root, state: fulu.BeaconState) !void {
-    const copy = try cloneSSZ(store.allocator, fulu.BeaconState, state);
-    store.block_states.put(root, copy) catch |err| {
-        ssz.freeDecoded(store.allocator, fulu.BeaconState, copy);
+    return putStateOwned(store, root, try cloneSSZ(store.allocator, fulu.BeaconState, state));
+}
+
+/// Take ownership of a checkpoint state snapshot.
+fn putCheckpointStateOwned(store: *Store, checkpoint: fulu.Checkpoint, state: fulu.BeaconState) !void {
+    store.checkpoint_states.put(checkpoint, state) catch |err| {
+        ssz.freeDecoded(store.allocator, fulu.BeaconState, state);
         return err;
     };
 }
 
 /// Insert an owned state snapshot for a checkpoint.
 fn putCheckpointState(store: *Store, checkpoint: fulu.Checkpoint, state: fulu.BeaconState) !void {
-    const copy = try cloneSSZ(store.allocator, fulu.BeaconState, state);
-    store.checkpoint_states.put(checkpoint, copy) catch |err| {
-        ssz.freeDecoded(store.allocator, fulu.BeaconState, copy);
-        return err;
-    };
+    return putCheckpointStateOwned(store, checkpoint, try cloneSSZ(store.allocator, fulu.BeaconState, state));
 }
 
 /// Cache a checkpoint's state at its epoch boundary before it becomes justified.
@@ -340,11 +350,13 @@ fn ensureCheckpointState(store: *Store, checkpoint: fulu.Checkpoint) !void {
     if (store.checkpoint_states.contains(checkpoint)) return;
     const source = store.block_states.get(checkpoint.root) orelse return error.UnknownCheckpoint;
     var state = try cloneSSZ(store.allocator, fulu.BeaconState, source);
-    defer ssz.freeDecoded(store.allocator, fulu.BeaconState, state);
+    var state_owned = true;
+    defer if (state_owned) ssz.freeDecoded(store.allocator, fulu.BeaconState, state);
     const slot = try helpers.computeStartSlotAtEpoch(checkpoint.epoch);
     if (state.slot > slot) return error.InvalidCheckpoint;
     if (state.slot < slot) try transition.processSlots(store.allocator, &state, slot, epoch_transition.processEpoch);
-    try putCheckpointState(store, checkpoint, state);
+    state_owned = false;
+    try putCheckpointStateOwned(store, checkpoint, state);
 }
 
 /// Import a valid attestation after timing and ancestry checks; block attestations may be older.
@@ -361,7 +373,8 @@ pub fn onAttestation(store: *Store, attestation: fulu.Attestation, is_from_block
 
     var target_state = try cloneSSZ(store.allocator, fulu.BeaconState, (store.checkpoint_states.get(data.target) orelse
         store.block_states.get(data.target.root) orelse return error.UnknownTarget));
-    defer ssz.freeDecoded(store.allocator, fulu.BeaconState, target_state);
+    var target_state_owned = true;
+    defer if (target_state_owned) ssz.freeDecoded(store.allocator, fulu.BeaconState, target_state);
     const start_slot = try helpers.computeStartSlotAtEpoch(data.target.epoch);
     if (target_state.slot < start_slot) try transition.processSlots(store.allocator, &target_state, start_slot, epoch_transition.processEpoch);
     const indices = try operations.getAttestingIndices(store.allocator, &target_state, attestation);
@@ -373,7 +386,10 @@ pub fn onAttestation(store: *Store, attestation: fulu.Attestation, is_from_block
     });
 
     try store.latest_messages.ensureUnusedCapacity(@intCast(indices.len));
-    if (!store.checkpoint_states.contains(data.target)) try putCheckpointState(store, data.target, target_state);
+    if (!store.checkpoint_states.contains(data.target)) {
+        target_state_owned = false;
+        try putCheckpointStateOwned(store, data.target, target_state);
+    }
     for (indices) |index| {
         if (store.equivocating_indices.contains(index)) continue;
         if (store.latest_messages.get(index)) |old| if (old.epoch >= data.target.epoch) continue;

@@ -33,21 +33,44 @@ pub fn deserialize(
         return result;
     }
 
+    const bytes = try reader.allocRemaining(allocator, .unlimited);
+    defer allocator.free(bytes);
+    return deserializeSlice(allocator, T, bytes);
+}
+
+/// Decode a variable-size SSZ value from a complete byte slice.
+///
+/// Nested fields are decoded directly from their sub-slices instead of
+/// allocating another copy through a reader.
+pub fn deserializeSlice(
+    allocator: std.mem.Allocator,
+    comptime T: type,
+    bytes: []const u8,
+) (std.Io.Reader.Error || std.mem.Allocator.Error || SszError)!T {
+    const desc = comptime desc_mod.SszType(T);
+
+    if (comptime !desc.is_variable) {
+        var reader: std.Io.Reader = .fixed(bytes);
+        const result = try deserializeFixed(T, &reader);
+        if (reader.bufferedLen() != 0) return error.TrailingBytes;
+        return result;
+    }
+
     switch (desc.kind) {
         .Array => {
-            return array_mod.deserializeArrayVar(allocator, T, reader);
+            return array_mod.deserializeArrayVar(allocator, T, bytes);
         },
         .Container, .ProgressiveContainer => {
-            return container_mod.deserializeContainer(allocator, T, reader);
+            return container_mod.deserializeContainer(allocator, T, bytes);
         },
         .List => {
-            return list_mod.deserializeList(allocator, T, reader);
+            return list_mod.deserializeList(allocator, T, bytes);
         },
         .ByteList => {
-            return list_mod.deserializeByteList(allocator, T, reader);
+            return list_mod.deserializeByteList(allocator, T, bytes);
         },
         .BitList => {
-            return list_mod.deserializeBitList(allocator, T, reader);
+            return list_mod.deserializeBitList(allocator, T, bytes);
         },
         else => unreachable,
     }
