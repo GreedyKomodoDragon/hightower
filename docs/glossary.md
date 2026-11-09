@@ -44,6 +44,7 @@ Chain:      [Block 0] ───────────────────�
 | CREATE2 | The EVM instruction that derives a new contract address from a creator, salt, and initcode hash. |
 | Initcode | Temporary code that executes during deployment and returns the contract's stored runtime code. |
 | Runtime code | Code stored at a contract address and run by later calls. |
+| Reentrancy | A contract call that reaches a contract already active earlier in the same call sequence. |
 | EIP-7610 storage collision | A creation failure when the destination already has non-empty storage, even if its nonce and code are empty. |
 | SELFDESTRUCT | An EVM instruction that transfers a contract's balance; since Cancun it deletes the account only if created in the same transaction. |
 | ERC-20 Transfer event | A token movement log with a signature topic, indexed sender and recipient addresses, and an amount. |
