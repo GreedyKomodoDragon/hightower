@@ -35,7 +35,7 @@ const AttesterCache = struct {
     allocator: std.mem.Allocator,
     epoch: ?fulu.Epoch = null,
     active: []fulu.ValidatorIndex = &.{},
-    seed: [32]u8 = undefined,
+    seed: [32]u8 = [_]u8{0} ** 32,
 
     /// Return sorted attesting indices, rebuilding the epoch context when needed.
     fn indices(self: *AttesterCache, state: *const fulu.BeaconState, attestation: fulu.Attestation) ![]fulu.ValidatorIndex {

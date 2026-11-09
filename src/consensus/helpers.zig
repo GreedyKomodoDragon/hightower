@@ -242,6 +242,7 @@ pub const ShuffleRoundPivots = struct {
 pub fn computeShuffleRoundPivots(index_count: usize, seed: [32]u8) error{InvalidIndex}!ShuffleRoundPivots {
     if (index_count == 0) return error.InvalidIndex;
 
+    // SAFETY: The loop assigns every pivot before result is returned.
     var result: ShuffleRoundPivots = undefined;
     for (0..SHUFFLE_ROUND_COUNT) |round| {
         var pivot_input: [33]u8 = undefined;
