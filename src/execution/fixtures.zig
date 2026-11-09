@@ -5,7 +5,7 @@
 // JSON -> selected transaction -> state transition -> oracle fields
 // Blockchain fixtures apply ordered London blocks; a rejected block leaves the
 // parent and its state in place for the next block. This runner supports London
-// blocks with empty ommers and London/Cancun state cases, including creation.
+// blocks with empty ommers and London/Shanghai/Cancun state cases, including creation.
 // genesis -> accepted block -> rejected block (rollback) -> accepted block
 const std = @import("std");
 const execution = @import("execution");
@@ -55,6 +55,14 @@ const fixtures = [_]Fixture{
     .{ .name = "create_gas_32", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "f4982ce161297e16f0bc2d32bb064dda130e7ed60581f6ec7426fbb111861bfe", .bytes = @embedFile("fixtures/create_gas_32.json"), .expected_gas = 1_198_262 }, // fixtures/state_tests/shanghai/eip3860_initcode/test_gas_usage.json
     .{ .name = "selfdestruct_existing", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "3ffc68795fb5715022e7342cd25a57513b22b6f0fe546c32d3c833c110c9a550", .bytes = @embedFile("fixtures/selfdestruct_existing.json") }, // fixtures/state_tests/cancun/eip6780_selfdestruct/test_selfdestruct_pre_existing.json
     .{ .name = "selfdestruct_initcode", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "0ac0676ed45e9251ea59cb93f568166ae50664a0148de51095e303b42248dba1", .bytes = @embedFile("fixtures/selfdestruct_initcode.json") }, // fixtures/state_tests/cancun/eip6780_selfdestruct/test_self_destructing_initcode_create_tx.json
+    .{ .name = "create2_collision_code", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "31606f477546a8d5f283ad9fd6be26501f20eb84827b7b3bc4a5d53faf42eed6", .bytes = @embedFile("fixtures/create2_collision_code.json") }, // fixtures/state_tests/paris/eip7610_create_collision/test_init_collision_create_opcode.json
+    .{ .name = "create_child_revert", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "0203c0560fb9556386a6d656913d430b856b0580ac648f683aa6c4ffcacaf0fd", .bytes = @embedFile("fixtures/create_child_revert.json") }, // fixtures/state_tests/constantinople/eip1014_create2/test_create2_return_data.json
+    .{ .name = "create2_initcode_limit", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "6af2a338fecf3b12bb12016713b5188b6c2fe4617be42fc4eaf5af5ddfb11e87", .bytes = @embedFile("fixtures/create2_initcode_limit.json") }, // fixtures/state_tests/shanghai/eip3860_initcode/test_create_opcode_initcode.json
+    .{ .name = "create_max_runtime", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "a240e8b871b58585ac95d429fe78ce84cc5826a38e5be8b41970081baeae8cad", .bytes = @embedFile("fixtures/create_max_runtime.json") }, // fixtures/state_tests/shanghai/eip3860_initcode/test_legacy_create_edge_code_size.json
+    .{ .name = "create2_selfdestruct_revert", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "84bc9ffc291b9f898fb630474b04104feda90ed6c24b45010ca6f279e71f858c", .bytes = @embedFile("fixtures/create2_selfdestruct_revert.json") }, // fixtures/state_tests/cancun/eip6780_selfdestruct/test_selfdestruct_created_in_same_tx_with_revert.json
+    .{ .name = "old_selfdestruct_revert", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "2b9e3369e9cfe44e9f4bc9f59898cd8a1cdf2429e1389468e5c3e2aeed352bb8", .bytes = @embedFile("fixtures/old_selfdestruct_revert.json") }, // fixtures/state_tests/cancun/eip6780_selfdestruct/test_selfdestruct_not_created_in_same_tx_with_revert.json
+    .{ .name = "selfdestruct_existing_shanghai", .format = "state", .fork = "Shanghai", .expected = .valid, .checksum = "105c42d9a5897aaa22abb9a6b7797465e8a768aecafaadc602f300b68907e3eb", .bytes = @embedFile("fixtures/selfdestruct_existing_shanghai.json") }, // fixtures/state_tests/cancun/eip6780_selfdestruct/test_selfdestruct_pre_existing.json
+    .{ .name = "create2_collision_after_selfdestruct", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "385a679461d5a6d7c9b4c6428c63b6546a8dc8b2d23a0b5b27be06a763d10cce", .bytes = @embedFile("fixtures/create2_collision_after_selfdestruct.json") }, // fixtures/state_tests/cancun/eip6780_selfdestruct/test_dynamic_create2_selfdestruct_collision.json
     .{ .name = "c00", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "b8cc11633bebdcd9841f160e58a251b043fb5ae78d4a149cad78d50e364a7a1f", .bytes = @embedFile("fixtures/candidates/c00.json") }, // fixtures/state_tests/static/state_tests/stSolidityTest/TestOverflow.json :: tests/static/state_tests/stSolidityTest/TestOverflowFiller.json::TestOverflow[fork_Cancun-state_test-]
     .{ .name = "c01", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "330c04a2823372bf660e158afd93b31efab598916e0912ed5ddd5453bfdd3602", .bytes = @embedFile("fixtures/candidates/c01.json") }, // fixtures/state_tests/static/state_tests/Shanghai/stEIP3651_warmcoinbase/coinbaseWarmAccountCallGas.json :: tests/static/state_tests/Shanghai/stEIP3651_warmcoinbase/coinbaseWarmAccountCallGasFiller.yml::coinbaseWarmAccountCallGas[fork_Cancun-state_test-d0]
     .{ .name = "c02", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "d9f5f7fb283010b69c15bdf555bb6fcbdfa01af1940f998871cc7fd6f768d5a3", .bytes = @embedFile("fixtures/candidates/c02.json") }, // fixtures/state_tests/static/state_tests/VMTests/vmTests/envInfo.json :: tests/static/state_tests/VMTests/vmTests/envInfoFiller.yml::envInfo[fork_Cancun-state_test-address]
@@ -266,7 +274,7 @@ test "pinned execution fixtures pass and unsupported processors are explicit" {
     execution.evm.coverage.opcodes = &seen;
     defer execution.evm.coverage.opcodes = null;
     const counts = try run(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 100), counts.passed);
+    try std.testing.expectEqual(@as(usize, 108), counts.passed);
     try std.testing.expectEqual(@as(usize, 0), counts.skipped);
     std.log.info("execution fixtures: {d} passed, {d} skipped", .{ counts.passed, counts.skipped });
     const core = [_]u8{ 0x00, 0x20, 0xf3, 0xfd };
@@ -478,7 +486,8 @@ fn runStateFixture(allocator: std.mem.Allocator, root: std.json.Value, fixture: 
     const selected_gas = try selectedValue(transaction, indexes, "gas", "gasLimit");
     const selected_data = try selectedValue(transaction, indexes, "data", "data");
     const selected_value = try selectedValue(transaction, indexes, "value", "value");
-    const decoded_fields = try execution.transition.fields(decoded.value, .cancun);
+    const fork: execution.transition.Fork = if (std.mem.eql(u8, fixture.fork, "Cancun")) .cancun else if (std.mem.eql(u8, fixture.fork, "Shanghai")) .shanghai else if (std.mem.eql(u8, fixture.fork, "London")) .london else return error.UnsupportedFork;
+    const decoded_fields = try execution.transition.fields(decoded.value, fork);
     const to_field = try member(transaction, "to");
     const expected_to: ?execution.Address = if (to_field == .string and to_field.string.len == 0) null else try fixedHex(20, allocator, to_field);
     const expected_data = try decodeHex(allocator, selected_data);
@@ -500,7 +509,6 @@ fn runStateFixture(allocator: std.mem.Allocator, root: std.json.Value, fixture: 
     try loadAccounts(allocator, &world, try member(test_value, "pre"));
     const env = try member(test_value, "env");
     const config = try member(test_value, "config");
-    const fork = if (std.mem.eql(u8, fixture.fork, "Cancun")) execution.transition.Fork.cancun else if (std.mem.eql(u8, fixture.fork, "London")) execution.transition.Fork.london else null orelse return error.UnsupportedFork;
     const context: execution.transition.Context = .{
         .fork = fork,
         .chain_id = try quantity(try member(config, "chainid")),
@@ -510,7 +518,7 @@ fn runStateFixture(allocator: std.mem.Allocator, root: std.json.Value, fixture: 
         .gas_limit = @intCast(try quantity(try member(env, "currentGasLimit"))),
         .base_fee = try quantity(try member(env, "currentBaseFee")),
         .prev_randao = try fixedHex(32, allocator, try member(env, "currentRandom")),
-        .blob_base_fee = if (fork == .london) null else try execution.transition.blobBaseFee(fork, @intCast(try quantity(try member(env, "currentExcessBlobGas")))),
+        .blob_base_fee = if (fork != .cancun) null else try execution.transition.blobBaseFee(fork, @intCast(try quantity(try member(env, "currentExcessBlobGas")))),
     };
     if (fixture.expected == .invalid_transaction) {
         if (!std.mem.eql(u8, try stringMember(expected, "expectException"), "TransactionException.INTRINSIC_GAS_TOO_LOW")) return error.MissingExpectation;
