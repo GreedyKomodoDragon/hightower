@@ -26,6 +26,27 @@ pub const LatestMessage = struct {
     root: fulu.Root,
 };
 
+const ChildMap = std.AutoHashMap(fulu.Root, std.ArrayListUnmanaged(fulu.Root));
+const WeightMap = std.AutoHashMap(fulu.Root, u128);
+
+/// Snapshot of the mutable fields that affect child and weight caches.
+const CacheKey = struct {
+    version: u64,
+    time: u64,
+    justified: fulu.Checkpoint,
+    finalized: fulu.Checkpoint,
+    unrealized_justified: fulu.Checkpoint,
+    unrealized_finalized: fulu.Checkpoint,
+    proposer_boost_root: fulu.Root,
+    blocks: usize,
+    block_states: usize,
+    checkpoint_states: usize,
+    latest_messages: usize,
+    equivocating_indices: usize,
+    block_timeliness: usize,
+    unrealized_justifications: usize,
+};
+
 pub const DataAvailabilityCheck = struct {
     context: *anyopaque,
     is_available: *const fn (*anyopaque, fulu.Root, *const fulu.BeaconBlock) anyerror!bool,
@@ -54,9 +75,15 @@ pub const Store = struct {
     checkpoint_states: std.AutoHashMap(fulu.Checkpoint, fulu.BeaconState),
     latest_messages: std.AutoHashMap(fulu.ValidatorIndex, LatestMessage),
     unrealized_justifications: std.AutoHashMap(fulu.Root, fulu.Checkpoint),
+    cache_version: u64 = 0,
+    cache_key: ?CacheKey = null,
+    children_cache: ?ChildMap = null,
+    weights_cache: ?WeightMap = null,
+    head_cache: ?fulu.Root = null,
 
     /// Free all owned blocks and states in the fork-choice store.
     pub fn deinit(self: *Store) void {
+        self.clearCache();
         const allocator = self.allocator;
         var blocks = self.blocks.valueIterator();
         while (blocks.next()) |block| ssz.freeDecoded(allocator, fulu.BeaconBlock, block.*);
@@ -77,6 +104,42 @@ pub const Store = struct {
     /// Return the slot represented by the store's explicit timestamp.
     pub fn currentSlot(self: *const Store) u64 {
         return (self.time - self.genesis_time) / preset.SECONDS_PER_SLOT;
+    }
+
+    /// Invalidate cached children, weights, and head after any store mutation.
+    fn markDirty(self: *Store) void {
+        self.cache_version +%= 1;
+        self.clearCache();
+    }
+
+    /// Release any cached fork-choice adjacency, weight, or head result.
+    fn clearCache(self: *Store) void {
+        if (self.children_cache) |*children| deinitChildMap(children, self.allocator);
+        if (self.weights_cache) |*weights| weights.deinit();
+        self.children_cache = null;
+        self.weights_cache = null;
+        self.head_cache = null;
+        self.cache_key = null;
+    }
+
+    /// Capture the current cache-relevant state for a cheap equality check.
+    fn cacheKey(self: *const Store) CacheKey {
+        return .{
+            .version = self.cache_version,
+            .time = self.time,
+            .justified = self.justified_checkpoint,
+            .finalized = self.finalized_checkpoint,
+            .unrealized_justified = self.unrealized_justified_checkpoint,
+            .unrealized_finalized = self.unrealized_finalized_checkpoint,
+            .proposer_boost_root = self.proposer_boost_root,
+            .blocks = self.blocks.count(),
+            .block_states = self.block_states.count(),
+            .checkpoint_states = self.checkpoint_states.count(),
+            .latest_messages = self.latest_messages.count(),
+            .equivocating_indices = self.equivocating_indices.count(),
+            .block_timeliness = self.block_timeliness.count(),
+            .unrealized_justifications = self.unrealized_justifications.count(),
+        };
     }
 
     /// Return the stored block with its signature when it was imported from a peer.
@@ -133,6 +196,7 @@ pub fn onTick(store: *Store, time: u64) !void {
     if (time < store.time) return error.TimeRegression;
     if (time == store.time) return;
 
+    store.markDirty();
     const target_slot = (time - store.genesis_time) / preset.SECONDS_PER_SLOT;
     while (store.currentSlot() < target_slot) {
         const next_slot = store.currentSlot() + 1;
@@ -266,6 +330,7 @@ pub fn onBlock(store: *Store, signed_block: fulu.SignedBeaconBlock, engine: engi
     defer ssz.freeDecoded(store.allocator, fulu.BeaconState, pulled);
     try epoch_transition.processJustificationAndFinalization(&pulled, helpers.getCurrentEpoch(&pulled));
 
+    store.markDirty();
     // Roll back each owned insertion if a later allocation fails.
     try putBlock(store, block_root, block);
     errdefer if (store.blocks.fetchRemove(block_root)) |entry| ssz.freeDecoded(store.allocator, fulu.BeaconBlock, entry.value);
@@ -312,6 +377,7 @@ fn cloneSSZ(allocator: std.mem.Allocator, comptime T: type, value: T) !T {
 
 /// Insert an owned copy of a validated block under its root.
 fn putBlock(store: *Store, root: fulu.Root, block: fulu.BeaconBlock) !void {
+    store.markDirty();
     const copy = try cloneSSZ(store.allocator, fulu.BeaconBlock, block);
     store.blocks.put(root, copy) catch |err| {
         ssz.freeDecoded(store.allocator, fulu.BeaconBlock, copy);
@@ -321,6 +387,7 @@ fn putBlock(store: *Store, root: fulu.Root, block: fulu.BeaconBlock) !void {
 
 /// Take ownership of a block's post-state under its root.
 fn putStateOwned(store: *Store, root: fulu.Root, state: fulu.BeaconState) !void {
+    store.markDirty();
     store.block_states.put(root, state) catch |err| {
         ssz.freeDecoded(store.allocator, fulu.BeaconState, state);
         return err;
@@ -334,6 +401,7 @@ fn putState(store: *Store, root: fulu.Root, state: fulu.BeaconState) !void {
 
 /// Take ownership of a checkpoint state snapshot.
 fn putCheckpointStateOwned(store: *Store, checkpoint: fulu.Checkpoint, state: fulu.BeaconState) !void {
+    store.markDirty();
     store.checkpoint_states.put(checkpoint, state) catch |err| {
         ssz.freeDecoded(store.allocator, fulu.BeaconState, state);
         return err;
@@ -385,6 +453,7 @@ pub fn onAttestation(store: *Store, attestation: fulu.Attestation, is_from_block
         .signature = attestation.signature,
     });
 
+    store.markDirty();
     try store.latest_messages.ensureUnusedCapacity(@intCast(indices.len));
     if (!store.checkpoint_states.contains(data.target)) {
         target_state_owned = false;
@@ -405,6 +474,7 @@ pub fn onAttesterSlashing(store: *Store, slashing: fulu.AttesterSlashing) !void 
     const state = store.block_states.getPtr(store.justified_checkpoint.root) orelse return error.UnknownCheckpoint;
     try operations.validateIndexedAttestation(store.allocator, state, first);
     try operations.validateIndexedAttestation(store.allocator, state, second);
+    store.markDirty();
     try store.equivocating_indices.ensureUnusedCapacity(@intCast(@min(first.attesting_indices.data.len, second.attesting_indices.data.len)));
     var i: usize = 0;
     var j: usize = 0;
@@ -425,35 +495,12 @@ pub fn onAttesterSlashing(store: *Store, slashing: fulu.AttesterSlashing) !void 
 
 /// Sum active, unslashed latest votes on a block's branch and its current proposer boost.
 pub fn getWeight(store: *const Store, root: fulu.Root) !u64 {
-    const block = store.blocks.get(root) orelse return error.UnknownBlock;
-    const state = store.checkpoint_states.get(store.justified_checkpoint) orelse return error.UnknownCheckpoint;
-    const epoch_number = helpers.getCurrentEpoch(&state);
-    var weight: u128 = 0;
-    for (state.validators.data, 0..) |validator, index| {
-        if (!helpers.isActiveValidator(validator, epoch_number) or validator.slashed or store.equivocating_indices.contains(index)) continue;
-        const message = store.latest_messages.get(index) orelse continue;
-        if (std.mem.eql(u8, &(try checkpointBlockAtSlot(store, message.root, block.slot)), &root)) weight += validator.effective_balance;
-    }
-    if (!std.mem.eql(u8, &store.proposer_boost_root, &([_]u8{0} ** 32)) and
-        std.mem.eql(u8, &(try checkpointBlockAtSlot(store, store.proposer_boost_root, block.slot)), &root))
-    {
-        const balance = try helpers.getTotalActiveBalance(state.validators.data, epoch_number);
-        weight += (@as(u128, balance) / helpers.SLOTS_PER_EPOCH) * PROPOSER_SCORE_BOOST / 100;
-    }
+    if (!store.blocks.contains(root)) return error.UnknownBlock;
+    var weights = try computeWeights(store);
+    defer weights.deinit();
+    const weight = weights.get(root) orelse 0;
     return std.math.cast(u64, weight) orelse error.WeightOverflow;
 }
-
-/// Return the ancestor at or before a slot, rejecting unknown roots.
-fn checkpointBlockAtSlot(store: *const Store, root: fulu.Root, slot: fulu.Slot) !fulu.Root {
-    var current = root;
-    while (true) {
-        const block = store.blocks.get(current) orelse return error.UnknownBlock;
-        if (block.slot <= slot) return current;
-        current = block.parent_root;
-    }
-}
-
-const ChildMap = std.AutoHashMap(fulu.Root, std.ArrayListUnmanaged(fulu.Root));
 
 /// Group block roots by parent once so head selection visits each edge once.
 fn buildChildMap(store: *const Store) !ChildMap {
@@ -507,14 +554,45 @@ fn computeWeights(store: *const Store) !std.AutoHashMap(fulu.Root, u128) {
     return weights;
 }
 
+/// Rebuild adjacency and weight caches when the store changed since the last read.
+fn ensureCache(store: *Store) !void {
+    const key = store.cacheKey();
+    if (store.cache_key) |cached| {
+        if (std.meta.eql(cached, key)) return;
+    }
+    store.clearCache();
+    var children = try buildChildMap(store);
+    errdefer deinitChildMap(&children, store.allocator);
+    var weights = try computeWeights(store);
+    errdefer weights.deinit();
+    store.children_cache = children;
+    store.weights_cache = weights;
+    store.cache_key = key;
+}
+
 /// Select the viable descendant with the highest latest-message weight at each fork.
 pub fn getHead(store: *const Store) !fulu.Root {
-    var head = store.justified_checkpoint.root;
-    if (!store.blocks.contains(head)) return error.UnknownCheckpoint;
     var children = try buildChildMap(store);
     defer deinitChildMap(&children, store.allocator);
     var weights = try computeWeights(store);
     defer weights.deinit();
+    return headFrom(store, &children, &weights);
+}
+
+/// Select the head using caches kept on a mutable store.
+pub fn getHeadCached(store: *Store) !fulu.Root {
+    const head_root = store.justified_checkpoint.root;
+    if (!store.blocks.contains(head_root)) return error.UnknownCheckpoint;
+    try ensureCache(store);
+    if (store.head_cache) |cached| return cached;
+    const head = try headFrom(store, &store.children_cache.?, &store.weights_cache.?);
+    store.head_cache = head;
+    return head;
+}
+
+/// Walk cached child and weight maps from the justified checkpoint.
+fn headFrom(store: *const Store, children: *const ChildMap, weights: *const WeightMap) !fulu.Root {
+    var head = store.justified_checkpoint.root;
     var viable = std.AutoHashMap(fulu.Root, bool).init(store.allocator);
     defer viable.deinit();
     var visiting = std.AutoHashMap(fulu.Root, void).init(store.allocator);
@@ -524,7 +602,7 @@ pub fn getHead(store: *const Store) !fulu.Root {
         var best: ?fulu.Root = null;
         var best_weight: u128 = 0;
         for (candidates.items) |root| {
-            if (!try viableBranch(store, &children, root, &viable, &visiting)) continue;
+            if (!try viableBranch(store, children, root, &viable, &visiting)) continue;
             const weight = weights.get(root) orelse 0;
             if (best == null or weight > best_weight or (weight == best_weight and std.mem.order(u8, &root, &best.?) == .gt)) {
                 best = root;

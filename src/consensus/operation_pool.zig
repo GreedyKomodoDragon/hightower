@@ -30,6 +30,34 @@ pub fn copyValue(allocator: std.mem.Allocator, comptime T: type, value: T) !T {
     return ssz.deserialize(allocator, T, &reader);
 }
 
+/// Reuse one epoch's active set and seed across attestations admitted together.
+const AttesterCache = struct {
+    allocator: std.mem.Allocator,
+    epoch: ?fulu.Epoch = null,
+    active: []fulu.ValidatorIndex = &.{},
+    seed: [32]u8 = undefined,
+
+    /// Return sorted attesting indices, rebuilding the epoch context when needed.
+    fn indices(self: *AttesterCache, state: *const fulu.BeaconState, attestation: fulu.Attestation) ![]fulu.ValidatorIndex {
+        const epoch = helpers.computeEpochAtSlot(attestation.data.slot);
+        if (self.epoch == null or self.epoch.? != epoch) {
+            if (self.active.len != 0) self.allocator.free(self.active);
+            self.active = &.{};
+            self.epoch = null;
+            self.active = try helpers.getActiveValidatorIndices(self.allocator, state.validators.data, epoch);
+            self.seed = helpers.computeSeed(state.*, epoch, helpers.DOMAIN_BEACON_ATTESTER);
+            self.epoch = epoch;
+        }
+        return operations.getAttestingIndicesWithActive(self.allocator, self.active, self.seed, state, attestation);
+    }
+
+    /// Free the retained active set.
+    fn deinit(self: *AttesterCache) void {
+        if (self.active.len != 0) self.allocator.free(self.active);
+        self.active = &.{};
+    }
+};
+
 /// Owned and bounded signed operations, sorted by SSZ root for deterministic choice.
 pub const Pool = struct {
     allocator: std.mem.Allocator,
@@ -58,10 +86,12 @@ pub const Pool = struct {
         try validate(self.allocator, state, value, operations.processAttestation);
         self.pruneExpiredAttestations(state.slot);
         try pruneInvalid(self.allocator, fulu.Attestation, &self.attestations, state, 2 * preset.MAX_ATTESTATIONS_ELECTRA, operations.processAttestation);
-        const incoming = try operations.getAttestingIndices(self.allocator, state, value);
+        var attester_cache = AttesterCache{ .allocator = self.allocator };
+        defer attester_cache.deinit();
+        const incoming = try attester_cache.indices(state, value);
         defer self.allocator.free(incoming);
         for (self.attestations.items) |entry| {
-            const existing = try operations.getAttestingIndices(self.allocator, state, entry.value);
+            const existing = try attester_cache.indices(state, entry.value);
             defer self.allocator.free(existing);
             for (incoming) |index| for (existing) |old| {
                 if (index == old and operations.isSlashableAttestationData(value.data, entry.value.data)) return error.ConflictingVote;

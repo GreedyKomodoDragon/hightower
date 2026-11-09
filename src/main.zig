@@ -140,7 +140,7 @@ fn runRuntime(init: std.process.Init) !void {
     const identity = try nodeId(allocator, key);
     var columns = try hightower.consensus.DataColumns.Store.open(allocator, init.io, dir, "columns", state.genesis_validators_root, identity, 128);
     defer columns.deinit();
-    const head = try hightower.consensus.getForkChoiceHead(&store);
+    const head = try hightower.consensus.getForkChoiceHeadCached(&store);
     var coordinator = hightower.consensus.PeerSync.Coordinator{ .allocator = allocator, .io = init.io, .dir = dir, .store = &store, .columns = &columns, .settings = &kzg, .engine = engine.interface(), .head = head, .next_slot = try std.math.add(u64, store.blocks.get(head).?.slot, 1) };
     var mutex: std.Io.Mutex = .init;
     var announcements = Announcements{ .coordinator = &coordinator, .mutex = &mutex, .slot = store.blocks.get(head).?.slot };
@@ -204,7 +204,7 @@ fn serveBundledAnchor(allocator: std.mem.Allocator, io: std.Io, address: std.Io.
     defer store.deinit();
     var listener = try address.listen(io, .{ .reuse_address = true });
     defer listener.deinit(io);
-    const head = try hightower.consensus.getForkChoiceHead(&store);
+    const head = try hightower.consensus.getForkChoiceHeadCached(&store);
     try hightower.api.serve(allocator, io, &listener, &store, .{ .genesis_fork_version = .{ 0, 0, 0, 0 }, .head = &head });
 }
 
@@ -238,7 +238,7 @@ const Announcements = struct {
         if (!self.importing) try self.mutex.lock(self.coordinator.io);
         defer if (!self.importing) self.mutex.unlock(self.coordinator.io);
         try hightower.consensus.onForkChoiceAttestation(self.coordinator.store, value.*, false);
-        self.coordinator.head = try hightower.consensus.getForkChoiceHead(self.coordinator.store);
+        self.coordinator.head = try hightower.consensus.getForkChoiceHeadCached(self.coordinator.store);
         hightower.consensus.PeerSync.confirmExecutionHeadAt(self.coordinator.store, self.coordinator.engine, self.coordinator.head) catch return error.ForkchoiceUpdateFailed;
         hightower.consensus.saveForkChoiceStoreAt(self.coordinator.allocator, self.coordinator.io, self.coordinator.dir, "fork-choice.bin", self.coordinator.store, self.coordinator.head) catch return error.ImportCommitFailed;
     }

@@ -30,6 +30,7 @@ pub const onForkChoiceAttestation = @import("fork_choice.zig").onAttestation;
 pub const onForkChoiceAttesterSlashing = @import("fork_choice.zig").onAttesterSlashing;
 pub const getForkChoiceWeight = @import("fork_choice.zig").getWeight;
 pub const getForkChoiceHead = @import("fork_choice.zig").getHead;
+pub const getForkChoiceHeadCached = @import("fork_choice.zig").getHeadCached;
 pub const saveForkChoiceStore = @import("fork_choice_snapshot.zig").saveForkChoiceStore;
 pub const saveForkChoiceStoreAt = @import("fork_choice_snapshot.zig").saveForkChoiceStoreAt;
 pub const loadForkChoiceStore = @import("fork_choice_snapshot.zig").loadForkChoiceStore;

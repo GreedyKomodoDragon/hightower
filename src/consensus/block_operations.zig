@@ -179,14 +179,23 @@ pub fn processAttestation(allocator: std.mem.Allocator, state: *fulu.BeaconState
 
 /// Return sorted attesters selected by Fulu committee and aggregation bits; caller frees them.
 pub fn getAttestingIndices(allocator: std.mem.Allocator, state: *const fulu.BeaconState, attestation: fulu.Attestation) ![]fulu.ValidatorIndex {
-    const committees = try getCommitteeIndices(allocator, &attestation.committee_bits.data);
-    defer allocator.free(committees);
-    if (committees.len == 0) return error.InvalidAttestation;
-    // Every committee in one attestation shares the epoch active set and seed.
     const epoch_number = helpers.computeEpochAtSlot(attestation.data.slot);
     const active = try helpers.getActiveValidatorIndices(allocator, state.validators.data, epoch_number);
     defer allocator.free(active);
-    const seed = helpers.computeSeed(state.*, epoch_number, helpers.DOMAIN_BEACON_ATTESTER);
+    return getAttestingIndicesWithActive(allocator, active, helpers.computeSeed(state.*, epoch_number, helpers.DOMAIN_BEACON_ATTESTER), state, attestation);
+}
+
+/// Decode attesting indices with an active set and epoch seed supplied by the caller.
+pub fn getAttestingIndicesWithActive(
+    allocator: std.mem.Allocator,
+    active: []const fulu.ValidatorIndex,
+    seed: [32]u8,
+    state: *const fulu.BeaconState,
+    attestation: fulu.Attestation,
+) ![]fulu.ValidatorIndex {
+    const committees = try getCommitteeIndices(allocator, &attestation.committee_bits.data);
+    defer allocator.free(committees);
+    if (committees.len == 0) return error.InvalidAttestation;
     var attesting = std.ArrayList(fulu.ValidatorIndex).empty;
     errdefer attesting.deinit(allocator);
     // Aggregation bits concatenate the selected committees in committee-index order.
