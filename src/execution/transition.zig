@@ -8,7 +8,7 @@
 // parent -> system calls -> transactions -> withdrawals -> request queues -> roots
 // A block snapshot rolls back all earlier transactions if a later check fails.
 // Supported forks: London through Osaka/Fulu. Prague deposit logs and request
-// queues are committed after transactions; contract creation is separate.
+// queues are committed after transactions. Creation runs initcode at a derived address.
 const std = @import("std");
 const execution = @import("execution.zig");
 const state = execution.state;
@@ -96,6 +96,10 @@ pub fn fields(tx: execution.Transaction, fork: Fork) !TxFields {
 /// Computes intrinsic gas including access-list entries and Prague's calldata floor.
 fn intrinsicGas(tx: TxFields, fork: Fork) !u64 {
     var gas: u64 = if (tx.to == null) 53_000 else 21_000;
+    if (tx.to == null and @intFromEnum(fork) >= @intFromEnum(Fork.shanghai)) {
+        if (tx.data.len > 49_152) return error.InitcodeTooLarge;
+        gas = try std.math.add(u64, gas, try std.math.mul(u64, @intCast((tx.data.len + 31) / 32), 2));
+    }
     var tokens: u64 = 0;
     for (tx.data) |byte| {
         gas = try std.math.add(u64, gas, if (byte == 0) 4 else 16);
@@ -121,6 +125,7 @@ const ValidatedTx = struct {
     fields: TxFields,
     sender: execution.Address,
     recipient: execution.Address,
+    creation: bool,
     intrinsic_gas: u64,
     max_cost: u256,
     effective_price: u256,
@@ -187,14 +192,15 @@ fn validateTransaction(allocator: std.mem.Allocator, world: *state.State, contex
     if (f.nonce == std.math.maxInt(u64)) return error.InvalidNonce;
     const sender_code = world.getCode(sender);
     if (sender_code.len != 0 and (@intFromEnum(context.fork) < @intFromEnum(Fork.prague) or state.delegationTarget(sender_code) == null)) return error.InvalidSenderCode;
-    const recipient = f.to orelse return error.UnsupportedContractCreation;
+    if (f.to == null and f.blob_fee_cap != null) return error.InvalidBlobTransaction;
+    const recipient = f.to orelse state.createAddress(sender, f.nonce);
     const precompile_limit: u8 = switch (context.fork) {
         .london, .paris, .shanghai => 9,
         .cancun => 10,
         .prague, .osaka, .fulu => 17,
     };
-    if (recipient[19] != 0 and recipient[19] <= precompile_limit and std.mem.allEqual(u8, recipient[0..19], 0)) return error.UnsupportedExecution;
-    return .{ .fields = f, .sender = sender, .recipient = recipient, .intrinsic_gas = intrinsic, .max_cost = max_cost, .effective_price = @min(f.max_fee, std.math.add(u256, context.base_fee, f.priority_fee) catch std.math.maxInt(u256)), .blob_gas = blob_gas };
+    if (f.to != null and recipient[19] != 0 and recipient[19] <= precompile_limit and std.mem.allEqual(u8, recipient[0..19], 0)) return error.UnsupportedExecution;
+    return .{ .fields = f, .sender = sender, .recipient = recipient, .creation = f.to == null, .intrinsic_gas = intrinsic, .max_cost = max_cost, .effective_price = @min(f.max_fee, std.math.add(u256, context.base_fee, f.priority_fee) catch std.math.maxInt(u256)), .blob_gas = blob_gas };
 }
 
 const AuthorizationEffects = struct { refund: u64, warmed: []const execution.Address };
@@ -239,7 +245,7 @@ fn executeFrame(allocator: std.mem.Allocator, owner: std.mem.Allocator, world: *
     const frame = try world.snapshot();
     var frame_open = true;
     errdefer if (frame_open) world.revert(frame) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
-    if (tx.fields.value != 0) {
+    if (!tx.creation and tx.fields.value != 0) {
         try world.setBalance(tx.sender, world.getBalance(tx.sender) - tx.fields.value);
         try world.setBalance(tx.recipient, std.math.add(u256, world.getBalance(tx.recipient), tx.fields.value) catch return error.BalanceOverflow);
     }
@@ -254,11 +260,15 @@ fn executeFrame(allocator: std.mem.Allocator, owner: std.mem.Allocator, world: *
     try machine.configure(.{ .fork = context.fork, .origin = tx.sender, .gas_price = tx.effective_price, .coinbase = context.coinbase, .timestamp = context.timestamp, .number = context.number, .prev_randao = if (context.fork == .london) context.difficulty else std.mem.readInt(u256, &context.prev_randao, .big), .gas_limit = context.gas_limit, .chain_id = context.chain_id, .base_fee = context.base_fee, .blob_base_fee = context.blob_base_fee orelse 0, .blob_base_fee_supported = context.blob_base_fee != null, .blob_hashes = tx.fields.blob_hashes, .block_hashes = context.block_hashes }, tx.sender, tx.recipient, access);
     machine.refund += effects.refund;
     for (effects.warmed) |address| _ = try machine.touchAccount(address);
-    var result = try machine.run(.{ .code = world.getExecutionCode(tx.recipient), .gas = tx.fields.gas_limit - tx.intrinsic_gas, .caller = tx.sender, .callee = tx.recipient, .value = tx.fields.value, .data = tx.fields.data });
+    var result = if (tx.creation)
+        try machine.create(tx.sender, tx.recipient, tx.fields.value, tx.fields.data, tx.fields.gas_limit - tx.intrinsic_gas, 0)
+    else
+        try machine.run(.{ .code = world.getExecutionCode(tx.recipient), .gas = tx.fields.gas_limit - tx.intrinsic_gas, .caller = tx.sender, .callee = tx.recipient, .value = tx.fields.value, .data = tx.fields.data });
     defer result.deinit(allocator);
     if (result.status == .fault and (result.status.fault == .unsupported_precompile or result.status.fault == .unsupported_opcode or result.status.fault == .missing_context)) return error.UnsupportedExecution;
     const success = result.status == .success;
     if (success) {
+        try machine.finalizeDestructions();
         try world.commit(frame);
     } else {
         try world.revert(frame);

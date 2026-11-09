@@ -15,6 +15,42 @@ const trie = @import("trie.zig");
 pub const Address = [20]u8;
 pub const Hash = [32]u8;
 
+/// Derives the CREATE address from the creator and its nonce before creation.
+pub fn createAddress(creator: Address, nonce: u64) Address {
+    var nonce_bytes: [8]u8 = undefined;
+    const minimal = rlp.encoding.encodeBigEndian(&nonce_bytes, nonce);
+    var encoded: [31]u8 = undefined;
+    var len: usize = 22;
+    encoded[1] = 0x94;
+    @memcpy(encoded[2..22], &creator);
+    if (nonce == 0) {
+        encoded[len] = 0x80;
+        len += 1;
+    } else {
+        if (nonce >= 128) {
+            encoded[len] = 0x80 + @as(u8, @intCast(minimal.len));
+            len += 1;
+        }
+        @memcpy(encoded[len..][0..minimal.len], minimal);
+        len += minimal.len;
+    }
+    encoded[0] = 0xc0 + @as(u8, @intCast(len - 1));
+    const digest = keccak(encoded[0..len]);
+    return digest[12..32].*;
+}
+
+/// Derives the CREATE2 address from a salt and the initcode hash.
+pub fn create2Address(creator: Address, salt: u256, initcode: []const u8) Address {
+    var bytes: [85]u8 = undefined;
+    bytes[0] = 0xff;
+    @memcpy(bytes[1..21], &creator);
+    std.mem.writeInt(u256, bytes[21..53], salt, .big);
+    const code_hash = keccak(initcode);
+    @memcpy(bytes[53..85], &code_hash);
+    const digest = keccak(&bytes);
+    return digest[12..32].*;
+}
+
 /// Returns the one-hop code target of a valid EIP-7702 designation.
 pub fn delegationTarget(code: []const u8) ?Address {
     if (code.len != 23 or !std.mem.eql(u8, code[0..3], &.{ 0xef, 0x01, 0x00 })) return null;

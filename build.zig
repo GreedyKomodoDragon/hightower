@@ -607,6 +607,12 @@ pub fn build(b: *std.Build) void {
     storage_test_step.dependOn(&run_storage_tests.step);
     const run_execution_tests = b.addRunArtifact(execution_tests);
     test_step.dependOn(&run_execution_tests.step);
+    const token_tests = b.addTest(.{
+        .root_module = execution_tests.root_module,
+        .filters = &.{"signed local token deployment"},
+    });
+    const token_step = b.step("test-token", "Run signed local token deployment, transfer, and RPC integration");
+    token_step.dependOn(&b.addRunArtifact(token_tests).step);
     test_step.dependOn(&run_engine_client_tests.step);
     test_step.dependOn(&run_engine_server_tests.step);
     const run_evm_tests = b.addRunArtifact(evm_tests);

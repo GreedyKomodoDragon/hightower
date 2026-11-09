@@ -773,3 +773,132 @@ test "child storage and transient writes revert; STATICCALL cannot write" {
     try std.testing.expectEqual(@as(u256, 0), world.getStorage(child, 1));
     try std.testing.expectEqual(@as(usize, 0), machine.transient.items.len);
 }
+
+// Uses a known EIP-1014 vector to check both deterministic creation formulas.
+test "CREATE and CREATE2 derive canonical addresses" {
+    const zero: state.Address = .{0} ** 20;
+    const create = state.createAddress(zero, 0);
+    var expected: state.Address = undefined;
+    _ = try std.fmt.hexToBytes(&expected, "bd770416a3345f91e4b34576cb804a576fa48eb1");
+    try std.testing.expectEqualSlices(u8, &expected, &create);
+    const create2 = state.create2Address(zero, 0, &.{0});
+    _ = try std.fmt.hexToBytes(&expected, "4d1a2e2bb4f88f0250f26ffff098b0b30b26bf38");
+    try std.testing.expectEqualSlices(u8, &expected, &create2);
+}
+
+test "CREATE increments nonce, collision consumes child gas, and parent revert removes child" {
+    var world = state.State.init(std.testing.allocator);
+    defer world.deinit();
+    const creator: state.Address = .{0x11} ** 20;
+    var machine = Machine.init(std.testing.allocator, &world);
+    defer machine.deinit();
+    const address = state.createAddress(creator, 0);
+    const create_code = [_]u8{ 0x60, 1, 0x60, 0, 0x60, 0, 0xf0, 0x50, 0x00 };
+    var result = try machine.run(.{ .code = &create_code, .gas = 100_000, .callee = creator });
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expect(result.status == .success);
+    try std.testing.expectEqual(@as(u64, 1), world.getNonce(creator));
+    try std.testing.expectEqual(@as(u64, 1), world.getNonce(address));
+    var collision = try machine.create(creator, address, 0, &.{0}, 10_000, 1);
+    defer collision.deinit(std.testing.allocator);
+    try std.testing.expect(collision.status == .fault);
+    try std.testing.expectEqual(@as(u64, 0), collision.gas_remaining);
+    const root = try world.stateRoot();
+    const revert_code = [_]u8{ 0x60, 1, 0x60, 0, 0x60, 0, 0xf0, 0x5f, 0x5f, 0xfd };
+    var reverted = try machine.run(.{ .code = &revert_code, .gas = 100_000, .callee = creator });
+    defer reverted.deinit(std.testing.allocator);
+    try std.testing.expect(reverted.status == .revert);
+    try std.testing.expectEqualSlices(u8, &root, &(try world.stateRoot()));
+}
+
+test "SELFDESTRUCT deletes before Cancun and preserves old code afterward" {
+    const contract: state.Address = .{0x21} ** 20;
+    const beneficiary: state.Address = .{0} ** 19 ++ .{0x22};
+    const code = [_]u8{ 0x60, 0x22, 0xff };
+    for ([_]core.Fork{ .shanghai, .cancun }) |fork| {
+        var world = state.State.init(std.testing.allocator);
+        defer world.deinit();
+        _ = try world.setCode(contract, &code);
+        try world.setBalance(contract, 10);
+        var machine = Machine.init(std.testing.allocator, &world);
+        defer machine.deinit();
+        try machine.configure(.{ .fork = fork, .origin = contract, .gas_price = 1, .coinbase = .{0} ** 20, .timestamp = 0, .number = 1, .prev_randao = 0, .gas_limit = 100_000, .chain_id = 1, .base_fee = 1, .blob_base_fee = 0 }, contract, contract, &.{});
+        var result = try machine.run(.{ .code = &code, .gas = 50_000, .callee = contract });
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expect(result.status == .success);
+        try machine.finalizeDestructions();
+        try std.testing.expectEqual(@as(u256, 10), world.getBalance(beneficiary));
+        try std.testing.expectEqual(@as(usize, if (fork == .cancun) code.len else 0), world.getCode(contract).len);
+    }
+}
+
+test "Cancun SELFDESTRUCT removes a contract created in the same transaction" {
+    var world = state.State.init(std.testing.allocator);
+    defer world.deinit();
+    const creator: state.Address = .{0x31} ** 20;
+    const child = state.createAddress(creator, 0);
+    var beneficiary: state.Address = .{0} ** 20;
+    beneficiary[19] = 0x32;
+    try world.setBalance(creator, 10);
+    var machine = Machine.init(std.testing.allocator, &world);
+    defer machine.deinit();
+    try machine.configure(.{ .fork = .cancun, .origin = creator, .gas_price = 1, .coinbase = .{0} ** 20, .timestamp = 0, .number = 1, .prev_randao = 0, .gas_limit = 100_000, .chain_id = 1, .base_fee = 1, .blob_base_fee = 0 }, creator, child, &.{});
+    var result = try machine.create(creator, child, 5, &.{ 0x60, 0x32, 0xff }, 50_000, 0);
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expect(result.status == .success);
+    try machine.finalizeDestructions();
+    try std.testing.expect((try world.getAccount(child)) == null);
+    try std.testing.expectEqual(@as(u256, 5), world.getBalance(beneficiary));
+    try std.testing.expectEqual(@as(u256, 5), world.getBalance(creator));
+}
+
+test "failed code installation restores creation account and logs" {
+    var world = state.State.init(std.testing.allocator);
+    defer world.deinit();
+    const creator: state.Address = .{0x41} ** 20;
+    const child = state.createAddress(creator, 0);
+    var machine = Machine.init(std.testing.allocator, &world);
+    defer machine.deinit();
+    const initcode = [_]u8{ 0x60, 0xef, 0x60, 0, 0x53, 0x60, 1, 0x60, 0, 0xf3 };
+    const root = try world.stateRoot();
+    var result = try machine.create(creator, child, 0, &initcode, 50_000, 0);
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expect(result.status == .fault);
+    try std.testing.expectEqual(@as(u64, 0), result.gas_remaining);
+    try std.testing.expectEqualSlices(u8, &root, &(try world.stateRoot()));
+    try std.testing.expectEqual(@as(usize, 0), machine.emittedLogs().len);
+}
+
+test "Cancun SELFDESTRUCT to self preserves an old contract balance" {
+    var world = state.State.init(std.testing.allocator);
+    defer world.deinit();
+    var address: state.Address = .{0} ** 20;
+    address[19] = 0x23;
+    const code = [_]u8{ 0x60, 0x23, 0xff };
+    _ = try world.setCode(address, &code);
+    try world.setBalance(address, 7);
+    var machine = Machine.init(std.testing.allocator, &world);
+    defer machine.deinit();
+    try machine.configure(.{ .fork = .cancun, .origin = address, .gas_price = 1, .coinbase = .{0} ** 20, .timestamp = 0, .number = 1, .prev_randao = 0, .gas_limit = 100_000, .chain_id = 1, .base_fee = 1, .blob_base_fee = 0 }, address, address, &.{});
+    var result = try machine.run(.{ .code = &code, .gas = 50_000, .callee = address });
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expect(result.status == .success);
+    try machine.finalizeDestructions();
+    try std.testing.expectEqual(@as(u256, 7), world.getBalance(address));
+    try std.testing.expectEqualSlices(u8, &code, world.getCode(address));
+}
+
+test "creation rejects runtime code above 24576 bytes" {
+    var world = state.State.init(std.testing.allocator);
+    defer world.deinit();
+    const creator: state.Address = .{0x51} ** 20;
+    const child = state.createAddress(creator, 0);
+    var machine = Machine.init(std.testing.allocator, &world);
+    defer machine.deinit();
+    const initcode = [_]u8{ 0x61, 0x60, 0x01, 0x60, 0, 0xf3 };
+    var result = try machine.create(creator, child, 0, &initcode, 6_000_000, 0);
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expect(result.status == .fault);
+    try std.testing.expectEqual(@as(u64, 0), result.gas_remaining);
+    try std.testing.expect((try world.getAccount(child)) == null);
+}

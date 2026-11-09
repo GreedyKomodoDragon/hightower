@@ -5,7 +5,7 @@
 // JSON -> selected transaction -> state transition -> oracle fields
 // Blockchain fixtures apply ordered London blocks; a rejected block leaves the
 // parent and its state in place for the next block. This runner supports London
-// blocks with empty ommers and legacy transactions, and London/Cancun state cases.
+// blocks with empty ommers and London/Cancun state cases, including creation.
 // genesis -> accepted block -> rejected block (rollback) -> accepted block
 const std = @import("std");
 const execution = @import("execution");
@@ -22,6 +22,7 @@ const Fixture = struct {
     skip_reason: ?[]const u8 = null,
     checksum: []const u8,
     bytes: []const u8,
+    expected_gas: ?u64 = null,
 };
 
 const fixtures = [_]Fixture{
@@ -47,6 +48,13 @@ const fixtures = [_]Fixture{
     .{ .name = "memory_oog", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "75b6276188c8a0953481b64c52808d5f86e2b7da456d8b9fa46f7effe20f93b7", .bytes = @embedFile("fixtures/memory_oog.json") }, // fixtures/state_tests/static/state_tests/VMTests/vmIOandFlowOperations/mload.json
     .{ .name = "chainid_london_blockchain_test_tx_type_0", .format = "blockchain", .fork = "London", .expected = .valid, .checksum = "934a836ca8a7d203d3e5388f7ea37a3a4a210954ecfb8b5f64b46ba79db57af3", .bytes = @embedFile("fixtures/chainid_london_blockchain_test_tx_type_0.json") },
     .{ .name = "london_invalid_base_fee", .format = "blockchain", .fork = "London", .expected = .valid, .checksum = "537ef2ebc3f2696a2e99ba838e5f6f17d9c14fba832f4e20839127e4300f9cff", .bytes = @embedFile("fixtures/london_invalid_base_fee.json") }, // fixtures/blockchain_tests/london/validation/test_invalid_header.json
+    .{ .name = "create_tx_balance", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "9d67af209e24866086bbbd1bc74717e5dc89dc188fe5d34c5d5eae7cd7e6f1e8", .bytes = @embedFile("fixtures/create_tx_balance.json") }, // fixtures/state_tests/paris/eip7610_create_collision/test_init_collision_create_tx.json
+    .{ .name = "create_tx_nonce_collision", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "985760545f78ff61759ef8d18c154ee76478070a3291167d7b823d26af2018d9", .bytes = @embedFile("fixtures/create_tx_nonce_collision.json") }, // fixtures/state_tests/paris/eip7610_create_collision/test_init_collision_create_tx.json
+    .{ .name = "create_return", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "ac7319ee230803264df63d0e23b62e44c748905d6b659bdc738f358a3179579f", .bytes = @embedFile("fixtures/create_return.json") }, // fixtures/state_tests/constantinople/eip1014_create2/test_create2_return_data.json
+    .{ .name = "create2_return", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "b6a5c6e2a6a350ac2a23c14c093ce3023dcae830916b98e5bef1447f4e25594e", .bytes = @embedFile("fixtures/create2_return.json"), .expected_gas = 112_206 }, // fixtures/state_tests/constantinople/eip1014_create2/test_create2_return_data.json
+    .{ .name = "create_gas_32", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "f4982ce161297e16f0bc2d32bb064dda130e7ed60581f6ec7426fbb111861bfe", .bytes = @embedFile("fixtures/create_gas_32.json"), .expected_gas = 1_198_262 }, // fixtures/state_tests/shanghai/eip3860_initcode/test_gas_usage.json
+    .{ .name = "selfdestruct_existing", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "3ffc68795fb5715022e7342cd25a57513b22b6f0fe546c32d3c833c110c9a550", .bytes = @embedFile("fixtures/selfdestruct_existing.json") }, // fixtures/state_tests/cancun/eip6780_selfdestruct/test_selfdestruct_pre_existing.json
+    .{ .name = "selfdestruct_initcode", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "0ac0676ed45e9251ea59cb93f568166ae50664a0148de51095e303b42248dba1", .bytes = @embedFile("fixtures/selfdestruct_initcode.json") }, // fixtures/state_tests/cancun/eip6780_selfdestruct/test_self_destructing_initcode_create_tx.json
     .{ .name = "c00", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "b8cc11633bebdcd9841f160e58a251b043fb5ae78d4a149cad78d50e364a7a1f", .bytes = @embedFile("fixtures/candidates/c00.json") }, // fixtures/state_tests/static/state_tests/stSolidityTest/TestOverflow.json :: tests/static/state_tests/stSolidityTest/TestOverflowFiller.json::TestOverflow[fork_Cancun-state_test-]
     .{ .name = "c01", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "330c04a2823372bf660e158afd93b31efab598916e0912ed5ddd5453bfdd3602", .bytes = @embedFile("fixtures/candidates/c01.json") }, // fixtures/state_tests/static/state_tests/Shanghai/stEIP3651_warmcoinbase/coinbaseWarmAccountCallGas.json :: tests/static/state_tests/Shanghai/stEIP3651_warmcoinbase/coinbaseWarmAccountCallGasFiller.yml::coinbaseWarmAccountCallGas[fork_Cancun-state_test-d0]
     .{ .name = "c02", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "d9f5f7fb283010b69c15bdf555bb6fcbdfa01af1940f998871cc7fd6f768d5a3", .bytes = @embedFile("fixtures/candidates/c02.json") }, // fixtures/state_tests/static/state_tests/VMTests/vmTests/envInfo.json :: tests/static/state_tests/VMTests/vmTests/envInfoFiller.yml::envInfo[fork_Cancun-state_test-address]
@@ -240,7 +248,10 @@ fn runFixture(allocator: std.mem.Allocator, fixture: Fixture, bytes: []const u8)
 pub fn run(allocator: std.mem.Allocator) !Counts {
     var counts: Counts = .{};
     for (fixtures) |fixture| {
-        if (try runFixture(allocator, fixture, fixture.bytes)) {
+        if (runFixture(allocator, fixture, fixture.bytes) catch |err| {
+            std.log.err("fixture {s}: {s}", .{ fixture.name, @errorName(err) });
+            return err;
+        }) {
             counts.passed += 1;
         } else {
             counts.skipped += 1;
@@ -255,7 +266,7 @@ test "pinned execution fixtures pass and unsupported processors are explicit" {
     execution.evm.coverage.opcodes = &seen;
     defer execution.evm.coverage.opcodes = null;
     const counts = try run(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 93), counts.passed);
+    try std.testing.expectEqual(@as(usize, 100), counts.passed);
     try std.testing.expectEqual(@as(usize, 0), counts.skipped);
     std.log.info("execution fixtures: {d} passed, {d} skipped", .{ counts.passed, counts.skipped });
     const core = [_]u8{ 0x00, 0x20, 0xf3, 0xfd };
@@ -264,6 +275,7 @@ test "pinned execution fixtures pass and unsupported processors are explicit" {
     for (0x10..0x1e) |op| try std.testing.expect(seen[op]);
     for (0x50..0x9f + 1) |op| try std.testing.expect(seen[op]);
     for (0xa0..0xa5) |op| try std.testing.expect(seen[op]);
+    for ([_]u8{ 0xf0, 0xf5, 0xff }) |op| try std.testing.expect(seen[op]);
 }
 
 test "rejects checksum mismatch, malformed JSON, missing expectation, and unknown format" {
@@ -418,7 +430,10 @@ fn checkAccounts(allocator: std.mem.Allocator, world: *execution.state.State, ac
         const address = try fixedHex(20, allocator, .{ .string = entry.key_ptr.* });
         const item = entry.value_ptr.*;
         const account = (try world.getAccount(address)) orelse return error.StateMismatch;
-        if (account.nonce != try quantity(try member(item, "nonce")) or account.balance != try quantity(try member(item, "balance"))) return error.StateMismatch;
+        if (account.nonce != try quantity(try member(item, "nonce")) or account.balance != try quantity(try member(item, "balance"))) {
+            std.log.err("account {x}: nonce {d}, balance {d}, expected nonce {d}, balance {d}", .{ address, account.nonce, account.balance, try quantity(try member(item, "nonce")), try quantity(try member(item, "balance")) });
+            return error.StateMismatch;
+        }
         const code = try decodeHex(allocator, try stringMember(item, "code"));
         defer allocator.free(code);
         if (!std.mem.eql(u8, world.getCode(address), code)) return error.StateMismatch;
@@ -463,20 +478,17 @@ fn runStateFixture(allocator: std.mem.Allocator, root: std.json.Value, fixture: 
     const selected_gas = try selectedValue(transaction, indexes, "gas", "gasLimit");
     const selected_data = try selectedValue(transaction, indexes, "data", "data");
     const selected_value = try selectedValue(transaction, indexes, "value", "value");
-    const legacy = switch (decoded.value) {
-        .legacy => |tx| tx,
-        else => return error.TransactionMismatch,
-    };
-    const expected_to = try fixedHex(20, allocator, try member(transaction, "to"));
-    const actual_to = legacy.to orelse return error.TransactionMismatch;
+    const decoded_fields = try execution.transition.fields(decoded.value, .cancun);
+    const to_field = try member(transaction, "to");
+    const expected_to: ?execution.Address = if (to_field == .string and to_field.string.len == 0) null else try fixedHex(20, allocator, to_field);
     const expected_data = try decodeHex(allocator, selected_data);
     defer allocator.free(expected_data);
-    if (legacy.nonce != try quantity(try member(transaction, "nonce")) or
-        legacy.gas_limit != try quantity(.{ .string = selected_gas }) or
-        legacy.gas_price != try quantity(try member(transaction, "gasPrice")) or
-        legacy.value != try quantity(.{ .string = selected_value }) or
-        !std.mem.eql(u8, &actual_to, &expected_to) or
-        !std.mem.eql(u8, legacy.data, expected_data)) return error.TransactionMismatch;
+    if (decoded_fields.nonce != try quantity(try member(transaction, "nonce")) or
+        decoded_fields.gas_limit != try quantity(.{ .string = selected_gas }) or
+        decoded_fields.max_fee != try quantity(try member(transaction, "gasPrice")) or
+        decoded_fields.value != try quantity(.{ .string = selected_value }) or
+        !std.meta.eql(decoded_fields.to, expected_to) or
+        !std.mem.eql(u8, decoded_fields.data, expected_data)) return error.TransactionMismatch;
     const canonical = try execution.encode(allocator, decoded.value);
     defer allocator.free(canonical);
     if (!std.mem.eql(u8, raw, canonical)) return error.TransactionMismatch;
@@ -523,6 +535,7 @@ fn runStateFixture(allocator: std.mem.Allocator, root: std.json.Value, fixture: 
         if (expected == .object and expected.object.contains("expectException")) return error.MissingExpectation;
         var outcome = try execution.transition.applyTransaction(allocator, &world, context, raw, context.gas_limit, 0);
         defer outcome.deinit();
+        if (fixture.expected_gas) |expected_gas| if (outcome.gas_used != expected_gas) return error.GasMismatch;
         try checkAccounts(allocator, &world, try member(expected, "state"));
         const root_hash = try fixedHex(32, allocator, try member(expected, "hash"));
         if (!std.mem.eql(u8, &root_hash, &(try world.stateRoot()))) return error.StateRootMismatch;

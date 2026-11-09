@@ -1056,3 +1056,133 @@ test "Prague deposit logs become ordered execution request bytes" {
     data[31] = 0;
     try testing.expectError(error.InvalidDepositLog, execution.transition.processExecutionRequests(a, &world, context, &.{receipt}));
 }
+
+/// Signs one local-token transaction and returns its canonical envelope.
+fn tokenTransaction(a: std.mem.Allocator, nonce: u64, to: ?execution.Address, data: []const u8) ![]u8 {
+    var tx = execution.Transaction{ .dynamic_fee = .{ .chain_id = 1, .nonce = nonce, .max_priority_fee_per_gas = 1, .max_fee_per_gas = 2, .gas_limit = 500_000, .to = to, .value = 0, .data = data, .access_list = &.{}, .y_parity = 0, .r = 1, .s = 1 } };
+    try expectSyntheticSender(a, &tx);
+    return execution.encode(a, tx);
+}
+
+/// Builds transfer calldata with ABI words for destination and amount.
+fn tokenTransfer(to: execution.Address, amount: u256) [68]u8 {
+    var data: [68]u8 = .{0} ** 68;
+    @memcpy(data[0..4], &[_]u8{ 0xa9, 0x05, 0x9c, 0xbb });
+    @memcpy(data[16..36], &to);
+    std.mem.writeInt(u256, data[36..68], amount, .big);
+    return data;
+}
+
+test "signed local token deployment, transfer, and revert commit through block and RPC" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const artifact = try std.json.parseFromSlice(std.json.Value, a, @embedFile("fixtures/local_token.json"), .{});
+    const fixture = artifact.value.object;
+    const init_hex = fixture.get("initcode").?.string;
+    const initcode = try a.alloc(u8, (init_hex.len - 2) / 2);
+    _ = try std.fmt.hexToBytes(initcode, init_hex[2..]);
+    var checksum: execution.Hash = undefined;
+    std.crypto.hash.sha2.Sha256.hash(initcode, &checksum, .{});
+    try testing.expectEqualStrings(fixture.get("sha256").?.string[2..], &std.fmt.bytesToHex(checksum, .lower));
+    var world = execution.state.State.init(a);
+    defer world.deinit();
+    const sender: execution.Address = .{ 0x7e, 0x5f, 0x45, 0x52, 0x09, 0x1a, 0x69, 0x12, 0x5d, 0x5d, 0xfc, 0xb7, 0xb8, 0xc2, 0x65, 0x90, 0x29, 0x39, 0x5b, 0xdf };
+    const recipient: execution.Address = .{0x44} ** 20;
+    const contract = execution.state.createAddress(sender, 0);
+    try world.setBalance(sender, 1_000_000_000);
+    var header = std.mem.zeroes(execution.Header);
+    header.state_root = try world.stateRoot();
+    header.gas_limit = 30_000_000;
+    header.base_fee_per_gas = 1;
+    var chain = try execution.chain.Chain.init(a, 1, .fulu, header, &world);
+    defer chain.deinit();
+    const transfer = tokenTransfer(recipient, 75);
+    const failing = tokenTransfer(recipient, 2_000);
+    const raw = [_][]const u8{ try tokenTransaction(a, 0, null, initcode), try tokenTransaction(a, 1, contract, &transfer), try tokenTransaction(a, 2, contract, &failing) };
+    const context: execution.transition.Context = .{ .fork = .fulu, .chain_id = 1, .coinbase = .{0x33} ** 20, .number = 1, .timestamp = 1, .gas_limit = header.gas_limit, .base_fee = 1, .blob_base_fee = 1 };
+    var simulated = try world.clone(a);
+    defer simulated.deinit();
+    var receipts: [3]execution.Receipt = undefined;
+    var gas_used: u64 = 0;
+    for (raw, 0..) |bytes, i| {
+        var outcome = try execution.transition.applyTransaction(a, &simulated, context, bytes, header.gas_limit - gas_used, gas_used);
+        defer outcome.deinit();
+        gas_used += outcome.gas_used;
+        const source_logs = outcome.receipt.dynamic_fee.logs;
+        const copied_logs = try a.alloc(execution.Log, source_logs.len);
+        for (source_logs, copied_logs) |source, *dest| dest.* = .{ .address = source.address, .topics = try a.dupe(execution.Hash, source.topics), .data = try a.dupe(u8, source.data) };
+        receipts[i] = switch (outcome.receipt) {
+            inline else => |p| .{ .dynamic_fee = .{ .status = p.status, .cumulative_gas_used = p.cumulative_gas_used, .logs = copied_logs, .logs_bloom = p.logs_bloom } },
+        };
+    }
+    try testing.expectEqual(@as(u64, 184_995), gas_used);
+    try testing.expectEqual(@as(u256, 925), simulated.getStorage(contract, std.mem.readInt(u160, &sender, .big)));
+    try testing.expectEqual(@as(u256, 75), simulated.getStorage(contract, std.mem.readInt(u160, &recipient, .big)));
+    try testing.expectEqual(@as(usize, 0), receipts[2].dynamic_fee.logs.len);
+    var next = header;
+    next.parent_hash = try execution.transition.headerHash(a, .fulu, header);
+    next.number = 1;
+    next.timestamp = 1;
+    next.fee_recipient = context.coinbase;
+    next.state_root = try simulated.stateRoot();
+    next.transactions_root = try execution.trie.orderedRoot(a, &raw);
+    next.receipts_root = try execution.receiptsRoot(a, &receipts);
+    next.logs_bloom = execution.receiptsBloom(&receipts);
+    next.withdrawals_root = try execution.trie.orderedRoot(a, &.{});
+    next.gas_used = gas_used;
+    try chain.append(&world, next, &raw, &.{}, &.{}, null);
+    try testing.expectEqualSlices(u8, &next.state_root, &(try world.stateRoot()));
+    const canonical = chain.latest().receipts();
+    try testing.expectEqual(@as(u8, 1), canonical[0].dynamic_fee.status);
+    try testing.expectEqual(@as(u8, 1), canonical[1].dynamic_fee.status);
+    try testing.expectEqual(@as(u8, 0), canonical[2].dynamic_fee.status);
+    const runtime_hex = fixture.get("runtime").?.string;
+    const runtime = try a.alloc(u8, (runtime_hex.len - 2) / 2);
+    _ = try std.fmt.hexToBytes(runtime, runtime_hex[2..]);
+    try testing.expectEqualSlices(u8, runtime, world.getCode(contract));
+    try testing.expectEqual(@as(usize, 1), canonical[1].dynamic_fee.logs.len);
+    const event = canonical[1].dynamic_fee.logs[0];
+    try testing.expectEqualSlices(u8, &contract, &event.address);
+    try testing.expectEqualStrings(fixture.get("transfer_topic").?.string[2..], &std.fmt.bytesToHex(event.topics[0], .lower));
+    try testing.expectEqualSlices(u8, &sender, event.topics[1][12..]);
+    try testing.expectEqualSlices(u8, &recipient, event.topics[2][12..]);
+    try testing.expectEqual(@as(u256, 75), std.mem.readInt(u256, event.data[0..32], .big));
+    var pool = execution.pool.Pool.init(a, .{});
+    defer pool.deinit();
+    var server: execution.rpc.Server = .{ .chain = &chain, .pool = &pool, .world = &world };
+    var tx_hash: execution.Hash = undefined;
+    std.crypto.hash.sha3.Keccak256.hash(raw[0], &tx_hash, .{});
+    const receipt_req = try rpcRequest(a, 1, "eth_getTransactionReceipt", &.{.{ .string = try std.fmt.allocPrint(a, "0x{s}", .{std.fmt.bytesToHex(tx_hash, .lower)}) }});
+    const receipt_body = try server.dispatch(a, receipt_req);
+    const rpc_receipt = (try std.json.parseFromSlice(std.json.Value, a, receipt_body, .{})).value.object.get("result").?;
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "0x{s}", .{std.fmt.bytesToHex(contract, .lower)}), rpc_receipt.object.get("contractAddress").?.string);
+    std.crypto.hash.sha3.Keccak256.hash(raw[1], &tx_hash, .{});
+    const transfer_receipt_req = try rpcRequest(a, 3, "eth_getTransactionReceipt", &.{.{ .string = try std.fmt.allocPrint(a, "0x{s}", .{std.fmt.bytesToHex(tx_hash, .lower)}) }});
+    const transfer_receipt_body = try server.dispatch(a, transfer_receipt_req);
+    const transfer_receipt = (try std.json.parseFromSlice(std.json.Value, a, transfer_receipt_body, .{})).value.object.get("result").?;
+    try testing.expectEqualStrings("0x1", transfer_receipt.object.get("status").?.string);
+    const receipt_logs = transfer_receipt.object.get("logs").?.array.items;
+    try testing.expectEqual(@as(usize, 1), receipt_logs.len);
+    std.crypto.hash.sha3.Keccak256.hash(raw[2], &tx_hash, .{});
+    const reverted_receipt_req = try rpcRequest(a, 4, "eth_getTransactionReceipt", &.{.{ .string = try std.fmt.allocPrint(a, "0x{s}", .{std.fmt.bytesToHex(tx_hash, .lower)}) }});
+    const reverted_receipt_body = try server.dispatch(a, reverted_receipt_req);
+    const reverted_receipt = (try std.json.parseFromSlice(std.json.Value, a, reverted_receipt_body, .{})).value.object.get("result").?;
+    try testing.expectEqualStrings("0x0", reverted_receipt.object.get("status").?.string);
+    try testing.expectEqual(@as(usize, 0), reverted_receipt.object.get("logs").?.array.items.len);
+    const logs_req = try rpcRequest(a, 2, "eth_getLogs", &.{.{ .object = .empty }});
+    const logs_body = try server.dispatch(a, logs_req);
+    const rpc_logs = (try std.json.parseFromSlice(std.json.Value, a, logs_body, .{})).value.object.get("result").?.array.items;
+    try testing.expectEqual(@as(usize, 1), rpc_logs.len);
+    const rpc_log = rpc_logs[0].object;
+    try testing.expectEqualStrings(fixture.get("transfer_topic").?.string, rpc_log.get("topics").?.array.items[0].string);
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "0x{s}", .{std.fmt.bytesToHex(event.topics[1], .lower)}), rpc_log.get("topics").?.array.items[1].string);
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "0x{s}", .{std.fmt.bytesToHex(event.topics[2], .lower)}), rpc_log.get("topics").?.array.items[2].string);
+    try testing.expectEqual(@as(usize, 32), event.data.len);
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "0x{s}", .{std.fmt.bytesToHex(event.data[0..32].*, .lower)}), rpc_log.get("data").?.string);
+    try testing.expectEqualStrings(rpc_log.get("data").?.string, receipt_logs[0].object.get("data").?.string);
+    for (0..3) |i| try testing.expectEqualStrings(rpc_log.get("topics").?.array.items[i].string, receipt_logs[0].object.get("topics").?.array.items[i].string);
+    try testing.expectEqualStrings("0x1", rpc_log.get("blockNumber").?.string);
+    try testing.expectEqualStrings("0x1", rpc_log.get("transactionIndex").?.string);
+    std.debug.print("LocalToken Transfer block=1 transaction=1 from=0x{s} to=0x{s} amount=75 gas={d}\n", .{ std.fmt.bytesToHex(sender, .lower), std.fmt.bytesToHex(recipient, .lower), gas_used });
+}
