@@ -37,8 +37,15 @@ pub fn Merkleize(
     }
 
     const populated_width = nextPow2(count);
-    var level = try allocator.alloc([32]u8, populated_width);
-    defer allocator.free(level);
+    // Most roots span a handful of chunks; keep their working level on the
+    // stack and only reach the heap for unusually wide trees.
+    const stack_chunk_capacity = 64;
+    var stack_level: [stack_chunk_capacity][32]u8 = undefined;
+    const level: [][32]u8 = if (populated_width <= stack_chunk_capacity)
+        stack_level[0..populated_width]
+    else
+        try allocator.alloc([32]u8, populated_width);
+    defer if (populated_width > stack_chunk_capacity) allocator.free(level);
 
     @memset(level, [_]u8{0} ** 32);
 
@@ -63,9 +70,15 @@ pub fn Merkleize(
     }
 
     var root = level[0];
-    var subtree_width = populated_width;
-    while (subtree_width < width) : (subtree_width *= 2) {
-        root = hashPair(root, zeroTreeRoot(subtree_width));
+    if (populated_width < width) {
+        // Walk the zero-tree roots upward once instead of recomputing each
+        // level from the all-zero leaf.
+        var zero = zeroTreeRoot(populated_width);
+        var subtree_width = populated_width;
+        while (subtree_width < width) : (subtree_width *= 2) {
+            root = hashPair(root, zero);
+            zero = hashPair(zero, zero);
+        }
     }
     return root;
 }

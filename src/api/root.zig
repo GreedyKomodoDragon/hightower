@@ -14,6 +14,8 @@ pub const Metadata = struct {
     is_syncing: bool = false,
     sync_distance: u64 = 0,
     genesis_fork_version: [4]u8,
+    /// Head already selected by the import loop; null falls back to computing it.
+    head: ?*const fulu.Root = null,
 };
 
 pub const Response = struct {
@@ -32,7 +34,7 @@ pub fn dispatch(allocator: std.mem.Allocator, store: ?*const consensus.ForkChoic
     const path = target[0 .. std.mem.indexOfScalar(u8, target, '?') orelse target.len];
     if (std.mem.eql(u8, path, "/metrics")) {
         const chain = store orelse return reply(allocator, .service_unavailable, "service unavailable");
-        const head = consensus.getForkChoiceHead(chain) catch return reply(allocator, .service_unavailable, "service unavailable");
+        const head = if (metadata.head) |cached| cached.* else consensus.getForkChoiceHead(chain) catch return reply(allocator, .service_unavailable, "service unavailable");
         const block = chain.blocks.get(head) orelse return reply(allocator, .service_unavailable, "service unavailable");
         const body = try std.fmt.allocPrint(
             allocator,
@@ -48,7 +50,7 @@ pub fn dispatch(allocator: std.mem.Allocator, store: ?*const consensus.ForkChoic
     }
     if (!metadata.ready or store == null) return reply(allocator, .service_unavailable, "service unavailable");
     const chain = store.?;
-    const head = consensus.getForkChoiceHead(chain) catch return reply(allocator, .service_unavailable, "service unavailable");
+    const head = if (metadata.head) |cached| cached.* else consensus.getForkChoiceHead(chain) catch return reply(allocator, .service_unavailable, "service unavailable");
     const head_block = chain.blocks.get(head) orelse return reply(allocator, .service_unavailable, "service unavailable");
     if (std.mem.eql(u8, path, "/eth/v1/node/syncing")) {
         var head_slot_buffer: [20]u8 = undefined;

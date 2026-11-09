@@ -40,12 +40,9 @@ pub fn serializeArray(
 pub fn deserializeArrayVar(
     allocator: std.mem.Allocator,
     comptime T: type,
-    reader: *std.Io.Reader,
+    bytes: []const u8,
 ) !T {
     const info = @typeInfo(T).array;
-
-    const bytes = try reader.allocRemaining(allocator, .unlimited);
-    defer allocator.free(bytes);
 
     const offsets = try offset_mod.splitVariable(allocator, bytes, info.len);
     defer allocator.free(offsets);
@@ -60,9 +57,7 @@ pub fn deserializeArrayVar(
     }
 
     for (&result, 0..) |*item, i| {
-        var sub: std.Io.Reader = .fixed(bytes[offsets[i]..offsets[i + 1]]);
-        item.* = try deserialize_mod.deserialize(allocator, info.child, &sub);
-        if (sub.bufferedLen() != 0) return error.TrailingBytes;
+        item.* = try deserialize_mod.deserializeSlice(allocator, info.child, bytes[offsets[i]..offsets[i + 1]]);
         done += 1;
     }
 

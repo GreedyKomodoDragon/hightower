@@ -46,6 +46,7 @@ pub const Account = struct {
 };
 
 const StorageEntry = struct { slot: u256, value: u256 };
+const StorageKey = struct { address: Address, slot: u256 };
 const AccountEntry = struct {
     address: Address,
     nonce: u64 = 0,
@@ -54,7 +55,13 @@ const AccountEntry = struct {
     storage: std.ArrayList(StorageEntry) = .empty,
 };
 const CodeEntry = struct { hash: Hash, bytes: []u8 };
-const Undo = struct { address: Address, previous: ?AccountEntry };
+const AccountFields = struct { nonce: u64, balance: u256, code_hash: Hash };
+const Undo = union(enum) {
+    fields: struct { address: Address, previous: AccountFields },
+    storage: struct { address: Address, slot: u256, previous: ?u256 },
+    create: Address,
+    delete: AccountEntry,
+};
 const SnapshotMarker = struct { id: u64, journal_len: usize };
 
 /// Opaque identifier for the top nested snapshot; snapshots must be closed LIFO.
@@ -64,22 +71,33 @@ pub const Snapshot = struct { id: u64 };
 pub const State = struct {
     allocator: std.mem.Allocator,
     accounts: std.ArrayList(AccountEntry) = .empty,
+    account_index: std.AutoHashMap(Address, usize),
     codes: std.ArrayList(CodeEntry) = .empty,
+    code_index: std.AutoHashMap(Hash, usize),
+    storage_index: std.AutoHashMap(StorageKey, usize),
     journal: std.ArrayList(Undo) = .empty,
     snapshots: std.ArrayList(SnapshotMarker) = .empty,
     next_snapshot_id: u64 = 1,
 
     /// Creates an empty state using the supplied allocator for all owned data.
     pub fn init(allocator: std.mem.Allocator) State {
-        return .{ .allocator = allocator };
+        return .{
+            .allocator = allocator,
+            .account_index = .init(allocator),
+            .code_index = .init(allocator),
+            .storage_index = .init(allocator),
+        };
     }
 
     /// Releases accounts, code bytes, and any saved journal entries.
     pub fn deinit(self: *State) void {
         for (self.accounts.items) |*entry| self.deinitAccount(entry);
         self.accounts.deinit(self.allocator);
+        self.account_index.deinit();
         for (self.codes.items) |code| self.allocator.free(code.bytes);
         self.codes.deinit(self.allocator);
+        self.code_index.deinit();
+        self.storage_index.deinit();
         self.clearJournal();
         self.journal.deinit(self.allocator);
         self.snapshots.deinit(self.allocator);
@@ -109,8 +127,14 @@ pub const State = struct {
     /// Removes an account and its storage; absent account deletion is a no-op.
     pub fn deleteAccount(self: *State, address: Address) !void {
         const index = self.findAccount(address) orelse return;
-        try self.recordAccount(address);
+        try self.recordDelete(address);
         var removed = self.accounts.swapRemove(index);
+        self.removeStorageIndex(&removed);
+        _ = self.account_index.remove(address);
+        if (index < self.accounts.items.len) {
+            const moved = &self.accounts.items[index];
+            self.account_index.getPtr(moved.address).?.* = index;
+        }
         self.deinitAccount(&removed);
     }
 
@@ -152,10 +176,8 @@ pub const State = struct {
     /// Returns stored code borrowed from this state until deinit, or empty bytes for a missing account.
     pub fn getCode(self: *const State, address: Address) []const u8 {
         const account = self.findAccountConst(address) orelse return &.{};
-        for (self.codes.items) |code| {
-            if (std.mem.eql(u8, &code.hash, &account.code_hash)) return code.bytes;
-        }
-        return &.{};
+        const index = self.code_index.get(account.code_hash) orelse return &.{};
+        return self.codes.items[index].bytes;
     }
 
     /// Resolves one EIP-7702 delegation for execution while preserving the account's own code hash.
@@ -177,29 +199,36 @@ pub const State = struct {
     /// Returns a storage word, or zero when its account or slot is absent.
     pub fn getStorage(self: *const State, address: Address, slot: u256) u256 {
         const entry = self.findAccountConst(address) orelse return 0;
-        for (entry.storage.items) |stored| if (stored.slot == slot) return stored.value;
-        return 0;
+        const index = self.storage_index.get(.{ .address = address, .slot = slot }) orelse return 0;
+        return entry.storage.items[index].value;
     }
 
     /// Sets a storage word; writing zero deletes the slot and never creates an absent account.
     pub fn setStorage(self: *State, address: Address, slot: u256, value: u256) !void {
+        const key = StorageKey{ .address = address, .slot = slot };
         const index = self.findAccount(address);
         if (index) |account_index| {
             const entry = &self.accounts.items[account_index];
-            for (entry.storage.items, 0..) |stored, i| {
-                if (stored.slot != slot) continue;
+            if (self.storage_index.get(key)) |slot_index| {
                 if (value == 0) {
-                    try self.recordAccount(address);
-                    _ = entry.storage.swapRemove(i);
+                    try self.recordStorage(address, slot, entry.storage.items[slot_index].value);
+                    _ = entry.storage.swapRemove(slot_index);
+                    _ = self.storage_index.remove(key);
+                    if (slot_index < entry.storage.items.len) {
+                        const moved = entry.storage.items[slot_index];
+                        self.storage_index.getPtr(.{ .address = address, .slot = moved.slot }).?.* = slot_index;
+                    }
                 } else {
-                    try self.recordAccount(address);
-                    self.accounts.items[account_index].storage.items[i].value = value;
+                    try self.recordStorage(address, slot, entry.storage.items[slot_index].value);
+                    entry.storage.items[slot_index].value = value;
                 }
                 return;
             }
             if (value == 0) return;
-            try self.recordAccount(address);
-            try self.accounts.items[account_index].storage.append(self.allocator, .{ .slot = slot, .value = value });
+            try self.recordStorage(address, slot, null);
+            try self.storage_index.ensureUnusedCapacity(1);
+            try entry.storage.append(self.allocator, .{ .slot = slot, .value = value });
+            self.storage_index.putAssumeCapacity(key, entry.storage.items.len - 1);
             return;
         }
         if (value == 0) return;
@@ -255,8 +284,7 @@ pub const State = struct {
 
     /// Returns the account entry index when the address exists.
     fn findAccount(self: *const State, address: Address) ?usize {
-        for (self.accounts.items, 0..) |entry, i| if (std.mem.eql(u8, &entry.address, &address)) return i;
-        return null;
+        return self.account_index.get(address);
     }
 
     /// Returns an account entry when the address exists.
@@ -267,11 +295,18 @@ pub const State = struct {
 
     /// Journals the prior entry and appends a new account entry.
     fn appendNewAccount(self: *State, entry: AccountEntry) !*AccountEntry {
+        try self.account_index.ensureUnusedCapacity(1);
+        try self.storage_index.ensureUnusedCapacity(@intCast(entry.storage.items.len));
         const journal_len = self.journal.items.len;
-        try self.recordAccount(entry.address);
+        try self.recordCreate(entry.address);
         errdefer if (self.journal.items.len > journal_len) self.cancelLastUndo();
         try self.accounts.append(self.allocator, entry);
-        return &self.accounts.items[self.accounts.items.len - 1];
+        const index = self.accounts.items.len - 1;
+        self.account_index.putAssumeCapacity(entry.address, index);
+        for (entry.storage.items, 0..) |stored, slot_index| {
+            self.storage_index.putAssumeCapacity(.{ .address = entry.address, .slot = stored.slot }, slot_index);
+        }
+        return &self.accounts.items[index];
     }
 
     /// Journals an existing account before a write, or creates one when requested.
@@ -284,13 +319,36 @@ pub const State = struct {
         return try self.appendNewAccount(.{ .address = address });
     }
 
-    /// Appends an owned copy of the current account to the active journal.
+    /// Record the account fields a later snapshot revert must restore.
     fn recordAccount(self: *State, address: Address) !void {
         if (self.snapshots.items.len == 0) return;
-        var previous: ?AccountEntry = null;
-        if (self.findAccount(address)) |index| previous = try self.cloneAccount(self.accounts.items[index]);
-        errdefer if (previous) |*entry| self.deinitAccount(entry);
-        try self.journal.append(self.allocator, .{ .address = address, .previous = previous });
+        const index = self.findAccount(address) orelse return;
+        const entry = self.accounts.items[index];
+        try self.journal.append(self.allocator, .{ .fields = .{
+            .address = address,
+            .previous = .{ .nonce = entry.nonce, .balance = entry.balance, .code_hash = entry.code_hash },
+        } });
+    }
+
+    /// Record that an account did not exist before this snapshot.
+    fn recordCreate(self: *State, address: Address) !void {
+        if (self.snapshots.items.len == 0) return;
+        try self.journal.append(self.allocator, .{ .create = address });
+    }
+
+    /// Record a deleted account, including its storage, for restoration.
+    fn recordDelete(self: *State, address: Address) !void {
+        if (self.snapshots.items.len == 0) return;
+        const index = self.findAccount(address) orelse return;
+        var previous = try self.cloneAccount(self.accounts.items[index]);
+        errdefer self.deinitAccount(&previous);
+        try self.journal.append(self.allocator, .{ .delete = previous });
+    }
+
+    /// Record one storage slot's prior value, or its absence.
+    fn recordStorage(self: *State, address: Address, slot: u256, previous: ?u256) !void {
+        if (self.snapshots.items.len == 0) return;
+        try self.journal.append(self.allocator, .{ .storage = .{ .address = address, .slot = slot, .previous = previous } });
     }
 
     /// Deep-copies one account and its storage slots for journal ownership.
@@ -302,26 +360,92 @@ pub const State = struct {
         return copy;
     }
 
-    /// Restores one journal entry without allocation by reusing retained array capacity.
+    /// Restore one delta without allocation by reusing retained list capacity.
     fn applyUndo(self: *State, undo: Undo) void {
-        if (self.findAccount(undo.address)) |index| {
-            var current = self.accounts.swapRemove(index);
-            self.deinitAccount(&current);
+        switch (undo) {
+            .fields => |fields| {
+                if (self.findAccount(fields.address)) |index| {
+                    const entry = &self.accounts.items[index];
+                    entry.nonce = fields.previous.nonce;
+                    entry.balance = fields.previous.balance;
+                    entry.code_hash = fields.previous.code_hash;
+                }
+            },
+            .storage => |storage| self.undoStorage(storage.address, storage.slot, storage.previous),
+            .create => |address| self.removeAccount(address),
+            .delete => |previous| self.restoreAccount(previous),
         }
-        if (undo.previous) |previous| self.accounts.appendAssumeCapacity(previous);
+    }
+
+    /// Restore one storage slot to a prior value or remove it.
+    fn undoStorage(self: *State, address: Address, slot: u256, previous: ?u256) void {
+        const account_index = self.findAccount(address) orelse return;
+        const entry = &self.accounts.items[account_index];
+        const key = StorageKey{ .address = address, .slot = slot };
+        if (previous) |value| {
+            if (self.storage_index.get(key)) |slot_index| {
+                entry.storage.items[slot_index].value = value;
+            } else {
+                entry.storage.appendAssumeCapacity(.{ .slot = slot, .value = value });
+                self.storage_index.putAssumeCapacity(key, entry.storage.items.len - 1);
+            }
+        } else if (self.storage_index.get(key)) |slot_index| {
+            _ = entry.storage.swapRemove(slot_index);
+            _ = self.storage_index.remove(key);
+            if (slot_index < entry.storage.items.len) {
+                const moved = entry.storage.items[slot_index];
+                self.storage_index.getPtr(.{ .address = address, .slot = moved.slot }).?.* = slot_index;
+            }
+        }
+    }
+
+    /// Insert one restored account after its deletion.
+    fn restoreAccount(self: *State, previous: AccountEntry) void {
+        self.accounts.appendAssumeCapacity(previous);
+        const index = self.accounts.items.len - 1;
+        self.account_index.putAssumeCapacity(previous.address, index);
+        for (previous.storage.items, 0..) |stored, slot_index| {
+            self.storage_index.putAssumeCapacity(.{ .address = previous.address, .slot = stored.slot }, slot_index);
+        }
+    }
+
+    /// Remove one account and all of its index entries.
+    fn removeAccount(self: *State, address: Address) void {
+        const index = self.findAccount(address) orelse return;
+        var removed = self.accounts.swapRemove(index);
+        self.removeStorageIndex(&removed);
+        _ = self.account_index.remove(address);
+        if (index < self.accounts.items.len) {
+            const moved = &self.accounts.items[index];
+            self.account_index.getPtr(moved.address).?.* = index;
+        }
+        self.deinitAccount(&removed);
+    }
+
+    /// Remove every indexed storage slot owned by one account.
+    fn removeStorageIndex(self: *State, entry: *const AccountEntry) void {
+        for (entry.storage.items) |stored| _ = self.storage_index.remove(.{ .address = entry.address, .slot = stored.slot });
     }
 
     /// Frees an unneeded last journal record after an account append failure.
     fn cancelLastUndo(self: *State) void {
         var undo = self.journal.pop().?;
-        if (undo.previous) |*entry| self.deinitAccount(entry);
+        self.deinitUndo(&undo);
     }
 
-    /// Frees all journal-owned account snapshots.
+    /// Frees deletion snapshots and compacts the completed delta log.
     fn clearJournal(self: *State) void {
         while (self.journal.pop()) |undo_const| {
             var undo = undo_const;
-            if (undo.previous) |*entry| self.deinitAccount(entry);
+            self.deinitUndo(&undo);
+        }
+    }
+
+    /// Release any storage owned by one delta.
+    fn deinitUndo(self: *const State, undo: *Undo) void {
+        switch (undo.*) {
+            .delete => |*entry| self.deinitAccount(entry),
+            else => {},
         }
     }
 
@@ -349,10 +473,12 @@ pub const State = struct {
 
     /// Stores code once by hash; code content is immutable for this State lifetime.
     fn storeCode(self: *State, hash: Hash, bytes: []const u8) !void {
-        for (self.codes.items) |entry| if (std.mem.eql(u8, &entry.hash, &hash)) return;
+        if (self.code_index.contains(hash)) return;
+        try self.code_index.ensureUnusedCapacity(1);
         const owned = try self.allocator.dupe(u8, bytes);
         errdefer self.allocator.free(owned);
         try self.codes.append(self.allocator, .{ .hash = hash, .bytes = owned });
+        self.code_index.putAssumeCapacity(hash, self.codes.items.len - 1);
     }
 
     /// Frees one account entry and its storage list.

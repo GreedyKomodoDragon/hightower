@@ -53,14 +53,11 @@ pub fn serializeContainer(writer: *std.Io.Writer, value: anytype) !void {
 pub fn deserializeContainer(
     allocator: std.mem.Allocator,
     comptime T: type,
-    reader: *std.Io.Reader,
+    bytes: []const u8,
 ) !T {
     // Wide schemas such as BeaconState need more comptime branches to unroll.
     @setEvalBranchQuota(20_000);
     const info = @typeInfo(T).@"struct";
-
-    const bytes = try reader.allocRemaining(allocator, .unlimited);
-    defer allocator.free(bytes);
 
     const fixed_section = size_mod.containerFixedSectionSize(T);
     if (bytes.len < fixed_section) return error.EndOfStream;
@@ -83,9 +80,7 @@ pub fn deserializeContainer(
         inline for (info.fields) |field| {
             const field_desc = comptime desc_mod.SszType(field.type);
             const size = field_desc.fixed_size.?;
-            var sub: std.Io.Reader = .fixed(bytes[pos..][0..size]);
-            @field(result, field.name) = try deserialize_mod.deserialize(allocator, field.type, &sub);
-            if (sub.bufferedLen() != 0) return error.TrailingBytes;
+            @field(result, field.name) = try deserialize_mod.deserializeSlice(allocator, field.type, bytes[pos..][0..size]);
             pos += size;
         }
         return result;
@@ -131,14 +126,10 @@ pub fn deserializeContainer(
         const field_desc = comptime desc_mod.SszType(field.type);
         if (comptime !field_desc.is_variable) {
             const size = field_desc.fixed_size.?;
-            var sub: std.Io.Reader = .fixed(bytes[fixed_pos..][0..size]);
-            @field(result, field.name) = try deserialize_mod.deserialize(allocator, field.type, &sub);
-            if (sub.bufferedLen() != 0) return error.TrailingBytes;
+            @field(result, field.name) = try deserialize_mod.deserializeSlice(allocator, field.type, bytes[fixed_pos..][0..size]);
             fixed_pos += size;
         } else {
-            var sub: std.Io.Reader = .fixed(bytes[offsets[var_index]..offsets[var_index + 1]]);
-            @field(result, field.name) = try deserialize_mod.deserialize(allocator, field.type, &sub);
-            if (sub.bufferedLen() != 0) return error.TrailingBytes;
+            @field(result, field.name) = try deserialize_mod.deserializeSlice(allocator, field.type, bytes[offsets[var_index]..offsets[var_index + 1]]);
             fixed_pos += 4;
             var_index += 1;
         }

@@ -233,19 +233,41 @@ pub fn getActiveValidatorIndices(
     return indices.toOwnedSlice(allocator);
 }
 
-pub fn computeShuffledIndex(index: usize, index_count: usize, seed: [32]u8) error{InvalidIndex}!usize {
+/// Round pivots shared by every position in one seeded shuffle.
+pub const ShuffleRoundPivots = struct {
+    pivots: [SHUFFLE_ROUND_COUNT]usize,
+};
+
+/// Precompute the per-round pivot once for an entire committee or proposer scan.
+pub fn computeShuffleRoundPivots(index_count: usize, seed: [32]u8) error{InvalidIndex}!ShuffleRoundPivots {
+    if (index_count == 0) return error.InvalidIndex;
+
+    // SAFETY: The loop assigns every pivot before result is returned.
+    var result: ShuffleRoundPivots = undefined;
+    for (0..SHUFFLE_ROUND_COUNT) |round| {
+        var pivot_input: [33]u8 = undefined;
+        @memcpy(pivot_input[0..32], &seed);
+        pivot_input[32] = @intCast(round);
+        var pivot_hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(&pivot_input, &pivot_hash, .{});
+        result.pivots[round] = @intCast(std.mem.readInt(u64, pivot_hash[0..8], .little) % index_count);
+    }
+    return result;
+}
+
+/// Shuffle one index using pivots already derived from the same seed and count.
+pub fn computeShuffledIndexWithPivots(
+    index: usize,
+    index_count: usize,
+    seed: [32]u8,
+    pivots: *const ShuffleRoundPivots,
+) error{InvalidIndex}!usize {
     if (index >= index_count or index_count == 0) return error.InvalidIndex;
 
     var current = index;
     for (0..SHUFFLE_ROUND_COUNT) |round| {
         const round_byte: u8 = @intCast(round);
-        var pivot_input: [33]u8 = undefined;
-        @memcpy(pivot_input[0..32], &seed);
-        pivot_input[32] = round_byte;
-        var pivot_hash: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(&pivot_input, &pivot_hash, .{});
-        const pivot: usize = @intCast(std.mem.readInt(u64, pivot_hash[0..8], .little) % index_count);
-
+        const pivot = pivots.pivots[round];
         const flip = (pivot + index_count - current) % index_count;
         const position = @max(current, flip);
         var source_input: [37]u8 = undefined;
@@ -260,6 +282,11 @@ pub fn computeShuffledIndex(index: usize, index_count: usize, seed: [32]u8) erro
     return current;
 }
 
+pub fn computeShuffledIndex(index: usize, index_count: usize, seed: [32]u8) error{InvalidIndex}!usize {
+    const pivots = try computeShuffleRoundPivots(index_count, seed);
+    return computeShuffledIndexWithPivots(index, index_count, seed, &pivots);
+}
+
 pub fn computeCommittee(
     allocator: std.mem.Allocator,
     indices: []const fulu.ValidatorIndex,
@@ -272,11 +299,33 @@ pub fn computeCommittee(
     const end = indices.len * (committee_index + 1) / committee_count;
     const committee = try allocator.alloc(fulu.ValidatorIndex, end - start);
     errdefer allocator.free(committee);
+    if (end == start) return committee;
+
+    const pivots = try computeShuffleRoundPivots(indices.len, seed);
     for (start..end, 0..) |position, output_index| {
-        const shuffled = try computeShuffledIndex(position, indices.len, seed);
+        const shuffled = try computeShuffledIndexWithPivots(position, indices.len, seed, &pivots);
         committee[output_index] = indices[shuffled];
     }
     return committee;
+}
+
+/// Build one committee from an already-derived active set and attester seed.
+pub fn getBeaconCommitteeWithActive(
+    allocator: std.mem.Allocator,
+    active: []const fulu.ValidatorIndex,
+    seed: [32]u8,
+    slot: fulu.Slot,
+    index: fulu.CommitteeIndex,
+) ![]fulu.ValidatorIndex {
+    const per_slot = @max(1, @min(MAX_COMMITTEES_PER_SLOT, active.len / SLOTS_PER_EPOCH / TARGET_COMMITTEE_SIZE));
+    if (index >= per_slot) return error.InvalidCommittee;
+    return computeCommittee(
+        allocator,
+        active,
+        seed,
+        @as(usize, @intCast(slot % SLOTS_PER_EPOCH)) * per_slot + @as(usize, @intCast(index)),
+        per_slot * SLOTS_PER_EPOCH,
+    );
 }
 
 pub fn getBeaconCommittee(
@@ -288,14 +337,12 @@ pub fn getBeaconCommittee(
     const epoch = computeEpochAtSlot(slot);
     const active = try getActiveValidatorIndices(allocator, state.validators.data, epoch);
     defer allocator.free(active);
-    const per_slot = @max(1, @min(MAX_COMMITTEES_PER_SLOT, active.len / SLOTS_PER_EPOCH / TARGET_COMMITTEE_SIZE));
-    if (index >= per_slot) return error.InvalidCommittee;
-    return computeCommittee(
+    return getBeaconCommitteeWithActive(
         allocator,
         active,
         computeSeed(state.*, epoch, DOMAIN_BEACON_ATTESTER),
-        @as(usize, @intCast(slot % SLOTS_PER_EPOCH)) * per_slot + @as(usize, @intCast(index)),
-        per_slot * SLOTS_PER_EPOCH,
+        slot,
+        index,
     );
 }
 
@@ -305,9 +352,10 @@ pub fn computeProposerIndex(
     seed: [32]u8,
 ) error{NoEligibleProposer}!fulu.ValidatorIndex {
     if (indices.len == 0) return error.NoEligibleProposer;
+    const pivots = computeShuffleRoundPivots(indices.len, seed) catch return error.NoEligibleProposer;
     var iteration: u64 = 0;
     while (iteration < std.math.maxInt(u64)) : (iteration += 1) {
-        const shuffled = computeShuffledIndex(@intCast(iteration % indices.len), indices.len, seed) catch return error.NoEligibleProposer;
+        const shuffled = computeShuffledIndexWithPivots(@intCast(iteration % indices.len), indices.len, seed, &pivots) catch return error.NoEligibleProposer;
         const candidate_index = indices[shuffled];
         if (candidate_index >= validators.len) return error.NoEligibleProposer;
 

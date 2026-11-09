@@ -145,30 +145,48 @@ pub fn processRewardsAndPenalties(allocator: std.mem.Allocator, state: *fulu.Bea
     @memset(rewards, 0);
     @memset(penalties, 0);
 
-    const total_active = totalBalance(state, null, current_epoch);
-    const active_increments = @max(total_active / helpers.EFFECTIVE_BALANCE_INCREMENT, 1);
-    const leaking = isInInactivityLeak(state, current_epoch);
     const previous_epoch = helpers.computePreviousEpoch(current_epoch);
+    const leaking = isInInactivityLeak(state, current_epoch);
+
+    // One validator pass yields the current active total and every flag's
+    // participating balance, replacing four full scans of the validator set.
+    var total_active_balance: u128 = 0;
+    var participating_balances = [_]u128{0} ** helpers.PARTICIPATION_FLAG_WEIGHTS.len;
+    for (state.validators.data, 0..) |validator, index| {
+        if (helpers.isActiveValidator(validator, current_epoch)) total_active_balance += validator.effective_balance;
+        if (!helpers.isActiveValidator(validator, previous_epoch)) continue;
+        const flags = state.previous_epoch_participation.data[index];
+        if (validator.slashed) continue;
+        for (0..helpers.PARTICIPATION_FLAG_WEIGHTS.len) |flag_index| {
+            if (flags & (@as(u8, 1) << @as(u3, @intCast(flag_index))) != 0) {
+                participating_balances[flag_index] += validator.effective_balance;
+            }
+        }
+    }
+    const total_active: u64 = @intCast(@max(total_active_balance, helpers.EFFECTIVE_BALANCE_INCREMENT));
+    const active_increments = @max(total_active / helpers.EFFECTIVE_BALANCE_INCREMENT, 1);
+    // The spec rounds per increment first; hoisting this quotient keeps the
+    // exact integer result while removing a square root per validator per flag.
+    const base_reward_per_increment = helpers.EFFECTIVE_BALANCE_INCREMENT * helpers.BASE_REWARD_FACTOR / std.math.sqrt(total_active);
+    var participating_increments = [_]u64{0} ** helpers.PARTICIPATION_FLAG_WEIGHTS.len;
+    for (participating_balances, &participating_increments) |balance, *increments| {
+        increments.* = @intCast(@max(balance, helpers.EFFECTIVE_BALANCE_INCREMENT) / helpers.EFFECTIVE_BALANCE_INCREMENT);
+    }
+
     // Each flag has its own weight and participating balance; head misses do
     // not incur a penalty because timely-head rewards are intentionally small.
-    for (0..helpers.PARTICIPATION_FLAG_WEIGHTS.len) |flag_index| {
-        const participating_balance = totalBalance(state, flag_index, previous_epoch);
-        const participating_increments = participating_balance / helpers.EFFECTIVE_BALANCE_INCREMENT;
-        for (state.validators.data, 0..) |validator, index| {
-            if (!isEligibleForRewards(validator, previous_epoch)) continue;
-            const base = baseReward(validator.effective_balance, total_active);
-            const flags = state.previous_epoch_participation.data[index];
+    for (state.validators.data, 0..) |validator, index| {
+        if (!isEligibleForRewards(validator, previous_epoch)) continue;
+        const base = base_reward_per_increment * (validator.effective_balance / helpers.EFFECTIVE_BALANCE_INCREMENT);
+        const flags = state.previous_epoch_participation.data[index];
+        for (0..helpers.PARTICIPATION_FLAG_WEIGHTS.len) |flag_index| {
             const participated = !validator.slashed and flags & (@as(u8, 1) << @as(u3, @intCast(flag_index))) != 0;
             if (participated) {
-                if (!leaking) rewards[index] += base * helpers.PARTICIPATION_FLAG_WEIGHTS[flag_index] * participating_increments / (active_increments * helpers.WEIGHT_DENOMINATOR);
+                if (!leaking) rewards[index] += base * helpers.PARTICIPATION_FLAG_WEIGHTS[flag_index] * participating_increments[flag_index] / (active_increments * helpers.WEIGHT_DENOMINATOR);
             } else if (flag_index != helpers.TIMELY_HEAD_FLAG_INDEX) {
                 penalties[index] += base * helpers.PARTICIPATION_FLAG_WEIGHTS[flag_index] / helpers.WEIGHT_DENOMINATOR;
             }
         }
-    }
-    for (state.validators.data, 0..) |validator, index| {
-        if (!isEligibleForRewards(validator, previous_epoch)) continue;
-        const flags = state.previous_epoch_participation.data[index];
         const target = !validator.slashed and flags & (@as(u8, 1) << helpers.TIMELY_TARGET_FLAG_INDEX) != 0;
         if (!target) penalties[index] += validator.effective_balance * state.inactivity_scores.data[index] /
             (helpers.INACTIVITY_SCORE_BIAS * helpers.INACTIVITY_PENALTY_QUOTIENT_BELLATRIX);
@@ -187,13 +205,20 @@ fn baseReward(effective_balance: u64, total_active_balance: u64) u64 {
 }
 
 pub fn processRegistryUpdates(state: *fulu.BeaconState, current_epoch: fulu.Epoch) !void {
+    // Exits share one current-epoch total, but skip the scan when none occur.
+    var exit_total: ?u64 = null;
     for (state.validators.data, 0..) |validator, index| {
         // These conditions are mutually exclusive and ordered: first join the
         // activation queue, then eject active validators, then activate finalized entries.
         if (helpers.isEligibleForActivationQueue(validator)) {
             @constCast(state.validators.data)[index].activation_eligibility_epoch = current_epoch + 1;
         } else if (helpers.isActiveValidator(validator, current_epoch) and validator.effective_balance <= helpers.EJECTION_BALANCE) {
-            try initiateValidatorExit(state, index, current_epoch);
+            const active_total = exit_total orelse blk: {
+                const total = totalBalance(state, null, current_epoch);
+                exit_total = total;
+                break :blk total;
+            };
+            try initiateValidatorExitWithTotal(state, index, current_epoch, active_total);
         } else if (helpers.isEligibleForActivation(validator, state.finalized_checkpoint.epoch)) {
             // Eligibility is inclusive: an entry at the finalized epoch may activate.
             @constCast(state.validators.data)[index].activation_epoch = helpers.computeActivationExitEpoch(current_epoch) catch return error.InvalidState;
@@ -202,9 +227,12 @@ pub fn processRegistryUpdates(state: *fulu.BeaconState, current_epoch: fulu.Epoc
 }
 
 pub fn initiateValidatorExit(state: *fulu.BeaconState, index: usize, current_epoch: fulu.Epoch) !void {
+    return initiateValidatorExitWithTotal(state, index, current_epoch, totalBalance(state, null, current_epoch));
+}
+
+fn initiateValidatorExitWithTotal(state: *fulu.BeaconState, index: usize, current_epoch: fulu.Epoch, active_total: u64) !void {
     const validator = state.validators.data[index];
     if (validator.exit_epoch != helpers.FAR_FUTURE_EPOCH) return;
-    const active_total = totalBalance(state, null, current_epoch);
     const balance_churn = @max(helpers.MIN_PER_EPOCH_CHURN_LIMIT_ELECTRA, active_total / helpers.CHURN_LIMIT_QUOTIENT);
     const churn = @min(helpers.MAX_PER_EPOCH_ACTIVATION_EXIT_CHURN_LIMIT, balance_churn - balance_churn % helpers.EFFECTIVE_BALANCE_INCREMENT);
     if (churn == 0) return error.InvalidState;
@@ -303,13 +331,14 @@ pub fn computeSyncCommittee(allocator: std.mem.Allocator, state: *const fulu.Bea
     defer allocator.free(active);
     if (active.len == 0) return error.NoEligibleProposer;
     const seed = helpers.computeSeed(state.*, epoch_number, helpers.DOMAIN_SYNC_COMMITTEE);
+    const pivots = try helpers.computeShuffleRoundPivots(active.len, seed);
     var pubkeys: [preset.SYNC_COMMITTEE_SIZE]fulu.BLSPubkey = undefined;
     var index: u64 = 0;
     var filled: usize = 0;
     // Rejection sampling preserves effective-balance weighting while allowing
     // duplicate validator indices, as required by the sync committee spec.
     while (filled < pubkeys.len) : (index += 1) {
-        const candidate = active[try helpers.computeShuffledIndex(index % active.len, active.len, seed)];
+        const candidate = active[try helpers.computeShuffledIndexWithPivots(index % active.len, active.len, seed, &pivots)];
         var input: [40]u8 = undefined;
         @memcpy(input[0..32], &seed);
         std.mem.writeInt(u64, input[32..40], index / 16, .little);

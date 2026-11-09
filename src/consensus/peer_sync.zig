@@ -19,8 +19,13 @@ const engine_api = @import("execution_engine.zig");
 const kzg = @import("execution").kzg;
 
 /// Select the consensus head in execution before exposing or saving it.
-pub fn confirmExecutionHead(store: *const fork_choice.Store, engine: engine_api.ExecutionEngine) !void {
-    const head = fork_choice.getHead(store) catch return error.ForkchoiceUpdateFailed;
+pub fn confirmExecutionHead(store: *fork_choice.Store, engine: engine_api.ExecutionEngine) !void {
+    const head = fork_choice.getHeadCached(store) catch return error.ForkchoiceUpdateFailed;
+    return confirmExecutionHeadAt(store, engine, head);
+}
+
+/// Confirm a head already selected by the caller to avoid a second weight pass.
+pub fn confirmExecutionHeadAt(store: *fork_choice.Store, engine: engine_api.ExecutionEngine, head: fulu.Root) !void {
     const head_state = store.block_states.get(head) orelse return error.ForkchoiceUpdateFailed;
     const safe_state = store.block_states.get(store.justified_checkpoint.root) orelse return error.ForkchoiceUpdateFailed;
     const finalized_state = store.block_states.get(store.finalized_checkpoint.root) orelse return error.ForkchoiceUpdateFailed;
@@ -79,10 +84,10 @@ pub const Coordinator = struct {
             const at_slot = try std.math.add(u64, self.store.genesis_time, try std.math.mul(u64, block.slot, @import("consensus_preset").Config.SECONDS_PER_SLOT));
             try fork_choice.onTick(self.store, at_slot);
             try fork_choice.onBlock(self.store, signed.*, self.engine, .{ .context = self.columns, .is_available = columns.Store.check });
-            self.head = fork_choice.getHead(self.store) catch return error.ImportCommitFailed;
+            self.head = fork_choice.getHeadCached(self.store) catch return error.ImportCommitFailed;
             if (!std.mem.eql(u8, &self.head, &root)) return error.ImportCommitFailed;
-            try confirmExecutionHead(self.store, self.engine);
-            snapshot.saveForkChoiceStore(self.allocator, self.io, self.dir, "fork-choice.bin", self.store) catch return error.ImportCommitFailed;
+            try confirmExecutionHeadAt(self.store, self.engine, self.head);
+            snapshot.saveForkChoiceStoreAt(self.allocator, self.io, self.dir, "fork-choice.bin", self.store, self.head) catch return error.ImportCommitFailed;
             self.next_slot = try std.math.add(u64, block.slot, 1);
             prior_slot = block.slot;
             imported += 1;
@@ -285,7 +290,7 @@ test "two peers catch up from an anchor and resume after restart" {
     try std.testing.expectEqual(@as(usize, 1), try target_sync.step(try target_service.activePeer(), 1));
     var restored = try snapshot.loadForkChoiceStore(allocator, io, target_dir.dir, "fork-choice.bin");
     defer restored.deinit();
-    var resumed = Coordinator{ .allocator = allocator, .io = io, .dir = target_dir.dir, .store = &restored, .columns = &target_columns, .settings = &setup, .engine = target_engine.interface(), .head = try fork_choice.getHead(&restored), .next_slot = 2 };
+    var resumed = Coordinator{ .allocator = allocator, .io = io, .dir = target_dir.dir, .store = &restored, .columns = &target_columns, .settings = &setup, .engine = target_engine.interface(), .head = try fork_choice.getHeadCached(&restored), .next_slot = 2 };
     try std.testing.expectEqual(@as(usize, 1), try resumed.step(try target_service.activePeer(), 1));
     try std.testing.expectEqual(source_sync.head, resumed.head);
     try std.testing.expectEqual(second.message.body.execution_payload.block_hash, target_engine.head.?);

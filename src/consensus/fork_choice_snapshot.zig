@@ -22,6 +22,12 @@ const zero_root: fulu.Root = [_]u8{0} ** 32;
 /// Payload bytes stream into the temporary file while a running digest is
 /// computed; only the fixed-size header is retained in memory.
 pub fn saveForkChoiceStore(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8, store: *const fork_choice.Store) !void {
+    const head = try fork_choice.getHead(store);
+    return saveForkChoiceStoreAt(allocator, io, dir, path, store, head);
+}
+
+/// Save a store whose head was already selected by the caller.
+pub fn saveForkChoiceStoreAt(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8, store: *const fork_choice.Store, head: fulu.Root) !void {
     var atomic = try dir.createFileAtomic(io, path, .{ .replace = true });
     defer atomic.deinit(io);
     const buffer = try allocator.alloc(u8, 1024 * 1024);
@@ -42,7 +48,6 @@ pub fn saveForkChoiceStore(allocator: std.mem.Allocator, io: std.Io, dir: std.Io
     try writer.checkpoint(store.unrealized_justified_checkpoint);
     try writer.checkpoint(store.unrealized_finalized_checkpoint);
     try writer.append(&store.proposer_boost_root);
-    const head = try fork_choice.getHead(store);
     try writer.append(&head);
 
     try writer.count(store.blocks.count());

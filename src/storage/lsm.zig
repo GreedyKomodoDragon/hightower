@@ -30,7 +30,13 @@ pub const Operation = union(enum) {
 pub const Row = struct { key: []u8, value: []u8 };
 const Location = union(enum) { memory: []u8, table: struct { id: u64, offset: u64 } };
 const Entry = struct { seq: u64, deleted: bool, location: Location };
-const Table = struct { id: u64, level: u8 };
+const Table = struct {
+    id: u64,
+    level: u8,
+    file: ?std.Io.File = null,
+    size: u64 = 0,
+};
+const TableWrite = struct { moves: std.ArrayList(Move), table: Table };
 const Move = struct { key: []const u8, offset: u64 };
 
 pub const Database = struct {
@@ -60,6 +66,7 @@ pub const Database = struct {
         var db = Database{ .allocator = allocator, .io = io, .dir = dir, .lock_file = lock_file, .wal = undefined, .wal_id = 1, .wal_end = wal_magic.len, .next_id = 2 };
         errdefer db.freeIndex();
         errdefer db.tables.deinit(allocator);
+        errdefer db.closeTables();
         const manifest = dir.readFileAlloc(io, "MANIFEST", allocator, .limited(1024 * 1024)) catch |err| switch (err) {
             error.FileNotFound => null,
             else => return err,
@@ -67,7 +74,7 @@ pub const Database = struct {
         if (manifest) |bytes| {
             defer allocator.free(bytes);
             try db.loadManifest(bytes);
-            for (db.tables.items) |table| try db.loadTable(table);
+            for (db.tables.items) |*table| try db.loadTable(table);
         } else {
             const name = try fileName(allocator, "wal", db.wal_id);
             defer allocator.free(name);
@@ -89,10 +96,23 @@ pub const Database = struct {
     /// Close files and free owned index keys and in-memory values.
     pub fn close(self: *Database) void {
         self.wal.close(self.io);
+        self.closeTables();
         self.lock_file.close(self.io);
         self.dir.close(self.io);
         self.freeIndex();
         self.tables.deinit(self.allocator);
+    }
+
+    /// Close immutable table handles before their files are deleted or the DB closes.
+    fn closeTables(self: *Database) void {
+        for (self.tables.items) |*table| self.closeTable(table);
+    }
+
+    fn closeTable(self: *Database, table: *Table) void {
+        if (table.file) |file| {
+            file.close(self.io);
+            table.file = null;
+        }
     }
 
     /// Return an owned value, or null for an absent or deleted key.
@@ -388,9 +408,10 @@ pub const Database = struct {
         if (self.mem_bytes == 0) return;
         const table_id = self.next_id;
         const wal_id = table_id + 1;
-        var moves = try self.writeTable(table_id, 0, null, false);
-        defer moves.deinit(self.allocator);
+        var table_write = try self.writeTable(table_id, 0, null, false);
+        defer table_write.moves.deinit(self.allocator);
         var installed = false;
+        errdefer if (!installed) table_write.table.file.?.close(self.io);
         const wal_name = try fileName(self.allocator, "wal", wal_id);
         defer self.allocator.free(wal_name);
         const new_wal = try self.dir.createFile(self.io, wal_name, .{ .read = true, .exclusive = true });
@@ -402,7 +423,7 @@ pub const Database = struct {
         try new_wal.writeStreamingAll(self.io, wal_magic);
         try new_wal.sync(self.io);
         try self.syncDir();
-        try self.tables.append(self.allocator, .{ .id = table_id, .level = 0 });
+        try self.tables.append(self.allocator, table_write.table);
         errdefer {
             if (!installed) self.tables.items.len -= 1;
         }
@@ -417,7 +438,7 @@ pub const Database = struct {
         self.wal_end = wal_magic.len;
         self.next_id = wal_id + 1;
         installed = true;
-        for (moves.items) |move| {
+        for (table_write.moves.items) |move| {
             const entry = self.index.getPtr(move.key).?;
             self.allocator.free(entry.location.memory);
             entry.location = .{ .table = .{ .id = table_id, .offset = move.offset } };
@@ -446,8 +467,10 @@ pub const Database = struct {
                 continue;
             }
             const new_id = self.next_id;
-            var moves = try self.writeTable(new_id, level + 1, &selected, false);
-            defer moves.deinit(self.allocator);
+            var table_write = try self.writeTable(new_id, level + 1, &selected, false);
+            defer table_write.moves.deinit(self.allocator);
+            var new_table_installed = false;
+            errdefer if (!new_table_installed) table_write.table.file.?.close(self.io);
             var replacement: std.ArrayList(Table) = .empty;
             defer replacement.deinit(self.allocator);
             for (self.tables.items) |table| {
@@ -458,22 +481,30 @@ pub const Database = struct {
                 };
                 if (!remove) try replacement.append(self.allocator, table);
             }
-            if (moves.items.len != 0) try replacement.append(self.allocator, .{ .id = new_id, .level = level + 1 });
+            if (table_write.moves.items.len != 0) try replacement.append(self.allocator, table_write.table);
             self.saveManifest(self.wal_id, new_id + 1, replacement.items) catch |err| {
                 self.poisoned = true;
                 return err;
             };
+            new_table_installed = true;
+            for (self.tables.items) |*table| {
+                for (selected) |id| if (table.id == id) {
+                    self.closeTable(table);
+                    break;
+                };
+            }
             self.tables.deinit(self.allocator);
             self.tables = replacement;
             replacement = .empty;
             self.next_id = new_id + 1;
-            for (moves.items) |move| self.index.getPtr(move.key).?.location = .{ .table = .{ .id = new_id, .offset = move.offset } };
+            for (table_write.moves.items) |move| self.index.getPtr(move.key).?.location = .{ .table = .{ .id = new_id, .offset = move.offset } };
             for (selected) |id| {
                 const name = try fileName(self.allocator, "sst", id);
                 defer self.allocator.free(name);
                 self.dir.deleteFile(self.io, name) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
             }
-            if (moves.items.len == 0) {
+            if (table_write.moves.items.len == 0) {
+                table_write.table.file.?.close(self.io);
                 const name = try fileName(self.allocator, "sst", new_id);
                 defer self.allocator.free(name);
                 self.dir.deleteFile(self.io, name) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
@@ -485,8 +516,10 @@ pub const Database = struct {
     /// Install one table of live keys before deleting old tables and tombstones.
     fn reclaimLocked(self: *Database) !void {
         const new_id = self.next_id;
-        var moves = try self.writeTable(new_id, 0, null, true);
-        defer moves.deinit(self.allocator);
+        var table_write = try self.writeTable(new_id, 0, null, true);
+        defer table_write.moves.deinit(self.allocator);
+        var new_table_installed = false;
+        errdefer if (!new_table_installed) table_write.table.file.?.close(self.io);
         var dead: std.ArrayList([]const u8) = .empty;
         defer dead.deinit(self.allocator);
         var manifest_attempted = false;
@@ -502,18 +535,20 @@ pub const Database = struct {
             try dead.append(self.allocator, item.key_ptr.*);
         };
         try self.tables.ensureTotalCapacity(self.allocator, 1);
-        const replacement = [_]Table{.{ .id = new_id, .level = 0 }};
+        const replacement = [_]Table{table_write.table};
         manifest_attempted = true;
         self.saveManifest(self.wal_id, new_id + 1, &replacement) catch |err| {
             self.poisoned = true;
             return err;
         };
-        for (moves.items) |move| self.index.getPtr(move.key).?.location = .{ .table = .{ .id = new_id, .offset = move.offset } };
+        new_table_installed = true;
+        for (table_write.moves.items) |move| self.index.getPtr(move.key).?.location = .{ .table = .{ .id = new_id, .offset = move.offset } };
         for (dead.items) |key| {
             const removed = self.index.fetchRemove(key).?;
             self.allocator.free(removed.key);
         }
-        for (self.tables.items) |table| {
+        for (self.tables.items) |*table| {
+            self.closeTable(table);
             const name = fileName(self.allocator, "sst", table.id) catch continue;
             defer self.allocator.free(name);
             self.dir.deleteFile(self.io, name) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
@@ -524,8 +559,7 @@ pub const Database = struct {
     }
 
     /// Serialize selected current entries in key order into one immutable SST.
-    fn writeTable(self: *Database, id: u64, level: u8, sources: ?*const [4]u64, live_only: bool) !std.ArrayList(Move) {
-        _ = level;
+    fn writeTable(self: *Database, id: u64, level: u8, sources: ?*const [4]u64, live_only: bool) !TableWrite {
         var keys: std.ArrayList([]const u8) = .empty;
         defer keys.deinit(self.allocator);
         var iter = self.index.iterator();
@@ -543,8 +577,10 @@ pub const Database = struct {
         defer self.allocator.free(name);
         var file = try self.dir.createFile(self.io, name, .{ .read = true, .exclusive = true });
         errdefer self.dir.deleteFile(self.io, name) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
-        defer file.close(self.io);
-        try file.writeStreamingAll(self.io, table_magic);
+        errdefer file.close(self.io);
+        var write_buffer: [64 * 1024]u8 = undefined;
+        var writer = file.writer(self.io, &write_buffer);
+        try writer.interface.writeAll(table_magic);
         var offset: u64 = table_magic.len;
         var moves: std.ArrayList(Move) = .empty;
         errdefer moves.deinit(self.allocator);
@@ -569,23 +605,24 @@ pub const Database = struct {
             hash.update(key);
             hash.update(value);
             hash.final(header[15..47]);
-            try file.writeStreamingAll(self.io, &header);
-            try file.writeStreamingAll(self.io, key);
-            try file.writeStreamingAll(self.io, value);
+            try writer.interface.writeAll(&header);
+            try writer.interface.writeAll(key);
+            try writer.interface.writeAll(value);
             try moves.append(self.allocator, .{ .key = key, .offset = offset });
             offset += record_header + key.len + value.len;
         }
+        try writer.interface.flush();
         try file.sync(self.io);
         try self.syncDir();
-        return moves;
+        return .{ .moves = moves, .table = .{ .id = id, .level = level, .file = file, .size = offset } };
     }
 
     /// Rebuild the newest-key index from one checksummed table.
-    fn loadTable(self: *Database, table: Table) !void {
+    fn loadTable(self: *Database, table: *Table) !void {
         const name = try fileName(self.allocator, "sst", table.id);
         defer self.allocator.free(name);
         var file = try self.dir.openFile(self.io, name, .{});
-        defer file.close(self.io);
+        errdefer file.close(self.io);
         const size = (try file.stat(self.io)).size;
         var magic: [8]u8 = undefined;
         if (try file.readPositionalAll(self.io, &magic, 0) != 8 or !std.mem.eql(u8, &magic, table_magic)) return error.CorruptTable;
@@ -602,15 +639,18 @@ pub const Database = struct {
             try self.setEntry(record.key, .{ .seq = record.seq, .deleted = record.deleted, .location = .{ .table = .{ .id = table.id, .offset = offset } } });
             offset = record.next;
         }
+        table.file = file;
+        table.size = size;
     }
 
     /// Read and verify one SST record by file ID and offset.
     fn readTableRecord(self: *Database, allocator: std.mem.Allocator, id: u64, offset: u64) !Record {
-        const name = try fileName(allocator, "sst", id);
-        defer allocator.free(name);
-        var file = try self.dir.openFile(self.io, name, .{});
-        defer file.close(self.io);
-        return readRecord(allocator, self.io, file, offset, (try file.stat(self.io)).size);
+        for (self.tables.items) |table| {
+            if (table.id != id) continue;
+            const file = table.file orelse return error.CorruptTable;
+            return readRecord(allocator, self.io, file, offset, table.size);
+        }
+        return error.CorruptTable;
     }
 
     /// Parse the versioned manifest without trusting lengths or checksums.

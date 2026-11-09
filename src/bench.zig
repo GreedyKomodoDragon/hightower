@@ -176,11 +176,11 @@ fn buildSyntheticStore(allocator: std.mem.Allocator, state: *const fulu.BeaconSt
 }
 
 const HeadContext = struct {
-    store: *const consensus.ForkChoiceStore,
+    store: *consensus.ForkChoiceStore,
 
     /// Select the head from a store with one fork and four imported blocks.
     fn run(self: @This()) !void {
-        const head = try consensus.getForkChoiceHead(self.store);
+        const head = try consensus.getForkChoiceHeadCached(self.store);
         std.mem.doNotOptimizeAway(head);
     }
 };
