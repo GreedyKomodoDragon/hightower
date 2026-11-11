@@ -141,6 +141,7 @@ test "execution JSON-RPC dispatches chain and block methods with bounded input" 
         .{ .method = "eth_blockNumber", .params = &.{} },
         .{ .method = "eth_getBlockByNumber", .params = &.{ .{ .string = "latest" }, .{ .bool = false } } },
         .{ .method = "eth_getBalance", .params = &.{ .{ .string = zero_address }, .{ .string = "latest" } } },
+        .{ .method = "eth_getCode", .params = &.{ .{ .string = zero_address }, .{ .string = "latest" } } },
         .{ .method = "eth_call", .params = &.{ call, .{ .string = "latest" } } },
         .{ .method = "eth_estimateGas", .params = &.{ call, .{ .string = "latest" } } },
         .{ .method = "eth_getTransactionReceipt", .params = &.{.{ .string = "0x0000000000000000000000000000000000000000000000000000000000000000" }} },
@@ -156,6 +157,68 @@ test "execution JSON-RPC dispatches chain and block methods with bounded input" 
     }
     const serve_fn: *const fn (*execution.rpc.Server, std.mem.Allocator, std.Io, std.Io.net.Stream) anyerror!void = execution.rpc.Server.serveConnection;
     _ = serve_fn;
+}
+
+test "execution JSON-RPC eth_getCode returns spec fixture code by block tag" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const fixture_json = try std.json.parseFromSlice(std.json.Value, a, @embedFile("fixtures/rpc_get_code.json"), .{});
+    const fixture = fixture_json.value.object;
+    const spec_json = try std.json.parseFromSlice(std.json.Value, a, @embedFile("fixtures/mulmod.json"), .{});
+    const spec_case = spec_json.value.object.get(fixture.get("spec_case").?.string).?.object;
+    const pre = spec_case.get("pre").?.object;
+    var world = execution.state.State.init(a);
+    defer world.deinit();
+    var pre_it = pre.iterator();
+    while (pre_it.next()) |entry| {
+        const account = entry.value_ptr.*;
+        const code_hex = account.object.get("code").?.string;
+        var address: execution.Address = undefined;
+        _ = try std.fmt.hexToBytes(&address, entry.key_ptr.*[2..]);
+        const code = try a.alloc(u8, (code_hex.len - 2) / 2);
+        _ = try std.fmt.hexToBytes(code, code_hex[2..]);
+        _ = try world.setCode(address, code);
+    }
+    var header = std.mem.zeroes(execution.Header);
+    header.state_root = try world.stateRoot();
+    header.gas_limit = 30_000_000;
+    header.base_fee_per_gas = 1;
+    var chain = try execution.chain.Chain.init(a, 1, .fulu, header, &world);
+    defer chain.deinit();
+    var pool = execution.pool.Pool.init(a, .{});
+    defer pool.deinit();
+    var server: execution.rpc.Server = .{ .chain = &chain, .pool = &pool, .world = &world };
+    var id: usize = 1;
+    const block_tags = fixture.get("block_tags").?.array.items;
+    var query_it = pre.iterator();
+    while (query_it.next()) |entry| {
+        const account = entry.value_ptr.*;
+        const address_hex = entry.key_ptr.*;
+        const expected = account.object.get("code").?.string;
+        for (block_tags) |tag| {
+            const reply = try server.dispatch(a, try rpcRequest(a, id, "eth_getCode", &.{ .{ .string = address_hex }, tag }));
+            id += 1;
+            var parsed = try std.json.parseFromSlice(std.json.Value, a, reply, .{});
+            defer parsed.deinit();
+            try std.testing.expectEqualStrings(expected, parsed.value.object.get("result").?.string);
+            try std.testing.expect(!parsed.value.object.contains("error"));
+        }
+    }
+    for (fixture.get("cases").?.array.items) |test_case| {
+        const case_object = test_case.object;
+        const reply = try server.dispatch(a, try rpcRequest(a, id, "eth_getCode", case_object.get("params").?.array.items));
+        id += 1;
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, reply, .{});
+        defer parsed.deinit();
+        if (case_object.get("result")) |expected| {
+            try std.testing.expectEqualStrings(expected.string, parsed.value.object.get("result").?.string);
+            try std.testing.expect(!parsed.value.object.contains("error"));
+        } else {
+            try std.testing.expectEqual(case_object.get("error").?.integer, parsed.value.object.get("error").?.object.get("code").?.integer);
+            try std.testing.expect(!parsed.value.object.contains("result"));
+        }
+    }
 }
 
 test "pool budgets blobs, preserves nonce gaps, selects prefixes, and enforces replacement" {

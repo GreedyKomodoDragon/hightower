@@ -18,6 +18,20 @@ const max_batch = 20;
 const max_log_blocks = 1000;
 const max_log_results = 10_000;
 
+const Method = enum {
+    eth_chainId,
+    eth_blockNumber,
+    eth_getBlockByHash,
+    eth_getBlockByNumber,
+    eth_getBalance,
+    eth_getCode,
+    eth_call,
+    eth_estimateGas,
+    eth_sendRawTransaction,
+    eth_getTransactionReceipt,
+    eth_getLogs,
+};
+
 /// Owns no chain data; callers keep these dependencies alive while serving.
 pub const Server = struct {
     chain: *chain_mod.Chain,
@@ -117,66 +131,78 @@ pub const Server = struct {
 
     /// Resolves the methods in FULU-057 against canonical state and the pool.
     fn method(self: *Server, a: std.mem.Allocator, name: []const u8, params: []const Value) !Value {
-        if (std.mem.eql(u8, name, "eth_chainId")) {
-            try noParams(params);
-            return quantity(a, self.chain.chain_id);
-        }
-        if (std.mem.eql(u8, name, "eth_blockNumber")) {
-            try noParams(params);
-            return quantity(a, self.chain.latest().header.number);
-        }
-        if (std.mem.eql(u8, name, "eth_getBlockByHash") or std.mem.eql(u8, name, "eth_getBlockByNumber")) {
-            if (params.len != 2 or params[1] != .bool) return error.InvalidParams;
-            const record = if (std.mem.eql(u8, name, "eth_getBlockByHash")) self.chain.byHash(try parseHash(try asString(params[0]))) else try self.block(try asString(params[0]));
-            return if (record) |found| try self.blockJson(a, found, params[1].bool) else .null;
-        }
-        if (std.mem.eql(u8, name, "eth_getBalance")) {
-            if (params.len < 1 or params.len > 2) return error.InvalidParams;
-            const address = try parseAddress(try asString(params[0]));
-            const record = if (params.len == 2) (try self.block(try asString(params[1]))) orelse return error.UnknownBlock else self.chain.latest();
-            return quantity(a, record.world.getBalance(address));
-        }
-        if (std.mem.eql(u8, name, "eth_call") or std.mem.eql(u8, name, "eth_estimateGas")) {
-            if (params.len < 1 or params.len > 2 or params[0] != .object) return error.InvalidParams;
-            const record = if (params.len == 2) (try self.block(try asString(params[1]))) orelse return error.UnknownBlock else self.chain.latest();
-            const call = try parseCall(a, params[0], record.header.gas_limit);
-            if (std.mem.eql(u8, name, "eth_call")) {
-                const output = try self.runCall(a, record, call, call.gas);
-                return string(try hex(a, output));
-            }
-            const intrinsic = try callIntrinsic(call.data);
-            var lo: u64 = intrinsic;
-            var hi: u64 = call.gas;
-            if (lo > hi) return error.IntrinsicGasTooLow;
-            _ = try self.runCall(a, record, call, hi);
-            while (lo < hi) {
-                const mid = lo + (hi - lo) / 2;
-                if (self.runCall(a, record, call, mid)) |_| hi = mid else |err| switch (err) {
-                    error.OutOfGas, error.IntrinsicGasTooLow => lo = mid + 1,
-                    else => return err,
+        const method_name = std.meta.stringToEnum(Method, name) orelse return error.MethodNotFound;
+        switch (method_name) {
+            .eth_chainId => {
+                try noParams(params);
+                return quantity(a, self.chain.chain_id);
+            },
+            .eth_blockNumber => {
+                try noParams(params);
+                return quantity(a, self.chain.latest().header.number);
+            },
+            .eth_getBlockByHash, .eth_getBlockByNumber => {
+                if (params.len != 2 or params[1] != .bool) return error.InvalidParams;
+                const record = switch (method_name) {
+                    .eth_getBlockByHash => self.chain.byHash(try parseHash(try asString(params[0]))),
+                    .eth_getBlockByNumber => try self.block(try asString(params[0])),
+                    else => unreachable,
+                };
+                return if (record) |found| try self.blockJson(a, found, params[1].bool) else .null;
+            },
+            .eth_getBalance => {
+                if (params.len < 1 or params.len > 2) return error.InvalidParams;
+                const address = try parseAddress(try asString(params[0]));
+                const record = if (params.len == 2) (try self.block(try asString(params[1]))) orelse return error.UnknownBlock else self.chain.latest();
+                return quantity(a, record.world.getBalance(address));
+            },
+            .eth_getCode => {
+                if (params.len < 1 or params.len > 2) return error.InvalidParams;
+                const address = try parseAddress(try asString(params[0]));
+                const record = if (params.len == 2) (try self.block(try asString(params[1]))) orelse return error.UnknownBlock else self.chain.latest();
+                return string(try hex(a, record.world.getCode(address)));
+            },
+            .eth_call, .eth_estimateGas => {
+                if (params.len < 1 or params.len > 2 or params[0] != .object) return error.InvalidParams;
+                const record = if (params.len == 2) (try self.block(try asString(params[1]))) orelse return error.UnknownBlock else self.chain.latest();
+                const call = try parseCall(a, params[0], record.header.gas_limit);
+                if (method_name == .eth_call) {
+                    const output = try self.runCall(a, record, call, call.gas);
+                    return string(try hex(a, output));
                 }
-            }
-            return quantity(a, lo);
+                const intrinsic = try callIntrinsic(call.data);
+                var lo: u64 = intrinsic;
+                var hi: u64 = call.gas;
+                if (lo > hi) return error.IntrinsicGasTooLow;
+                _ = try self.runCall(a, record, call, hi);
+                while (lo < hi) {
+                    const mid = lo + (hi - lo) / 2;
+                    if (self.runCall(a, record, call, mid)) |_| hi = mid else |err| switch (err) {
+                        error.OutOfGas, error.IntrinsicGasTooLow => lo = mid + 1,
+                        else => return err,
+                    }
+                }
+                return quantity(a, lo);
+            },
+            .eth_sendRawTransaction => {
+                if (params.len != 1) return error.InvalidParams;
+                const raw = try parseHex(a, try asString(params[0]));
+                const header = self.chain.latest().header;
+                const tx_context = self.context(header);
+                const hash = try self.pool.admit(self.world, tx_context, self.settings, raw);
+                return string(try hex(a, &hash));
+            },
+            .eth_getTransactionReceipt => {
+                if (params.len != 1) return error.InvalidParams;
+                const hash = try parseHash(try asString(params[0]));
+                const found = self.chain.transaction(hash) orelse return .null;
+                return self.receiptJson(a, found.record, found.index);
+            },
+            .eth_getLogs => {
+                if (params.len != 1 or params[0] != .object) return error.InvalidParams;
+                return self.logsJson(a, params[0]);
+            },
         }
-        if (std.mem.eql(u8, name, "eth_sendRawTransaction")) {
-            if (params.len != 1) return error.InvalidParams;
-            const raw = try parseHex(a, try asString(params[0]));
-            const header = self.chain.latest().header;
-            const tx_context = self.context(header);
-            const hash = try self.pool.admit(self.world, tx_context, self.settings, raw);
-            return string(try hex(a, &hash));
-        }
-        if (std.mem.eql(u8, name, "eth_getTransactionReceipt")) {
-            if (params.len != 1) return error.InvalidParams;
-            const hash = try parseHash(try asString(params[0]));
-            const found = self.chain.transaction(hash) orelse return .null;
-            return self.receiptJson(a, found.record, found.index);
-        }
-        if (std.mem.eql(u8, name, "eth_getLogs")) {
-            if (params.len != 1 or params[0] != .object) return error.InvalidParams;
-            return self.logsJson(a, params[0]);
-        }
-        return error.MethodNotFound;
     }
 
     /// Resolves latest, earliest, pending, or a canonical hexadecimal block number.

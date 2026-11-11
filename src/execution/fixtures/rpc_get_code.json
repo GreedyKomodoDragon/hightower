@@ -1,0 +1,40 @@
+{
+  "name": "eth_getCode",
+  "spec_source": "src/execution/fixtures/mulmod.json",
+  "spec_case": "tests/static/state_tests/VMTests/vmArithmeticTest/mulmodFiller.yml::mulmod[fork_Cancun-state_test-mm_0_1_0]",
+  "block_tags": ["latest", "pending", "earliest", "0x0"],
+  "cases": [
+    {
+      "params": ["0x0000000000000000000000000000000000001000", "0x999"],
+      "error": -32001
+    },
+    {
+      "params": ["0x0000000000000000000000000000000000001000", "latestish"],
+      "error": -32602
+    },
+    {
+      "params": ["0x0000000000000000000000000000000000001000", "0x00"],
+      "error": -32602
+    },
+    {
+      "params": ["0x0000000000000000000000000000000000001000", ""],
+      "error": -32602
+    },
+    {
+      "params": ["bad-address", "latest"],
+      "error": -32602
+    },
+    {
+      "params": ["0x44", "latest"],
+      "error": -32602
+    },
+    {
+      "params": [],
+      "error": -32602
+    },
+    {
+      "params": ["0x0000000000000000000000000000000000001000", "latest", "extra"],
+      "error": -32602
+    }
+  ]
+}
