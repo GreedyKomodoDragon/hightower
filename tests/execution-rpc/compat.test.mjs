@@ -7,6 +7,7 @@ const provider = new JsonRpcProvider('http://127.0.0.1:18545/', { chainId: 1, na
 const wallet = new Wallet('0x' + '00'.repeat(31) + '01');
 const sender = wallet.address;
 const recipient = '0x2222222222222222222222222222222222222222';
+const recipientCode = `0x602a6000527f${'11'.repeat(32)}60206000a100`;
 const topic = `0x${'11'.repeat(32)}`;
 let nextId = 1;
 async function rpc(method, params = []) {
@@ -39,6 +40,11 @@ assert.equal((await rpc('eth_getLogs', [{ fromBlock: '0x1', toBlock: '0x1', topi
 assert.equal((await rpc('eth_getLogs', [{ fromBlock: '0x1', toBlock: '0x1', topics: [`0x${'ff'.repeat(32)}`] }])).result.length, 0);
 assert.equal((await rpc('eth_getLogs', [{ fromBlock: '0x1', toBlock: '0x1', topics: [null, null] }])).result.length, 0);
 assert.equal(await provider.getBalance(sender) < 1_000_000_000_000_000_000n, true);
+assert.equal(await provider.getCode(recipient), recipientCode);
+assert.equal(await provider.getCode(sender), '0x');
+assert.equal(await provider.getCode(recipient, 0), recipientCode);
+assert.equal((await rpc('eth_getCode', [recipient, '0x999'])).error.code, -32001);
+assert.equal((await rpc('eth_getCode', ['bad-address', 'latest'])).error.code, -32602);
 assert.equal(await provider.call({ to: recipient }), '0x');
 assert.equal(await provider.estimateGas({ to: recipient }) > 21_000n, true);
 assert.equal((await rpc('eth_call', [{ to: `0x${'55'.repeat(20)}` }, 'latest'])).error.code, 3);

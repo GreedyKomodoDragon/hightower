@@ -1,0 +1,9 @@
+{
+  "name": "eth_getCode",
+  "address": "0x4444444444444444444444444444444444444444",
+  "code": "0x602a60005260206000f3",
+  "missing_address": "0x0000000000000000000000000000000000000000",
+  "block_tags": ["latest", "pending", "earliest", "0x0"],
+  "unknown_block": "0x999",
+  "malformed_address": "bad-address"
+}
