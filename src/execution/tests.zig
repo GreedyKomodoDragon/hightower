@@ -159,21 +159,27 @@ test "execution JSON-RPC dispatches chain and block methods with bounded input" 
     _ = serve_fn;
 }
 
-test "execution JSON-RPC eth_getCode returns fixture code by block tag" {
+test "execution JSON-RPC eth_getCode returns spec fixture code by block tag" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     const fixture_json = try std.json.parseFromSlice(std.json.Value, a, @embedFile("fixtures/rpc_get_code.json"), .{});
     const fixture = fixture_json.value.object;
-    const address_hex = fixture.get("address").?.string;
-    const code_hex = fixture.get("code").?.string;
-    var address: execution.Address = undefined;
-    _ = try std.fmt.hexToBytes(&address, address_hex[2..]);
-    const code = try a.alloc(u8, (code_hex.len - 2) / 2);
-    _ = try std.fmt.hexToBytes(code, code_hex[2..]);
+    const spec_json = try std.json.parseFromSlice(std.json.Value, a, @embedFile("fixtures/mulmod.json"), .{});
+    const spec_case = spec_json.value.object.get(fixture.get("spec_case").?.string).?.object;
+    const pre = spec_case.get("pre").?.object;
     var world = execution.state.State.init(a);
     defer world.deinit();
-    _ = try world.setCode(address, code);
+    var pre_it = pre.iterator();
+    while (pre_it.next()) |entry| {
+        const account = entry.value_ptr.*;
+        const code_hex = account.object.get("code").?.string;
+        var address: execution.Address = undefined;
+        _ = try std.fmt.hexToBytes(&address, entry.key_ptr.*[2..]);
+        const code = try a.alloc(u8, (code_hex.len - 2) / 2);
+        _ = try std.fmt.hexToBytes(code, code_hex[2..]);
+        _ = try world.setCode(address, code);
+    }
     var header = std.mem.zeroes(execution.Header);
     header.state_root = try world.stateRoot();
     header.gas_limit = 30_000_000;
@@ -183,24 +189,36 @@ test "execution JSON-RPC eth_getCode returns fixture code by block tag" {
     var pool = execution.pool.Pool.init(a, .{});
     defer pool.deinit();
     var server: execution.rpc.Server = .{ .chain = &chain, .pool = &pool, .world = &world };
-    for (fixture.get("block_tags").?.array.items, 1..) |tag, id| {
-        const reply = try server.dispatch(a, try rpcRequest(a, id, "eth_getCode", &.{ .{ .string = address_hex }, tag }));
+    var id: usize = 1;
+    const block_tags = fixture.get("block_tags").?.array.items;
+    var query_it = pre.iterator();
+    while (query_it.next()) |entry| {
+        const account = entry.value_ptr.*;
+        const address_hex = entry.key_ptr.*;
+        const expected = account.object.get("code").?.string;
+        for (block_tags) |tag| {
+            const reply = try server.dispatch(a, try rpcRequest(a, id, "eth_getCode", &.{ .{ .string = address_hex }, tag }));
+            id += 1;
+            var parsed = try std.json.parseFromSlice(std.json.Value, a, reply, .{});
+            defer parsed.deinit();
+            try std.testing.expectEqualStrings(expected, parsed.value.object.get("result").?.string);
+            try std.testing.expect(!parsed.value.object.contains("error"));
+        }
+    }
+    for (fixture.get("cases").?.array.items) |test_case| {
+        const case_object = test_case.object;
+        const reply = try server.dispatch(a, try rpcRequest(a, id, "eth_getCode", case_object.get("params").?.array.items));
+        id += 1;
         var parsed = try std.json.parseFromSlice(std.json.Value, a, reply, .{});
         defer parsed.deinit();
-        try std.testing.expectEqualStrings(code_hex, parsed.value.object.get("result").?.string);
+        if (case_object.get("result")) |expected| {
+            try std.testing.expectEqualStrings(expected.string, parsed.value.object.get("result").?.string);
+            try std.testing.expect(!parsed.value.object.contains("error"));
+        } else {
+            try std.testing.expectEqual(case_object.get("error").?.integer, parsed.value.object.get("error").?.object.get("code").?.integer);
+            try std.testing.expect(!parsed.value.object.contains("result"));
+        }
     }
-    const missing = try server.dispatch(a, try rpcRequest(a, 10, "eth_getCode", &.{ .{ .string = fixture.get("missing_address").?.string }, .{ .string = "latest" } }));
-    var missing_parsed = try std.json.parseFromSlice(std.json.Value, a, missing, .{});
-    defer missing_parsed.deinit();
-    try std.testing.expectEqualStrings("0x", missing_parsed.value.object.get("result").?.string);
-    const unknown = try server.dispatch(a, try rpcRequest(a, 11, "eth_getCode", &.{ .{ .string = address_hex }, .{ .string = fixture.get("unknown_block").?.string } }));
-    var unknown_parsed = try std.json.parseFromSlice(std.json.Value, a, unknown, .{});
-    defer unknown_parsed.deinit();
-    try std.testing.expectEqual(@as(i64, -32001), unknown_parsed.value.object.get("error").?.object.get("code").?.integer);
-    const malformed = try server.dispatch(a, try rpcRequest(a, 12, "eth_getCode", &.{ .{ .string = fixture.get("malformed_address").?.string }, .{ .string = "latest" } }));
-    var malformed_parsed = try std.json.parseFromSlice(std.json.Value, a, malformed, .{});
-    defer malformed_parsed.deinit();
-    try std.testing.expectEqual(@as(i64, -32602), malformed_parsed.value.object.get("error").?.object.get("code").?.integer);
 }
 
 test "pool budgets blobs, preserves nonce gaps, selects prefixes, and enforces replacement" {
