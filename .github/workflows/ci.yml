@@ -35,6 +35,9 @@ jobs:
       - run: python3 scripts/test_runtime_network.py
       - run: zig build test
       - run: zig build test-transition
+      - run: zig build test-execution
+      - run: zig build test-execution -Doptimize=ReleaseSafe
+      - run: zig build test-token
       - run: bash scripts/test_engine_local.sh
       - run: zig build api-test-server
       - uses: actions/setup-node@v4

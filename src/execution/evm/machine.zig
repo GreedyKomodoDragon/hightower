@@ -169,6 +169,8 @@ pub const Machine = struct {
     warm_accounts: std.ArrayList(state.Address) = .empty,
     original: std.ArrayList(Original) = .empty,
     logs: std.ArrayList(Log) = .empty,
+    created: std.ArrayList(state.Address) = .empty,
+    destroyed: std.ArrayList(state.Address) = .empty,
     environment: ?Environment = null,
     refund: i128 = 0,
 
@@ -216,6 +218,8 @@ pub const Machine = struct {
         self.original.deinit(self.allocator);
         self.clearLogs(0);
         self.logs.deinit(self.allocator);
+        self.created.deinit(self.allocator);
+        self.destroyed.deinit(self.allocator);
     }
     /// Executes one frame, returning owned bytes; only allocator failures escape.
     pub fn run(self: *Machine, input: Input) anyerror!Result {
@@ -226,6 +230,8 @@ pub const Machine = struct {
         defer self.allocator.free(saved_warm);
         const saved_accounts = self.warm_accounts.items.len;
         const saved_logs = self.logs.items.len;
+        const saved_created = self.created.items.len;
+        const saved_destroyed = self.destroyed.items.len;
         const snap = try self.world.snapshot();
         const saved_refund = self.refund;
         var frame = Frame{ .machine = self, .input = input, .gas = input.gas };
@@ -234,6 +240,8 @@ pub const Machine = struct {
         const outcome = frame.execute() catch |err| {
             try self.world.revert(snap);
             try self.restore(saved_transient, saved_warm, saved_accounts, saved_logs, saved_refund);
+            self.created.shrinkRetainingCapacity(saved_created);
+            self.destroyed.shrinkRetainingCapacity(saved_destroyed);
             if (err == error.OutOfMemory) return err;
             return .{ .status = .{ .fault = switch (err) {
                 error.OutOfGas => .out_of_gas,
@@ -253,9 +261,61 @@ pub const Machine = struct {
             else => {
                 try self.world.revert(snap);
                 try self.restore(saved_transient, saved_warm, saved_accounts, saved_logs, saved_refund);
+                self.created.shrinkRetainingCapacity(saved_created);
+                self.destroyed.shrinkRetainingCapacity(saved_destroyed);
             },
         }
         return outcome;
+    }
+    /// Runs initcode and installs its returned code, rolling back failed creation.
+    pub fn create(self: *Machine, creator: state.Address, address: state.Address, value: u256, initcode: []const u8, gas: u64, depth: u16) !Result {
+        const snap = try self.world.snapshot();
+        var open = true;
+        errdefer if (open) self.world.revert(snap) catch |err| std.log.err("creation rollback failed: {s}", .{@errorName(err)});
+        const existing = try self.world.getAccount(address);
+        if (existing != null and (existing.?.nonce != 0 or self.world.getCode(address).len != 0 or !std.mem.eql(u8, &existing.?.storage_root, &state.EMPTY_STORAGE_ROOT))) {
+            try self.world.revert(snap);
+            open = false;
+            return .{ .status = .{ .fault = .invalid_opcode }, .gas_remaining = 0, .output = try self.allocator.dupe(u8, "") };
+        }
+        const created_len = self.created.items.len;
+        const destroyed_len = self.destroyed.items.len;
+        const logs_len = self.logs.items.len;
+        const saved_refund = self.refund;
+        try self.created.append(self.allocator, address);
+        try self.world.setNonce(address, 1);
+        if (value != 0) {
+            try self.world.setBalance(creator, self.world.getBalance(creator) - value);
+            try self.world.setBalance(address, std.math.add(u256, self.world.getBalance(address), value) catch return error.BalanceOverflow);
+        }
+        var result = try self.run(.{ .code = initcode, .gas = gas, .caller = creator, .callee = address, .value = value, .depth = depth });
+        if (result.status == .success) {
+            const fork = if (self.environment) |env| env.fork else Fork.fulu;
+            const invalid_code = result.output.len > 24_576 or (result.output.len != 0 and result.output[0] == 0xef and @intFromEnum(fork) >= @intFromEnum(Fork.london));
+            const deposit_cost = std.math.mul(u64, @intCast(result.output.len), 200) catch std.math.maxInt(u64);
+            if (invalid_code or deposit_cost > result.gas_remaining) {
+                result.status = .{ .fault = .out_of_gas };
+                result.gas_remaining = 0;
+            } else {
+                _ = try self.world.setCode(address, result.output);
+                result.gas_remaining -= deposit_cost;
+            }
+        }
+        if (result.status == .success) {
+            try self.world.commit(snap);
+        } else {
+            try self.world.revert(snap);
+            self.created.shrinkRetainingCapacity(created_len);
+            self.destroyed.shrinkRetainingCapacity(destroyed_len);
+            self.clearLogs(logs_len);
+            self.refund = saved_refund;
+        }
+        open = false;
+        return result;
+    }
+    /// Deletes contracts scheduled for removal after a successful transaction.
+    pub fn finalizeDestructions(self: *Machine) !void {
+        for (self.destroyed.items) |address| try self.world.deleteAccount(address);
     }
     /// Restores transaction-local changes made within a reverted frame.
     fn restore(self: *Machine, transient: []const Slot, warm: []const Key, accounts: usize, logs: usize, refund: i128) !void {
@@ -574,6 +634,71 @@ const Frame = struct {
         errdefer self.machine.allocator.free(data);
         try self.machine.logs.append(self.machine.allocator, .{ .address = self.input.callee, .topics = topics, .topic_count = topics_count, .data = data });
     }
+    /// Executes CREATE or CREATE2 after charging memory, initcode, and child gas.
+    fn create(self: *Frame, op: u8) !void {
+        if (self.input.is_static) return error.WriteProtection;
+        const value = try self.pop();
+        const offset = try self.pop();
+        const length = try self.pop();
+        const salt = if (op == Op.CREATE2) try self.pop() else 0;
+        const fork = if (self.machine.environment) |env| env.fork else Fork.fulu;
+        if (@intFromEnum(fork) >= @intFromEnum(Fork.shanghai) and length > 49_152) return error.OutOfGas;
+        if (length > std.math.maxInt(u64) - 31) return error.OutOfGas;
+        const words: u64 = @intCast((length + 31) / 32);
+        if (words > (std.math.maxInt(u64) - 32_000) / 8) return error.OutOfGas;
+        try self.charge(32_000 + (if (@intFromEnum(fork) >= @intFromEnum(Fork.shanghai)) words * 2 else 0) + (if (op == Op.CREATE2) words * 6 else 0));
+        const start = try self.expand(offset, length);
+        self.return_data.clearRetainingCapacity();
+        if (self.input.depth == 1023 or self.machine.world.getBalance(self.input.callee) < value) {
+            try self.push(0);
+            return;
+        }
+        const nonce = self.machine.world.getNonce(self.input.callee);
+        if (nonce == std.math.maxInt(u64)) return error.OutOfGas;
+        const initcode = self.memory.items[start..][0..@intCast(length)];
+        const address = if (op == Op.CREATE2) state.create2Address(self.input.callee, salt, initcode) else state.createAddress(self.input.callee, nonce);
+        try self.machine.world.setNonce(self.input.callee, nonce + 1);
+        _ = try self.machine.touchAccount(address);
+        const child_gas = self.gas - self.gas / 64;
+        try self.charge(child_gas);
+        var result = try self.machine.create(self.input.callee, address, value, initcode, child_gas, self.input.depth + 1);
+        defer result.deinit(self.machine.allocator);
+        if (result.status == .fault) {
+            if (result.status.fault == .unsupported_precompile) return error.UnsupportedPrecompile;
+            if (result.status.fault == .unsupported_opcode) return error.UnsupportedOpcode;
+            if (result.status.fault == .missing_context) return error.MissingContext;
+        }
+        self.gas += result.gas_remaining;
+        if (result.status == .revert) try self.return_data.appendSlice(self.machine.allocator, result.output);
+        try self.push(if (result.status == .success) addressWord(address) else 0);
+    }
+    /// Transfers the remaining balance and schedules deletion under the active fork.
+    fn selfdestruct(self: *Frame) !Result {
+        if (self.input.is_static) return error.WriteProtection;
+        const beneficiary = addressFromWord(try self.pop());
+        const warm = try self.machine.touchAccount(beneficiary);
+        const balance = self.machine.world.getBalance(self.input.callee);
+        const account = try self.machine.world.getAccount(beneficiary);
+        const empty = if (account) |a| a.nonce == 0 and a.balance == 0 and std.mem.eql(u8, &a.code_hash, &state.EMPTY_CODE_HASH) else true;
+        try self.charge(5_000 + (if (warm) @as(u64, 0) else 2_600) + (if (balance != 0 and empty) @as(u64, 25_000) else 0));
+        const fork = if (self.machine.environment) |env| env.fork else Fork.fulu;
+        var remove = @intFromEnum(fork) < @intFromEnum(Fork.cancun);
+        for (self.machine.created.items) |address| if (same(address, self.input.callee)) {
+            remove = true;
+            break;
+        };
+        if (!same(beneficiary, self.input.callee)) {
+            try self.machine.world.setBalance(beneficiary, std.math.add(u256, self.machine.world.getBalance(beneficiary), balance) catch return error.BalanceOverflow);
+            try self.machine.world.setBalance(self.input.callee, 0);
+        } else if (remove) {
+            try self.machine.world.setBalance(self.input.callee, 0);
+        }
+        if (remove) {
+            for (self.machine.destroyed.items) |address| if (same(address, self.input.callee)) return self.output(0, 0, .success);
+            try self.machine.destroyed.append(self.machine.allocator, self.input.callee);
+        }
+        return self.output(0, 0, .success);
+    }
     /// Executes a child call with EIP-150 forwarding and frame-local rollback.
     fn call(self: *Frame, op: u8) !void {
         const requested = try self.pop();
@@ -796,7 +921,8 @@ const Frame = struct {
                     try self.charge(2);
                     try self.push(0);
                 },
-                Op.CREATE, Op.CREATE2, Op.SELFDESTRUCT => return error.UnsupportedOpcode,
+                Op.CREATE, Op.CREATE2 => try self.create(op),
+                Op.SELFDESTRUCT => return self.selfdestruct(),
                 Op.LOG0...Op.LOG4 => try self.log(op - Op.LOG0),
                 Op.CALL, Op.CALLCODE, Op.DELEGATECALL, Op.STATICCALL => try self.call(op),
                 Op.RETURN, Op.REVERT => {

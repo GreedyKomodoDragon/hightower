@@ -375,7 +375,16 @@ pub const Server = struct {
             const source = if (std.mem.eql(u8, key, "transactionHash")) "hash" else key;
             try put(a, &out, key, tx.object.get(source).?);
         }
-        try put(a, &out, "contractAddress", .null);
+        const contract_address: Value = blk: {
+            if (payload.status != 1 or tx.object.get("to").? != .null) break :blk .null;
+            var decoded = try execution.parse(execution.Transaction, a, record.transactions[index]);
+            defer decoded.deinit();
+            const sender = try execution.recoverSender(a, decoded.value, self.chain.chain_id);
+            const fields = try transition.fields(decoded.value, self.chain.fork);
+            const address = execution.state.createAddress(sender, fields.nonce);
+            break :blk string(try hex(a, &address));
+        };
+        try put(a, &out, "contractAddress", contract_address);
         try put(a, &out, "cumulativeGasUsed", try quantity(a, payload.cumulative_gas_used));
         try put(a, &out, "gasUsed", try quantity(a, payload.cumulative_gas_used - previous));
         try put(a, &out, "effectiveGasPrice", tx.object.get("gasPrice").?);
