@@ -25,6 +25,7 @@ const Method = enum {
     eth_getBlockByNumber,
     eth_getBalance,
     eth_getCode,
+    eth_getStorageAt,
     eth_call,
     eth_estimateGas,
     eth_sendRawTransaction,
@@ -161,6 +162,15 @@ pub const Server = struct {
                 const address = try parseAddress(try asString(params[0]));
                 const record = if (params.len == 2) (try self.block(try asString(params[1]))) orelse return error.UnknownBlock else self.chain.latest();
                 return string(try hex(a, record.world.getCode(address)));
+            },
+            .eth_getStorageAt => {
+                if (params.len < 2 or params.len > 3) return error.InvalidParams;
+                const address = try parseAddress(try asString(params[0]));
+                const slot = try parseQuantity(u256, try asString(params[1]));
+                const record = if (params.len == 3) (try self.block(try asString(params[2]))) orelse return error.UnknownBlock else self.chain.latest();
+                var word: [32]u8 = undefined;
+                std.mem.writeInt(u256, &word, record.world.getStorage(address, slot), .big);
+                return string(try hex(a, &word));
             },
             .eth_call, .eth_estimateGas => {
                 if (params.len < 1 or params.len > 2 or params[0] != .object) return error.InvalidParams;
