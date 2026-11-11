@@ -171,7 +171,7 @@ fn validateTransaction(allocator: std.mem.Allocator, world: *state.State, contex
     const sender = try execution.recoverSender(allocator, tx, context.chain_id);
     if (world.getNonce(sender) != f.nonce) return error.InvalidNonce;
     if (f.gas_limit > available_gas) return error.BlockGasLimitExceeded;
-    const intrinsic = intrinsicGas(f, context.fork) catch return error.IntrinsicGasOverflow;
+    const intrinsic = intrinsicGas(f, context.fork) catch |err| return if (err == error.InitcodeTooLarge) err else error.IntrinsicGasOverflow;
     if (f.gas_limit < intrinsic) return error.IntrinsicGasTooLow;
     if (f.priority_fee > f.max_fee or f.max_fee < context.base_fee) return error.InvalidFee;
     if (f.blob_fee_cap != null) {

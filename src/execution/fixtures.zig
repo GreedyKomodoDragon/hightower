@@ -12,7 +12,7 @@ const execution = @import("execution");
 const rlp = @import("rlp").decode;
 
 const Format = enum { transaction, state, blockchain };
-const Outcome = enum { valid, InvalidLength, NonCanonicalInteger, invalid_transaction, skip };
+const Outcome = enum { valid, InvalidLength, NonCanonicalInteger, invalid_transaction, InitcodeSizeExceeded, skip };
 
 const Fixture = struct {
     name: []const u8,
@@ -70,6 +70,12 @@ const fixtures = [_]Fixture{
     .{ .name = "create2_code_limit", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "e4e370fa90fabd2bad1d7db46799b139eaa1bcdd45cf7a1a8caa479f088e4bf0", .bytes = @embedFile("fixtures/create2_code_limit.json") }, // fixtures/state_tests/static/state_tests/stCodeSizeLimit/create2CodeSizeLimit.json
     .{ .name = "selfdestruct_reentrant_revert", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "eb7ad9210c68210edf88232b1fdd68555662799d1e1f99dcc19333f3ee1c0063", .bytes = @embedFile("fixtures/selfdestruct_reentrant_revert.json") }, // fixtures/state_tests/cancun/eip6780_selfdestruct/test_reentrancy_selfdestruct_revert.json
     .{ .name = "create2_nonce_collision", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "b2298798555168430807e75942c763dc92b80fdc6ca9a5511bbdd9e331ab7549", .bytes = @embedFile("fixtures/create2_nonce_collision.json") }, // fixtures/state_tests/static/state_tests/stCreate2/create2collisionNonce.json
+    .{ .name = "create_insufficient_balance", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "61fb09115aaf20f5c297b28f024f421214a3c9463c8ae00bdc54ccbac0514ec6", .bytes = @embedFile("fixtures/create_insufficient_balance.json") }, // fixtures/state_tests/static/state_tests/stCallCreateCallCodeTest/createFailBalanceTooLow.json
+    .{ .name = "create_value_oog", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "31e9de282e31162dcee050073e3c1de880a7acfe43eea18e1f8ede931451f784", .bytes = @embedFile("fixtures/create_value_oog.json") }, // fixtures/state_tests/static/state_tests/stEIP150singleCodeGasPrices/RawCreateFailGasValueTransfer.json
+    .{ .name = "create2_revert_returndata", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "babf1eb528f5d9216f0d4b24899e0e113f57152d7c0399970331f802e20f5ac2", .bytes = @embedFile("fixtures/create2_revert_returndata.json") }, // fixtures/state_tests/static/state_tests/stCreate2/returndatacopy_following_revert_in_create.json
+    .{ .name = "static_create_rejected", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "bc44805e90336780030904016f90c8fb46cac02f6d813fbe70bb42bf4c3eeff4", .bytes = @embedFile("fixtures/static_create_rejected.json") }, // fixtures/state_tests/static/state_tests/stStaticCall/static_callCreate.json
+    .{ .name = "failed_create_restores_deletion", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "9e8fcc753295cad8d37f50c965427b74c3502f081b179c72fa35a3f0f9c3d7e7", .bytes = @embedFile("fixtures/failed_create_restores_deletion.json") }, // fixtures/state_tests/static/state_tests/stSpecialTest/FailedCreateRevertsDeletionParis.json
+    .{ .name = "create_tx_initcode_limit", .format = "state", .fork = "Cancun", .expected = .InitcodeSizeExceeded, .checksum = "692e43d364465177430aba23b02e355e2dd5aa437970bf1c990a0eb53ef141fc", .bytes = @embedFile("fixtures/create_tx_initcode_limit.json") }, // fixtures/state_tests/shanghai/eip3860_initcode/test_contract_creating_tx.json
     .{ .name = "c00", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "b8cc11633bebdcd9841f160e58a251b043fb5ae78d4a149cad78d50e364a7a1f", .bytes = @embedFile("fixtures/candidates/c00.json") }, // fixtures/state_tests/static/state_tests/stSolidityTest/TestOverflow.json :: tests/static/state_tests/stSolidityTest/TestOverflowFiller.json::TestOverflow[fork_Cancun-state_test-]
     .{ .name = "c01", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "330c04a2823372bf660e158afd93b31efab598916e0912ed5ddd5453bfdd3602", .bytes = @embedFile("fixtures/candidates/c01.json") }, // fixtures/state_tests/static/state_tests/Shanghai/stEIP3651_warmcoinbase/coinbaseWarmAccountCallGas.json :: tests/static/state_tests/Shanghai/stEIP3651_warmcoinbase/coinbaseWarmAccountCallGasFiller.yml::coinbaseWarmAccountCallGas[fork_Cancun-state_test-d0]
     .{ .name = "c02", .format = "state", .fork = "Cancun", .expected = .valid, .checksum = "d9f5f7fb283010b69c15bdf555bb6fcbdfa01af1940f998871cc7fd6f768d5a3", .bytes = @embedFile("fixtures/candidates/c02.json") }, // fixtures/state_tests/static/state_tests/VMTests/vmTests/envInfo.json :: tests/static/state_tests/VMTests/vmTests/envInfoFiller.yml::envInfo[fork_Cancun-state_test-address]
@@ -281,7 +287,7 @@ test "pinned execution fixtures pass and unsupported processors are explicit" {
     execution.evm.coverage.opcodes = &seen;
     defer execution.evm.coverage.opcodes = null;
     const counts = try run(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 115), counts.passed);
+    try std.testing.expectEqual(@as(usize, 121), counts.passed);
     try std.testing.expectEqual(@as(usize, 0), counts.skipped);
     std.log.info("execution fixtures: {d} passed, {d} skipped", .{ counts.passed, counts.skipped });
     const core = [_]u8{ 0x00, 0x20, 0xf3, 0xfd };
@@ -527,14 +533,16 @@ fn runStateFixture(allocator: std.mem.Allocator, root: std.json.Value, fixture: 
         .prev_randao = try fixedHex(32, allocator, try member(env, "currentRandom")),
         .blob_base_fee = if (fork != .cancun) null else try execution.transition.blobBaseFee(fork, @intCast(try quantity(try member(env, "currentExcessBlobGas")))),
     };
-    if (fixture.expected == .invalid_transaction) {
-        if (!std.mem.eql(u8, try stringMember(expected, "expectException"), "TransactionException.INTRINSIC_GAS_TOO_LOW")) return error.MissingExpectation;
+    if (fixture.expected == .invalid_transaction or fixture.expected == .InitcodeSizeExceeded) {
+        const expected_exception: []const u8 = if (fixture.expected == .InitcodeSizeExceeded) "TransactionException.INITCODE_SIZE_EXCEEDED" else "TransactionException.INTRINSIC_GAS_TOO_LOW";
+        const expected_error: anyerror = if (fixture.expected == .InitcodeSizeExceeded) error.InitcodeTooLarge else error.IntrinsicGasTooLow;
+        if (!std.mem.eql(u8, try stringMember(expected, "expectException"), expected_exception)) return error.MissingExpectation;
         if (execution.transition.applyTransaction(allocator, &world, context, raw, context.gas_limit, 0)) |outcome| {
             var owned = outcome;
             owned.deinit();
             return error.UnexpectedSuccess;
         } else |err| {
-            if (err != error.IntrinsicGasTooLow) return err;
+            if (err != expected_error) return err;
         }
         try checkAccounts(allocator, &world, try member(expected, "state"));
         const expected_root = try fixedHex(32, allocator, try member(expected, "hash"));
