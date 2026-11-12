@@ -1335,5 +1335,36 @@ test "signed local token deployment, transfer, and revert commit through block a
     for (0..3) |i| try testing.expectEqualStrings(rpc_log.get("topics").?.array.items[i].string, receipt_logs[0].object.get("topics").?.array.items[i].string);
     try testing.expectEqualStrings("0x1", rpc_log.get("blockNumber").?.string);
     try testing.expectEqualStrings("0x1", rpc_log.get("transactionIndex").?.string);
+    var alternative = next;
+    alternative.extra_data = &.{0x42};
+    alternative.timestamp = 2;
+    alternative.transactions_root = try execution.trie.orderedRoot(a, &.{});
+    alternative.receipts_root = try execution.receiptsRoot(a, &.{});
+    alternative.logs_bloom = [_]u8{0} ** 256;
+    alternative.gas_used = 0;
+    alternative.state_root = header.state_root;
+    try chain.retain(alternative, &.{}, &.{}, .{
+        .arena = std.heap.ArenaAllocator.init(a),
+        .receipts = try a.alloc(execution.Receipt, 0),
+        .state_root = alternative.state_root,
+        .transactions_root = alternative.transactions_root,
+        .receipts_root = alternative.receipts_root,
+        .withdrawals_root = alternative.withdrawals_root,
+        .logs_bloom = alternative.logs_bloom,
+        .gas_used = 0,
+    }, &chain.records.items[0].world);
+    const alternative_hash = chain.records.items[2].hash;
+    const alternative_path = try chain.path(a, alternative_hash);
+    chain.canonical.deinit(a);
+    chain.canonical = alternative_path;
+    const alternative_world = try chain.latest().world.clone(a);
+    world.deinit();
+    world = alternative_world;
+    const orphaned_logs = try server.dispatch(a, logs_req);
+    try testing.expectEqual(@as(usize, 0), (try std.json.parseFromSlice(std.json.Value, a, orphaned_logs, .{})).value.object.get("result").?.array.items.len);
+    std.crypto.hash.sha3.Keccak256.hash(raw[1], &tx_hash, .{});
+    const orphaned_receipt = try server.dispatch(a, transfer_receipt_req);
+    try testing.expect((try std.json.parseFromSlice(std.json.Value, a, orphaned_receipt, .{})).value.object.get("result").? == .null);
+    try testing.expect(chain.transaction(tx_hash) == null);
     std.debug.print("LocalToken Transfer block=1 transaction=1 from=0x{s} to=0x{s} amount=75 gas={d}\n", .{ std.fmt.bytesToHex(sender, .lower), std.fmt.bytesToHex(recipient, .lower), gas_used });
 }

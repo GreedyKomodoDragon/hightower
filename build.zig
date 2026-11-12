@@ -594,6 +594,9 @@ pub fn build(b: *std.Build) void {
     const run_engine_client_tests = b.addRunArtifact(engine_client_tests);
     const engine_server_tests = b.addTest(.{ .root_module = engine_server_mod });
     const run_engine_server_tests = b.addRunArtifact(engine_server_tests);
+    const engine_test_step = b.step("test-engine", "Run Engine API server and client tests");
+    engine_test_step.dependOn(&run_engine_server_tests.step);
+    engine_test_step.dependOn(&run_engine_client_tests.step);
     const run_api_tests = b.addRunArtifact(api_tests);
 
     // A top level step for running all tests. dependOn can be called multiple

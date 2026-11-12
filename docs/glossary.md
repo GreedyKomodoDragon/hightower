@@ -99,6 +99,7 @@ Chain:      [Block 0] ───────────────────�
 | Payload status | An execution client's verdict about a proposed payload, such as valid, invalid, syncing, or accepted pending full validation. |
 | Latest valid hash | The most recent execution block hash on a branch that the execution client has fully validated. |
 | Side branch | A valid-looking sequence of blocks that diverges from the currently selected execution chain. |
+| Canonical path | The ancestry selected by fork choice for block-number, transaction, receipt, and log reads. |
 | Safe block | A fork-choice checkpoint expected to remain on the chosen execution chain. |
 | Finalized block | A fork-choice checkpoint whose consensus history has been finalized. |
 | Payload ID | An eight-byte identifier for a block-building job started by a forkchoice update. |

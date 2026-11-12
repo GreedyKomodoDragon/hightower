@@ -2,10 +2,10 @@
 // choice commits them. Validation runs on a clone of the parent post-state;
 // the canonical chain changes only after a valid forkchoice update. A local
 // builder derives a fork-appropriate payload from the selected parent, pool,
-// and supplied withdrawals. In-memory stages are bounded to 32 direct children;
-// Prague deposit logs and queue outputs are checked against typed requests.
+// and supplied withdrawals. Staged branches retain executed post-states until
+// selection; Prague deposit logs and queue outputs are checked against requests.
 //
-// parent snapshot -> validate payload -> staged hash -> forkchoice -> canonical
+// parent snapshot -> execute branch -> validated hash -> forkchoice -> canonical
 const std = @import("std");
 const fulu = @import("fulu");
 const execution = @import("execution");
@@ -113,9 +113,11 @@ const Candidate = struct {
     requests: []const []const u8,
     header: execution.Header,
     world: execution.state.State,
+    result: ?execution.transition.BlockResult,
 
     /// Frees staged payload fields and their blob hashes.
     fn deinit(self: *Candidate) void {
+        if (self.result) |*result| result.deinit();
         self.world.deinit();
         self.arena.deinit();
     }
@@ -290,39 +292,38 @@ pub const Server = struct {
             decoded.deinit();
         }
         if (self.chain.byHash(payload.block_hash) != null) return status(a, "VALID", payload.block_hash);
-        const parent = self.chain.latest();
-        if (!std.mem.eql(u8, &payload.parent_hash, &parent.hash)) {
-            const ancestor = known_parent orelse return status(a, "SYNCING", null);
-            if (payload.block_number != ancestor.number +| 1 or payload.timestamp <= ancestor.timestamp or payload.gas_used > payload.gas_limit) return status(a, "INVALID", payload.parent_hash);
-            // shortcut: side branches are syntax and header checked only; execute them when reorganization support is added.
-            return status(a, "ACCEPTED", null);
-        }
+        const parent_header = known_parent orelse return status(a, "SYNCING", null);
+        const parent_world: *const execution.state.State = if (self.chain.byHash(payload.parent_hash)) |record| &record.world else blk: {
+            for (self.staged.items) |*candidate| if (std.mem.eql(u8, &candidate.payload.block_hash, &payload.parent_hash)) break :blk &candidate.world;
+            return status(a, "SYNCING", null);
+        };
         const txs = try a.alloc([]const u8, payload.transactions.data.len);
         for (payload.transactions.data, txs) |raw, *out| out.* = raw.data;
         const withdrawals = try a.alloc(execution.Withdrawal, payload.withdrawals.data.len);
         for (payload.withdrawals.data, withdrawals) |w, *out| out.* = .{ .index = w.index, .validator_index = w.validator_index, .address = w.address, .amount = w.amount };
-        var trial = try parent.world.clone(self.allocator);
+        var trial = try parent_world.clone(self.allocator);
         var retained_trial = false;
         defer if (!retained_trial) trial.deinit();
-        const older_hashes = try self.chain.olderHashes(a);
-        var result = execution.transition.applyBlock(a, &trial, .{ .fork = self.chain.fork, .parent_fork = self.chain.fork, .chain_id = self.chain.chain_id, .older_hashes = older_hashes, .max_blobs_per_block = maxBlobs(self.chain.fork), .expected_blob_hashes = hashes, .expected_requests = if (version >= 4) requests else null }, parent.header, header, txs, withdrawals) catch |err| {
+        const ancestors = self.olderHashes(a, payload.parent_hash) catch |err| {
+            if (err == error.UnknownPayload) return status(a, "SYNCING", null);
+            return err;
+        };
+        var result = execution.transition.applyBlock(self.allocator, &trial, .{ .fork = self.chain.fork, .parent_fork = self.chain.fork, .chain_id = self.chain.chain_id, .older_hashes = ancestors, .max_blobs_per_block = maxBlobs(self.chain.fork), .expected_blob_hashes = hashes, .expected_requests = if (version >= 4) requests else null }, parent_header, header, txs, withdrawals) catch |err| {
             if (err == error.OutOfMemory) return err;
             if (err == error.UnsupportedRequestQueues or err == error.UnsupportedDepositContract) return status(a, "SYNCING", null);
-            return status(a, "INVALID", parent.hash);
+            return status(a, "INVALID", payload.parent_hash);
         };
-        result.deinit();
+        var retained_result = false;
+        defer if (!retained_result) result.deinit();
         for (self.staged.items) |candidate| if (std.mem.eql(u8, &candidate.payload.block_hash, &payload.block_hash)) return status(a, "VALID", payload.block_hash);
-        if (self.staged.items.len == 32) {
-            var oldest = self.staged.orderedRemove(0);
-            oldest.deinit();
-        }
-        try self.staged.append(self.allocator, .{ .arena = arena, .payload = payload, .hashes = hashes, .parent_beacon_root = beacon_root, .requests_hash = requests_hash, .requests = requests, .header = header, .world = trial });
+        try self.staged.append(self.allocator, .{ .arena = arena, .payload = payload, .hashes = hashes, .parent_beacon_root = beacon_root, .requests_hash = requests_hash, .requests = requests, .header = header, .world = trial, .result = result });
         retained = true;
         retained_trial = true;
+        retained_result = true;
         return status(a, "VALID", payload.block_hash);
     }
 
-    /// Commits a staged child only after validating the selected head and markers.
+    /// Selects a validated ancestry path after checking markers and build attributes.
     fn forkchoiceUpdated(self: *Server, a: std.mem.Allocator, params: []const Value) !Value {
         if (params.len != 2) return error.InvalidParams;
         const choice = params[0];
@@ -334,42 +335,70 @@ pub const Server = struct {
         const safe = try wire.fixed(32, try wire.field(choice, "safeBlockHash"));
         const finalized = try wire.fixed(32, try wire.field(choice, "finalizedBlockHash"));
         var selected: ?usize = null;
-        if (!std.mem.eql(u8, &head, &self.chain.latest().hash)) {
-            for (self.staged.items, 0..) |candidate, index| if (std.mem.eql(u8, &candidate.payload.block_hash, &head)) {
-                selected = index;
+        for (self.staged.items, 0..) |candidate, index| if (std.mem.eql(u8, &candidate.payload.block_hash, &head)) {
+            selected = index;
+            break;
+        };
+        const known = self.chain.byHash(head);
+        if (known == null and selected == null) return choiceResult(a, "SYNCING", null, null);
+        if (!std.mem.allEqual(u8, &safe, 0) and !self.isAncestor(head, safe)) return error.InvalidForkchoiceState;
+        if (!std.mem.allEqual(u8, &finalized, 0) and !self.isAncestor(if (std.mem.allEqual(u8, &safe, 0)) head else safe, finalized)) return error.InvalidForkchoiceState;
+        if (!std.mem.allEqual(u8, &self.chain.finalized_hash, 0) and !self.isAncestor(head, self.chain.finalized_hash)) return error.InvalidForkchoiceState;
+        if (!std.mem.allEqual(u8, &self.chain.finalized_hash, 0) and (std.mem.allEqual(u8, &finalized, 0) or !self.isAncestor(finalized, self.chain.finalized_hash))) return error.InvalidForkchoiceState;
+        if (std.mem.allEqual(u8, &safe, 0) and !std.mem.allEqual(u8, &finalized, 0)) return error.InvalidForkchoiceState;
+        const parent_header = if (known) |record| record.header else self.staged.items[selected.?].header;
+        const parent_world = if (known) |record| &record.world else &self.staged.items[selected.?].world;
+        var next_world = try parent_world.clone(self.allocator);
+        var world_owned = true;
+        errdefer if (world_owned) next_world.deinit();
+        var pending: ?Build = if (params[1] == .null) null else self.startBuild(a, params[1], parent_header, head, parent_world) catch |err| {
+            if (err == error.InvalidParams) return error.InvalidPayloadAttributes;
+            return err;
+        };
+        errdefer if (pending) |*build| build.deinit();
+        var missing: std.ArrayList(usize) = .empty;
+        defer missing.deinit(a);
+        var cursor = head;
+        while (self.chain.byHash(cursor) == null) {
+            var index: ?usize = null;
+            for (self.staged.items, 0..) |candidate, i| if (std.mem.eql(u8, &candidate.payload.block_hash, &cursor)) {
+                index = i;
+                break;
             };
-            const index = selected orelse return choiceResult(a, "SYNCING", null, null);
-            if (!std.mem.eql(u8, &self.staged.items[index].payload.parent_hash, &self.chain.latest().hash)) return choiceResult(a, "SYNCING", null, null);
+            const i = index orelse return choiceResult(a, "SYNCING", null, null);
+            try missing.append(a, i);
+            cursor = self.staged.items[i].payload.parent_hash;
+            if (missing.items.len > self.staged.items.len) return error.InvalidAncestry;
         }
-        if (!std.mem.allEqual(u8, &safe, 0) and self.chain.byHash(safe) == null and !std.mem.eql(u8, &safe, &head)) return error.InvalidForkchoiceState;
-        if (!std.mem.allEqual(u8, &finalized, 0) and self.chain.byHash(finalized) == null and !std.mem.eql(u8, &finalized, &head)) return error.InvalidForkchoiceState;
-        const head_number = if (selected) |index| self.staged.items[index].header.number else self.chain.latest().header.number;
-        const safe_number: u64 = if (std.mem.allEqual(u8, &safe, 0)) 0 else if (std.mem.eql(u8, &safe, &head)) head_number else self.chain.byHash(safe).?.header.number;
-        const finalized_number: u64 = if (std.mem.allEqual(u8, &finalized, 0)) 0 else if (std.mem.eql(u8, &finalized, &head)) head_number else self.chain.byHash(finalized).?.header.number;
-        if (safe_number > head_number or finalized_number > safe_number or (std.mem.allEqual(u8, &safe, 0) and !std.mem.allEqual(u8, &finalized, 0))) return error.InvalidForkchoiceState;
-        const parent_header = if (selected) |index| self.staged.items[index].header else self.chain.latest().header;
-        const parent_world = if (selected) |index| &self.staged.items[index].world else &self.chain.latest().world;
-        if (selected) |index| {
+        std.mem.reverse(usize, missing.items);
+        try self.chain.records.ensureUnusedCapacity(self.allocator, missing.items.len);
+        for (missing.items) |index| {
             const candidate = &self.staged.items[index];
             const p = candidate.payload;
             const txs = try a.alloc([]const u8, p.transactions.data.len);
             for (p.transactions.data, txs) |raw, *out| out.* = raw.data;
             const withdrawals = try a.alloc(execution.Withdrawal, p.withdrawals.data.len);
             for (p.withdrawals.data, withdrawals) |w, *out| out.* = .{ .index = w.index, .validator_index = w.validator_index, .address = w.address, .amount = w.amount };
-            try self.chain.append(self.world, candidate.header, txs, withdrawals, candidate.hashes, candidate.requests);
-            self.pool.prune(self.world);
+            try self.chain.retain(candidate.header, txs, withdrawals, candidate.result.?, &candidate.world);
+            candidate.result = null;
         }
-        // The committed block is now owned by the canonical chain; release its
-        // staged world after the build request has cloned the parent snapshot.
-        defer if (selected) |index| {
-            var candidate = self.staged.orderedRemove(index);
+        var path = try self.chain.path(self.allocator, head);
+        self.chain.canonical.deinit(self.allocator);
+        self.chain.canonical = path;
+        path = .empty;
+        self.chain.safe_hash = safe;
+        self.chain.finalized_hash = finalized;
+        self.world.deinit();
+        self.world.* = next_world;
+        world_owned = false;
+        self.pool.prune(self.world);
+        var staged_index = self.staged.items.len;
+        while (staged_index > 0) {
+            staged_index -= 1;
+            if (self.staged.items[staged_index].result != null) continue;
+            var candidate = self.staged.orderedRemove(staged_index);
             candidate.deinit();
-        };
-        var pending: ?Build = if (params[1] == .null) null else self.startBuild(a, params[1], parent_header, head, parent_world) catch |err| {
-            if (err == error.InvalidParams) return error.InvalidPayloadAttributes;
-            return err;
-        };
-        errdefer if (pending) |*build| build.deinit();
+        }
         var id: ?u64 = null;
         if (pending) |build| {
             if (self.build) |*old| old.deinit();
@@ -379,6 +408,51 @@ pub const Server = struct {
             pending = null;
         }
         return choiceResult(a, "VALID", head, id);
+    }
+
+    /// Checks ancestry through retained and staged validated blocks.
+    fn isAncestor(self: *const Server, head: execution.Hash, ancestor: execution.Hash) bool {
+        var cursor = head;
+        var hops: usize = 0;
+        while (hops <= self.chain.records.items.len + self.staged.items.len) : (hops += 1) {
+            if (std.mem.eql(u8, &cursor, &ancestor)) return true;
+            if (self.chain.byHash(cursor)) |record| {
+                if (record.header.number == self.chain.records.items[0].header.number) return false;
+                cursor = record.header.parent_hash;
+                continue;
+            }
+            var found = false;
+            for (self.staged.items) |candidate| if (std.mem.eql(u8, &candidate.payload.block_hash, &cursor)) {
+                cursor = candidate.payload.parent_hash;
+                found = true;
+                break;
+            };
+            if (!found) return false;
+        }
+        return false;
+    }
+
+    /// Returns up to 255 parent hashes from validated retained or staged ancestry.
+    fn olderHashes(self: *const Server, allocator: std.mem.Allocator, head: execution.Hash) ![]execution.Hash {
+        var hashes: std.ArrayList(execution.Hash) = .empty;
+        errdefer hashes.deinit(allocator);
+        var cursor = head;
+        while (hashes.items.len < 255) {
+            if (self.chain.byHash(cursor)) |record| {
+                if (record.header.number == self.chain.records.items[0].header.number) break;
+                cursor = record.header.parent_hash;
+            } else {
+                var found = false;
+                for (self.staged.items) |candidate| if (std.mem.eql(u8, &candidate.payload.block_hash, &cursor)) {
+                    cursor = candidate.payload.parent_hash;
+                    found = true;
+                    break;
+                };
+                if (!found) return error.UnknownPayload;
+            }
+            try hashes.append(allocator, cursor);
+        }
+        return hashes.toOwnedSlice(allocator);
     }
 
     /// Prepares a payload build from a validated parent without changing canonical state.
@@ -405,13 +479,11 @@ pub const Server = struct {
         const excess_blob_gas = if (active.forkchoice >= 3) (parent_header.excess_blob_gas +| parent_header.blob_gas_used) -| (if (self.chain.fork == .cancun) @as(u64, 393_216) else @as(u64, 786_432)) else 0;
         var trial = try parent_world.clone(a);
         defer trial.deinit();
-        const older_hashes = try self.chain.olderHashes(a);
-        const staged_parent = !std.mem.eql(u8, &parent_hash, &self.chain.latest().hash);
-        const hash_count = @min(@as(usize, 256), 1 + older_hashes.len + @as(usize, @intFromBool(staged_parent)));
+        const older_hashes = try self.olderHashes(a, parent_hash);
+        const hash_count = 1 + older_hashes.len;
         const block_hashes = try a.alloc(execution.Hash, hash_count);
         block_hashes[0] = parent_hash;
-        if (staged_parent) block_hashes[1] = self.chain.latest().hash;
-        @memcpy(block_hashes[1 + @as(usize, @intFromBool(staged_parent)) ..], older_hashes[0 .. hash_count - 1 - @as(usize, @intFromBool(staged_parent))]);
+        @memcpy(block_hashes[1..], older_hashes);
         const context: execution.transition.Context = .{ .fork = self.chain.fork, .chain_id = self.chain.chain_id, .coinbase = fee_recipient, .number = number, .timestamp = timestamp, .gas_limit = parent_header.gas_limit, .base_fee = base_fee, .prev_randao = prev_randao, .blob_base_fee = if (active.forkchoice >= 3) try execution.transition.blobBaseFee(self.chain.fork, excess_blob_gas) else null, .block_hashes = block_hashes };
         const root = if (active.forkchoice >= 3) try wire.fixed(32, try wire.field(value, "parentBeaconBlockRoot")) else [_]u8{0} ** 32;
         try execution.transition.applySystemTransitions(a, &trial, context, parent_hash, root);
@@ -757,7 +829,7 @@ fn checkBuiltFork(fork: execution.transition.Fork) !void {
     const invalid_attrs = try server.dispatch(a, bearer, body, 1_000);
     defer a.free(invalid_attrs);
     try std.testing.expect(std.mem.indexOf(u8, invalid_attrs, "-38003") != null);
-    try std.testing.expectEqual(@as(usize, 2), chain.records.items.len);
+    try std.testing.expectEqual(@as(usize, 1), chain.records.items.len);
     const committed = try server.forkchoiceUpdated(temp, &.{ choice, .null });
     try std.testing.expectEqualStrings("VALID", try wire.string(try wire.field(try wire.field(committed, "payloadStatus"), "status")));
     try std.testing.expectEqual(@as(usize, 2), chain.records.items.len);
@@ -769,8 +841,8 @@ fn checkBuiltFork(fork: execution.transition.Fork) !void {
     const side_hash = try execution.transition.headerHash(temp, fork, try payloadHeader(temp, side_payload, beacon_root, request_hash));
     payload_value.object.getPtr("blockHash").?.* = try wire.hex(temp, &side_hash);
     const side = try server.newPayload(temp, params.array.items, versions.new_payload);
-    try std.testing.expectEqualStrings("ACCEPTED", try wire.string(try wire.field(side, "status")));
-    try std.testing.expect((try wire.field(side, "latestValidHash")) == .null);
+    try std.testing.expectEqualStrings("VALID", try wire.string(try wire.field(side, "status")));
+    try std.testing.expectEqualStrings(try wire.string(try wire.hex(temp, &side_hash)), try wire.string(try wire.field(side, "latestValidHash")));
     var txs = try wire.field(payload_value.*, "transactions");
     try txs.array.append(try wire.hex(temp, &.{}));
     payload_value.object.getPtr("transactions").?.* = txs;
@@ -793,6 +865,94 @@ fn checkBuiltFork(fork: execution.transition.Fork) !void {
 
 test "every Engine fork builds, validates, and commits a payload" {
     for ([_]execution.transition.Fork{ .paris, .shanghai, .cancun, .prague, .osaka, .fulu }) |fork| try checkBuiltFork(fork);
+}
+
+test "Engine selects fully executed competing branches and rejects conflicting finality" {
+    const a = std.testing.allocator;
+    var world = execution.state.State.init(a);
+    defer world.deinit();
+    var genesis_header = std.mem.zeroes(execution.Header);
+    genesis_header.state_root = try world.stateRoot();
+    genesis_header.gas_limit = 30_000_000;
+    genesis_header.base_fee_per_gas = 1;
+    var chain = try execution.chain.Chain.init(a, 1, .paris, genesis_header, &world);
+    defer chain.deinit();
+    var pool = execution.pool.Pool.init(a, .{});
+    defer pool.deinit();
+    var server: Server = .{ .allocator = a, .chain = &chain, .world = &world, .pool = &pool, .secret = .{0} ** 32 };
+    defer server.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const temp = arena.allocator();
+    const genesis = chain.latest().hash;
+    const zero = [_]u8{0} ** 32;
+    var attrs = wire.object();
+    try wire.put(temp, &attrs, "timestamp", try wire.number(temp, @as(u64, 1)));
+    try wire.put(temp, &attrs, "prevRandao", try wire.hex(temp, &zero));
+    try wire.put(temp, &attrs, "suggestedFeeRecipient", try wire.hex(temp, &([_]u8{0} ** 20)));
+    var built = try server.startBuild(temp, attrs, genesis_header, genesis, &world);
+    defer built.deinit();
+    const first = try wire.payloadJson(temp, built.payload, 1);
+    const hash_a = built.payload.block_hash;
+    try std.testing.expectEqualStrings("VALID", try wire.string(try wire.field(try server.newPayload(temp, &.{first}, 1), "status")));
+    var sibling = try wire.payloadJson(temp, built.payload, 1);
+    sibling.object.getPtr("extraData").?.* = try wire.hex(temp, &.{0x01});
+    const parsed_sibling = try wire.parsePayload(temp, sibling, 1);
+    const hash_b = try execution.transition.headerHash(temp, .paris, try payloadHeader(temp, parsed_sibling, zero, try emptyRequestsHash()));
+    sibling.object.getPtr("blockHash").?.* = try wire.hex(temp, &hash_b);
+    try std.testing.expectEqualStrings("VALID", try wire.string(try wire.field(try server.newPayload(temp, &.{sibling}, 1), "status")));
+    var invalid = try wire.payloadJson(temp, built.payload, 1);
+    invalid.object.getPtr("stateRoot").?.* = try wire.hex(temp, &([_]u8{0x99} ** 32));
+    const parsed_invalid = try wire.parsePayload(temp, invalid, 1);
+    const invalid_hash = try execution.transition.headerHash(temp, .paris, try payloadHeader(temp, parsed_invalid, zero, try emptyRequestsHash()));
+    invalid.object.getPtr("blockHash").?.* = try wire.hex(temp, &invalid_hash);
+    try std.testing.expectEqualStrings("INVALID", try wire.string(try wire.field(try server.newPayload(temp, &.{invalid}, 1), "status")));
+    try std.testing.expectEqual(@as(usize, 1), chain.records.items.len);
+    var attrs2 = wire.object();
+    try wire.put(temp, &attrs2, "timestamp", try wire.number(temp, @as(u64, 2)));
+    try wire.put(temp, &attrs2, "prevRandao", try wire.hex(temp, &zero));
+    try wire.put(temp, &attrs2, "suggestedFeeRecipient", try wire.hex(temp, &([_]u8{0} ** 20)));
+    var child_a = try server.startBuild(temp, attrs2, server.staged.items[0].header, hash_a, &server.staged.items[0].world);
+    defer child_a.deinit();
+    var child_b = try server.startBuild(temp, attrs2, server.staged.items[1].header, hash_b, &server.staged.items[1].world);
+    defer child_b.deinit();
+    try std.testing.expectEqualStrings("VALID", try wire.string(try wire.field(try server.newPayload(temp, &.{try wire.payloadJson(temp, child_a.payload, 1)}, 1), "status")));
+    try std.testing.expectEqualStrings("VALID", try wire.string(try wire.field(try server.newPayload(temp, &.{try wire.payloadJson(temp, child_b.payload, 1)}, 1), "status")));
+    var choice = wire.object();
+    try wire.put(temp, &choice, "headBlockHash", try wire.hex(temp, &child_a.payload.block_hash));
+    try wire.put(temp, &choice, "safeBlockHash", try wire.hex(temp, &genesis));
+    try wire.put(temp, &choice, "finalizedBlockHash", try wire.hex(temp, &genesis));
+    _ = try server.forkchoiceUpdated(temp, &.{ choice, .null });
+    try std.testing.expectEqualSlices(u8, &child_a.payload.block_hash, &chain.latest().hash);
+    try std.testing.expectEqualSlices(u8, &hash_a, &chain.byNumber(1).?.hash);
+    choice.object.getPtr("safeBlockHash").?.* = try wire.hex(temp, &hash_a);
+    choice.object.getPtr("headBlockHash").?.* = try wire.hex(temp, &child_b.payload.block_hash);
+    try std.testing.expectError(error.InvalidForkchoiceState, server.forkchoiceUpdated(temp, &.{ choice, .null }));
+    try std.testing.expectEqualSlices(u8, &child_a.payload.block_hash, &chain.latest().hash);
+    choice.object.getPtr("safeBlockHash").?.* = try wire.hex(temp, &hash_b);
+    _ = try server.forkchoiceUpdated(temp, &.{ choice, .null });
+    try std.testing.expectEqualSlices(u8, &child_b.payload.block_hash, &chain.latest().hash);
+    try std.testing.expectEqualSlices(u8, &hash_b, &chain.byNumber(1).?.hash);
+    try std.testing.expectEqualSlices(u8, &child_a.payload.block_hash, &chain.byHash(child_a.payload.block_hash).?.hash);
+    var rpc: execution.rpc.Server = .{ .chain = &chain, .pool = &pool, .world = &world };
+    var rpc_request = wire.object();
+    try wire.put(temp, &rpc_request, "jsonrpc", .{ .string = "2.0" });
+    try wire.put(temp, &rpc_request, "id", .{ .integer = 1 });
+    try wire.put(temp, &rpc_request, "method", .{ .string = "eth_getBlockByNumber" });
+    var rpc_params = wire.array(temp);
+    try rpc_params.array.append(.{ .string = "0x1" });
+    try rpc_params.array.append(.{ .bool = false });
+    try wire.put(temp, &rpc_request, "params", rpc_params);
+    const rpc_response = try rpc.dispatch(a, try std.json.Stringify.valueAlloc(temp, rpc_request, .{}));
+    defer a.free(rpc_response);
+    const rpc_block = try wire.field((try std.json.parseFromSlice(Value, temp, rpc_response, .{})).value, "result");
+    try std.testing.expectEqualStrings(try wire.string(try wire.hex(temp, &hash_b)), try wire.string(try wire.field(rpc_block, "hash")));
+    choice.object.getPtr("finalizedBlockHash").?.* = try wire.hex(temp, &hash_b);
+    _ = try server.forkchoiceUpdated(temp, &.{ choice, .null });
+    choice.object.getPtr("headBlockHash").?.* = try wire.hex(temp, &child_a.payload.block_hash);
+    choice.object.getPtr("safeBlockHash").?.* = try wire.hex(temp, &hash_a);
+    try std.testing.expectError(error.InvalidForkchoiceState, server.forkchoiceUpdated(temp, &.{ choice, .null }));
+    try std.testing.expectEqualSlices(u8, &child_b.payload.block_hash, &chain.latest().hash);
 }
 
 test "partial request queue deployment cannot validate or build Osaka payloads" {

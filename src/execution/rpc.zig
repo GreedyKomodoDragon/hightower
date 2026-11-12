@@ -450,6 +450,7 @@ pub const Server = struct {
         try validateLogFilter(obj);
         const specified_hash = obj.get("blockHash");
         if (specified_hash != null and (obj.get("fromBlock") != null or obj.get("toBlock") != null)) return error.InvalidParams;
+        const requested_hash: ?execution.Hash = if (specified_hash) |v| try parseHash(try asString(v)) else null;
         const from: u64 = if (specified_hash) |v| blk: {
             const record = self.chain.byHash(try parseHash(try asString(v))) orelse return array(a);
             break :blk record.header.number;
@@ -458,7 +459,9 @@ pub const Server = struct {
         if (to >= from and to - from >= max_log_blocks) return error.LogRangeTooLarge;
         var result = array(a);
         if (to < from) return result;
-        for (self.chain.records.items) |*record| {
+        for (self.chain.canonical.items) |record_index| {
+            const record = &self.chain.records.items[record_index];
+            if (requested_hash) |hash| if (!std.mem.eql(u8, &hash, &record.hash)) continue;
             if (record.header.number < from or record.header.number > to) continue;
             var block_log_index: usize = 0;
             for (record.receipts(), 0..) |receipt, tx_index| {
