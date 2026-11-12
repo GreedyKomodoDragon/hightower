@@ -1,11 +1,11 @@
-// Peer sync imports one ordered range from the active peer. A block names its
+// Peer sync imports ordered ranges and missing ancestors from authenticated peers. A block names its
 // parent by root, and fork choice stores the post-state only after transition
 // and data availability checks pass. The snapshot is replaced after each
 // accepted block, so recovery starts from the last durable head.
 //
-//   parent head -> range -> verified columns -> transition -> snapshot
-// Requests are capped at 128 slots. This single-chain importer stops at a
-// conflicting parent; branch reconciliation needs a later fork sync protocol.
+//   known ancestor -> blocks by root -> verified columns -> transition -> Engine -> snapshot
+// Range requests are capped at 16 slots by the runtime. Each imported side
+// branch remains in the snapshot even when fork choice keeps the current head.
 const std = @import("std");
 const fulu = @import("fulu");
 const merkle = @import("merkle");
@@ -46,10 +46,10 @@ pub const Coordinator = struct {
     cancelled: ?*const std.atomic.Value(bool) = null,
     const ColumnContext = struct { block: *const fulu.BeaconBlock, parent_state: *const fulu.BeaconState };
 
-    /// Fetch at most 128 slots after the retained head and import their chain.
+    /// Fetch one bounded range after the last scanned slot.
     pub fn step(self: *Coordinator, remote: *peer.Peer, count: u64) !usize {
         if (self.cancelled) |flag| if (flag.load(.acquire)) return error.Canceled;
-        if (count == 0 or count > columns.max_request_blocks) return error.InvalidRequest;
+        if (count == 0 or count > 16) return error.InvalidRequest;
         const start = self.next_slot;
         var fetched = try remote.fetchBlocksByRange(start, count, 1);
         defer fetched.deinit();
@@ -58,7 +58,36 @@ pub const Coordinator = struct {
         return imported;
     }
 
-    /// Check parent, order, availability, and transition before saving progress.
+    /// Fetch missing ancestors by root, then import the branch from its known parent.
+    pub fn importHead(self: *Coordinator, remote: *peer.Peer, remote_root: fulu.Root) !usize {
+        // shortcut: branch recovery spans at most 128 blocks, extend with persistent pending roots for deeper forks.
+        var pending: std.ArrayList(fulu.SignedBeaconBlock) = .empty;
+        defer {
+            for (pending.items) |block| @import("ssz").freeDecoded(self.allocator, fulu.SignedBeaconBlock, block);
+            pending.deinit(self.allocator);
+        }
+        var root = remote_root;
+        while (!self.store.blocks.contains(root)) {
+            if (pending.items.len == columns.max_request_blocks) return error.BranchTooDeep;
+            var fetched = try remote.fetchBlocksByRoot(&.{root});
+            defer fetched.deinit();
+            if (fetched.items.items.len != 1) return error.UnknownParent;
+            const block = fetched.items.items[0];
+            try pending.append(self.allocator, block);
+            fetched.items.items.len = 0;
+            root = block.message.parent_root;
+        }
+        var imported: usize = 0;
+        var index = pending.items.len;
+        while (index > 0) {
+            index -= 1;
+            try self.importOne(remote, &pending.items[index]);
+            imported += 1;
+        }
+        return imported;
+    }
+
+    /// Check range order before importing each block through the shared validation path.
     pub fn importBlocks(self: *Coordinator, remote: ?*peer.Peer, blocks: []const fulu.SignedBeaconBlock, start: u64, count: u64) !usize {
         if (count == 0 or count > columns.max_request_blocks) return error.InvalidRequest;
         const end = try std.math.add(u64, start, count);
@@ -68,31 +97,42 @@ pub const Coordinator = struct {
             if (self.cancelled) |flag| if (flag.load(.acquire)) return error.Canceled;
             const block = signed.message;
             if (block.slot < start or block.slot >= end or block.slot <= prior_slot) return error.InvalidResponseOrder;
-            if (!std.mem.eql(u8, &block.parent_root, &self.head)) return error.ConflictingParent;
-            const parent_state = self.store.block_states.getPtr(self.head) orelse return error.UnknownParent;
             const root = try merkle.HashTreeRoot(self.allocator, block);
-            if (block.body.blob_kzg_commitments.data.len != 0) {
-                const active = remote orelse return error.MissingPeer;
-                var column_context = ColumnContext{ .block = &block, .parent_state = parent_state };
-                const lookup = ingress.ColumnLookup{ .context = &column_context, .resolve = resolveColumn };
-                var sampled: [columns.column_count]u64 = undefined;
-                for (self.columns.samples.values[0..self.columns.samples.len], 0..) |index, i| sampled[i] = index;
-                const identifier = requests.ByRootIdentifier{ .block_root = root, .columns = .{ .data = sampled[0..self.columns.samples.len] } };
-                _ = try active.fetchColumnsByRoot(&.{identifier}, self.columns, self.settings, lookup);
-                if (!try self.columns.available(root, &block)) return error.DataUnavailable;
+            if (self.store.blocks.contains(root)) {
+                prior_slot = block.slot;
+                continue;
             }
-            const at_slot = try std.math.add(u64, self.store.genesis_time, try std.math.mul(u64, block.slot, @import("consensus_preset").Config.SECONDS_PER_SLOT));
-            try fork_choice.onTick(self.store, at_slot);
-            try fork_choice.onBlock(self.store, signed.*, self.engine, .{ .context = self.columns, .is_available = columns.Store.check });
-            self.head = fork_choice.getHeadCached(self.store) catch return error.ImportCommitFailed;
-            if (!std.mem.eql(u8, &self.head, &root)) return error.ImportCommitFailed;
-            try confirmExecutionHeadAt(self.store, self.engine, self.head);
-            snapshot.saveForkChoiceStoreAt(self.allocator, self.io, self.dir, "fork-choice.bin", self.store, self.head) catch return error.ImportCommitFailed;
-            self.next_slot = try std.math.add(u64, block.slot, 1);
+            try self.importOne(remote, signed);
             prior_slot = block.slot;
             imported += 1;
         }
         return imported;
+    }
+
+    /// Validate availability and transition, then publish a durable Engine-approved head.
+    fn importOne(self: *Coordinator, remote: ?*peer.Peer, signed: *const fulu.SignedBeaconBlock) !void {
+        if (self.cancelled) |flag| if (flag.load(.acquire)) return error.Canceled;
+        const block = signed.message;
+        const parent_state = self.store.block_states.getPtr(block.parent_root) orelse return error.UnknownParent;
+        const root = try merkle.HashTreeRoot(self.allocator, block);
+        if (block.body.blob_kzg_commitments.data.len != 0) {
+            const active = remote orelse return error.MissingPeer;
+            var column_context = ColumnContext{ .block = &block, .parent_state = parent_state };
+            const lookup = ingress.ColumnLookup{ .context = &column_context, .resolve = resolveColumn };
+            var sampled: [columns.column_count]u64 = undefined;
+            for (self.columns.samples.values[0..self.columns.samples.len], 0..) |index, i| sampled[i] = index;
+            const identifier = requests.ByRootIdentifier{ .block_root = root, .columns = .{ .data = sampled[0..self.columns.samples.len] } };
+            _ = try active.fetchColumnsByRoot(&.{identifier}, self.columns, self.settings, lookup);
+            if (!try self.columns.available(root, &block)) return error.DataUnavailable;
+        }
+        const at_slot = try std.math.add(u64, self.store.genesis_time, try std.math.mul(u64, block.slot, @import("consensus_preset").Config.SECONDS_PER_SLOT));
+        if (at_slot > self.store.time) try fork_choice.onTick(self.store, at_slot);
+        try fork_choice.onBlock(self.store, signed.*, self.engine, .{ .context = self.columns, .is_available = columns.Store.check });
+        const selected = fork_choice.getHeadCached(self.store) catch return error.ImportCommitFailed;
+        try confirmExecutionHeadAt(self.store, self.engine, selected);
+        snapshot.saveForkChoiceStoreAt(self.allocator, self.io, self.dir, "fork-choice.bin", self.store, selected) catch return error.ImportCommitFailed;
+        self.head = selected;
+        self.next_slot = @max(self.next_slot, try std.math.add(u64, self.store.blocks.get(selected).?.slot, 1));
     }
 
     /// Serve a retained signed block by its message root.
@@ -121,7 +161,7 @@ pub const Coordinator = struct {
     }
 };
 
-test "ordered import saves a valid head and rejects a conflicting replay" {
+test "ordered import saves a valid head and skips a duplicate replay" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const fixtures = @import("fixture_runner.zig");
@@ -162,7 +202,7 @@ test "ordered import saves a valid head and rejects a conflicting replay" {
     defer restored.deinit();
     try std.testing.expectEqual(accepted, try fork_choice.getHead(&restored));
     try std.testing.expectEqual(accepted, Coordinator.atSlot(&coordinator, 1).?);
-    try std.testing.expectError(error.ConflictingParent, coordinator.importBlocks(null, &.{first}, 1, 1));
+    try std.testing.expectEqual(@as(usize, 0), try coordinator.importBlocks(null, &.{first}, 1, 1));
     try std.testing.expectEqual(accepted, coordinator.head);
     const second = try fixtures.decodeBlock(allocator, fixtures.fork_choice_heavier_blocks[1]);
     defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, second);
@@ -192,6 +232,33 @@ test "ordered import saves a valid head and rejects a conflicting replay" {
     defer recovered.deinit();
     try std.testing.expectEqual(next, try fork_choice.getHead(&recovered));
     try std.testing.expectEqual(try merkle.HashTreeRoot(allocator, recovered.block_states.get(next).?), second.message.state_root);
+
+    const third = try fixtures.decodeBlock(allocator, fixtures.fork_choice_heavier_blocks[2]);
+    defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, third);
+    const competing = try fixtures.decodeBlock(allocator, fixtures.fork_choice_heavier_blocks[3]);
+    defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, competing);
+    try std.testing.expectEqual(@as(usize, 1), try resumed.importBlocks(null, &.{third}, 3, 1));
+    const selected = resumed.head;
+    try std.testing.expectEqual(@as(usize, 1), try resumed.importBlocks(null, &.{competing}, competing.message.slot, 1));
+    try std.testing.expectEqual(selected, resumed.head);
+    const competing_root = try merkle.HashTreeRoot(allocator, competing.message);
+    try std.testing.expect(restored.block_states.contains(competing_root));
+    var branched = try snapshot.loadForkChoiceStore(allocator, io, tmp.dir, "fork-choice.bin");
+    defer branched.deinit();
+    try std.testing.expect(branched.block_states.contains(competing_root));
+    try std.testing.expectEqual(selected, try fork_choice.getHeadCached(&branched));
+    try std.testing.expectEqual(third.message.body.execution_payload.block_hash, engine.head.?);
+
+    const attestation_bytes = try fixtures.decode(allocator, @embedFile("fixtures/fulu_fork_choice/heavier_branch/attestation_0xfd7837e56b89c2042febfa3e790e8e4f12177170bcb7a6abcfc08b37474f20ba.ssz_snappy"));
+    defer allocator.free(attestation_bytes);
+    var attestation_reader: std.Io.Reader = .fixed(attestation_bytes);
+    const attestation = try ssz.deserialize(allocator, fulu.Attestation, &attestation_reader);
+    defer ssz.freeDecoded(allocator, fulu.Attestation, attestation);
+    try fork_choice.onAttestation(&restored, attestation, false);
+    const voted = try fork_choice.getHeadCached(&restored);
+    try std.testing.expectEqual(competing_root, voted);
+    try confirmExecutionHeadAt(&restored, engine.interface(), voted);
+    try std.testing.expectEqual(competing.message.body.execution_payload.block_hash, engine.head.?);
 }
 
 test "two peers catch up from an anchor and resume after restart" {
@@ -295,5 +362,17 @@ test "two peers catch up from an anchor and resume after restart" {
     try std.testing.expectEqual(source_sync.head, resumed.head);
     try std.testing.expectEqual(second.message.body.execution_payload.block_hash, target_engine.head.?);
     try std.testing.expectEqual(try merkle.HashTreeRoot(allocator, source_chain.block_states.get(source_sync.head).?), try merkle.HashTreeRoot(allocator, restored.block_states.get(resumed.head).?));
+    try std.testing.expectError(error.InvalidRequest, resumed.step(try target_service.activePeer(), 17));
+    try std.testing.expectEqual(@as(usize, 0), try resumed.step(try target_service.activePeer(), 16));
+    try std.testing.expectEqual(@as(u64, 19), resumed.next_slot);
+    try std.testing.expectEqual(@as(usize, 0), try resumed.step(try target_service.activePeer(), 16));
+    try std.testing.expectEqual(@as(u64, 35), resumed.next_slot);
+    const competing = try fixtures.decodeBlock(allocator, fixtures.fork_choice_heavier_blocks[3]);
+    defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, competing);
+    try std.testing.expectEqual(@as(usize, 1), try source_sync.importBlocks(null, &.{competing}, competing.message.slot, 1));
+    const competing_root = try merkle.HashTreeRoot(allocator, competing.message);
+    try std.testing.expectEqual(@as(usize, 1), try resumed.importHead(try target_service.activePeer(), competing_root));
+    try std.testing.expect(restored.block_states.contains(competing_root));
+    try std.testing.expectEqual(source_sync.head, resumed.head);
     if (worker.err) |err| return err;
 }
