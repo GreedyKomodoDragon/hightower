@@ -1,0 +1,40 @@
+{
+  "name": "eth_getStorageAt",
+  "spec_source": "src/execution/fixtures/create_child_revert.json",
+  "spec_case": "tests/constantinople/eip1014_create2/test_create_returndata.py::test_create2_return_data[fork_Cancun-state_test-return_type_in_create_REVERT-return_type_RETURN-create_type_CREATE-call_return_size_32]",
+  "block_tags": ["latest", "pending", "earliest", "0x0"],
+  "cases": [
+    {
+      "params": ["0x6b205c00da6885acc63f731d59a2b41e1ece2a98", "0x0", "0x999"],
+      "error": -32001
+    },
+    {
+      "params": ["0x6b205c00da6885acc63f731d59a2b41e1ece2a98", "0x0", "latestish"],
+      "error": -32602
+    },
+    {
+      "params": ["0x6b205c00da6885acc63f731d59a2b41e1ece2a98", "0x00", "latest"],
+      "error": -32602
+    },
+    {
+      "params": ["bad-address", "0x0", "latest"],
+      "error": -32602
+    },
+    {
+      "params": ["0x6b205c00da6885acc63f731d59a2b41e1ece2a98", "bad-slot", "latest"],
+      "error": -32602
+    },
+    {
+      "params": ["0x6b205c00da6885acc63f731d59a2b41e1ece2a98"],
+      "error": -32602
+    },
+    {
+      "params": [],
+      "error": -32602
+    },
+    {
+      "params": ["0x6b205c00da6885acc63f731d59a2b41e1ece2a98", "0x0", "latest", "extra"],
+      "error": -32602
+    }
+  ]
+}

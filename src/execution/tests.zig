@@ -142,6 +142,7 @@ test "execution JSON-RPC dispatches chain and block methods with bounded input" 
         .{ .method = "eth_getBlockByNumber", .params = &.{ .{ .string = "latest" }, .{ .bool = false } } },
         .{ .method = "eth_getBalance", .params = &.{ .{ .string = zero_address }, .{ .string = "latest" } } },
         .{ .method = "eth_getCode", .params = &.{ .{ .string = zero_address }, .{ .string = "latest" } } },
+        .{ .method = "eth_getStorageAt", .params = &.{ .{ .string = zero_address }, .{ .string = "0x0" }, .{ .string = "latest" } } },
         .{ .method = "eth_call", .params = &.{ call, .{ .string = "latest" } } },
         .{ .method = "eth_estimateGas", .params = &.{ call, .{ .string = "latest" } } },
         .{ .method = "eth_getTransactionReceipt", .params = &.{.{ .string = "0x0000000000000000000000000000000000000000000000000000000000000000" }} },
@@ -208,6 +209,93 @@ test "execution JSON-RPC eth_getCode returns spec fixture code by block tag" {
     for (fixture.get("cases").?.array.items) |test_case| {
         const case_object = test_case.object;
         const reply = try server.dispatch(a, try rpcRequest(a, id, "eth_getCode", case_object.get("params").?.array.items));
+        id += 1;
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, reply, .{});
+        defer parsed.deinit();
+        if (case_object.get("result")) |expected| {
+            try std.testing.expectEqualStrings(expected.string, parsed.value.object.get("result").?.string);
+            try std.testing.expect(!parsed.value.object.contains("error"));
+        } else {
+            try std.testing.expectEqual(case_object.get("error").?.integer, parsed.value.object.get("error").?.object.get("code").?.integer);
+            try std.testing.expect(!parsed.value.object.contains("result"));
+        }
+    }
+}
+
+test "execution JSON-RPC eth_getStorageAt returns spec fixture words by block tag" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const fixture_json = try std.json.parseFromSlice(std.json.Value, a, @embedFile("fixtures/rpc_get_storage_at.json"), .{});
+    const fixture = fixture_json.value.object;
+    const spec_json = try std.json.parseFromSlice(std.json.Value, a, @embedFile("fixtures/create_child_revert.json"), .{});
+    const spec_case = spec_json.value.object.get(fixture.get("spec_case").?.string).?.object;
+    const pre = spec_case.get("pre").?.object;
+    var world = execution.state.State.init(a);
+    defer world.deinit();
+    var pre_it = pre.iterator();
+    while (pre_it.next()) |entry| {
+        const account = entry.value_ptr.*;
+        const storage = account.object.get("storage").?.object;
+        var address: execution.Address = undefined;
+        _ = try std.fmt.hexToBytes(&address, entry.key_ptr.*[2..]);
+        var storage_it = storage.iterator();
+        while (storage_it.next()) |slot_entry| {
+            const slot = try std.fmt.parseInt(u256, slot_entry.key_ptr.*[2..], 16);
+            const value = try std.fmt.parseInt(u256, slot_entry.value_ptr.*.string[2..], 16);
+            try world.setStorage(address, slot, value);
+        }
+    }
+    var header = std.mem.zeroes(execution.Header);
+    header.state_root = try world.stateRoot();
+    header.gas_limit = 30_000_000;
+    header.base_fee_per_gas = 1;
+    var chain = try execution.chain.Chain.init(a, 1, .fulu, header, &world);
+    defer chain.deinit();
+    var pool = execution.pool.Pool.init(a, .{});
+    defer pool.deinit();
+    var server: execution.rpc.Server = .{ .chain = &chain, .pool = &pool, .world = &world };
+    var id: usize = 1;
+    const block_tags = fixture.get("block_tags").?.array.items;
+    var query_it = pre.iterator();
+    while (query_it.next()) |entry| {
+        const account = entry.value_ptr.*;
+        const address_hex = entry.key_ptr.*;
+        const storage = account.object.get("storage").?.object;
+        if (storage.count() == 0) {
+            const zero: [32]u8 = .{0} ** 32;
+            const expected = try std.fmt.allocPrint(a, "0x{s}", .{std.fmt.bytesToHex(zero, .lower)});
+            for (block_tags) |tag| {
+                const reply = try server.dispatch(a, try rpcRequest(a, id, "eth_getStorageAt", &.{ .{ .string = address_hex }, .{ .string = "0x0" }, tag }));
+                id += 1;
+                var parsed = try std.json.parseFromSlice(std.json.Value, a, reply, .{});
+                defer parsed.deinit();
+                try std.testing.expectEqualStrings(expected, parsed.value.object.get("result").?.string);
+                try std.testing.expect(!parsed.value.object.contains("error"));
+            }
+            continue;
+        }
+        var storage_it = storage.iterator();
+        while (storage_it.next()) |slot_entry| {
+            const slot = try std.fmt.parseInt(u256, slot_entry.key_ptr.*[2..], 16);
+            const value = try std.fmt.parseInt(u256, slot_entry.value_ptr.*.string[2..], 16);
+            var word: [32]u8 = undefined;
+            std.mem.writeInt(u256, &word, value, .big);
+            const expected = try std.fmt.allocPrint(a, "0x{s}", .{std.fmt.bytesToHex(word, .lower)});
+            const slot_hex = try std.fmt.allocPrint(a, "0x{x}", .{slot});
+            for (block_tags) |tag| {
+                const reply = try server.dispatch(a, try rpcRequest(a, id, "eth_getStorageAt", &.{ .{ .string = address_hex }, .{ .string = slot_hex }, tag }));
+                id += 1;
+                var parsed = try std.json.parseFromSlice(std.json.Value, a, reply, .{});
+                defer parsed.deinit();
+                try std.testing.expectEqualStrings(expected, parsed.value.object.get("result").?.string);
+                try std.testing.expect(!parsed.value.object.contains("error"));
+            }
+        }
+    }
+    for (fixture.get("cases").?.array.items) |test_case| {
+        const case_object = test_case.object;
+        const reply = try server.dispatch(a, try rpcRequest(a, id, "eth_getStorageAt", case_object.get("params").?.array.items));
         id += 1;
         var parsed = try std.json.parseFromSlice(std.json.Value, a, reply, .{});
         defer parsed.deinit();
