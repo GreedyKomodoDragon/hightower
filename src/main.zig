@@ -2,8 +2,8 @@
 // blocks pass column, execution, and state checks before the head is saved.
 // Recovery reselects the saved execution head before either listener opens.
 //
-//   anchor/snapshot -> peer range -> verified block -> durable head
-// The runtime has one active peer and one configured bootstrap ENR.
+//   anchor/snapshot -> peer range or branch -> verified block -> durable head
+// The runtime keeps two active peers and accepts one configured bootstrap ENR.
 const std = @import("std");
 const hightower = @import("hightower");
 const ssz = @import("ssz");
@@ -144,14 +144,14 @@ fn runRuntime(init: std.process.Init) !void {
     var coordinator = hightower.consensus.PeerSync.Coordinator{ .allocator = allocator, .io = init.io, .dir = dir, .store = &store, .columns = &columns, .settings = &kzg, .engine = engine.interface(), .head = head, .next_slot = try std.math.add(u64, store.blocks.get(head).?.slot, 1) };
     var mutex: std.Io.Mutex = .init;
     var announcements = Announcements{ .coordinator = &coordinator, .mutex = &mutex, .slot = store.blocks.get(head).?.slot };
-    var gossip = try hightower.consensus.P2PGossip.Service.init(allocator, ingress, digest, &.{}, 1, 3, .{ .context = &announcements, .validate = Announcements.block }, .{ .context = &announcements, .validate = Announcements.attestation }, .{ .context = &announcements, .validate = Announcements.aggregate }, null);
+    var gossip = try hightower.consensus.P2PGossip.Service.init(allocator, ingress, digest, &.{}, 16, 3, .{ .context = &announcements, .validate = Announcements.block }, .{ .context = &announcements, .validate = Announcements.attestation }, .{ .context = &announcements, .validate = Announcements.aggregate }, null);
     defer gossip.deinit();
     var fork_id = [_]u8{0} ** 16;
     @memcpy(fork_id[0..4], &digest);
     const local = hightower.consensus.ENR.Local{ .sequence = try nextEnrSequence(allocator, init.io, dir), .ip = config.address.ip4.bytes, .udp_port = 0, .tcp_port = 0, .fork_id = fork_id, .next_fork_digest = .{0} ** 4, .custody_group_count = 128 };
     const status = hightower.consensus.P2PControl.Status{ .fork_digest = digest, .finalized_root = store.finalized_checkpoint.root, .finalized_epoch = store.finalized_checkpoint.epoch, .head_root = head, .head_slot = store.blocks.get(head).?.slot, .earliest_available_slot = block.slot };
     const metadata = hightower.consensus.P2PControl.MetaData{ .seq_number = 1, .attnets = .{ .data = [_]bool{false} ** 64 }, .syncnets = .{ .data = [_]bool{false} ** 4 }, .custody_group_count = 128 };
-    var p2p = try hightower.consensus.P2PService.Service.init(allocator, init.io, key, local, 2, &gossip, status, metadata);
+    var p2p = try hightower.consensus.P2PService.Service.init(allocator, init.io, key, local, 16, &gossip, status, metadata);
     defer p2p.deinit();
     if (settings.bootstrap_enr.len != 0) try p2p.addBootstrap(settings.bootstrap_enr);
     p2p.setRoutes(.{ .blocks = .{ .context = &coordinator, .by_root = hightower.consensus.PeerSync.Coordinator.byRoot, .root_at_slot = hightower.consensus.PeerSync.Coordinator.atSlot }, .columns = &columns, .canonical = .{ .context = &coordinator, .root_at_slot = hightower.consensus.PeerSync.Coordinator.atSlot } });
@@ -165,28 +165,38 @@ fn runRuntime(init: std.process.Init) !void {
     thread.detach();
     while (true) {
         try p2p.step(100);
-        if (!p2p.connected()) continue;
-        const advertised = @max(p2p.connection.?.remote_status.head_slot, announcements.slot);
-        if (advertised < coordinator.next_slot) continue;
-        const active = try p2p.activePeer();
-        try mutex.lock(init.io);
-        announcements.importing = true;
-        const result = coordinator.step(active, @min(advertised - coordinator.next_slot + 1, 16));
-        announcements.importing = false;
-        mutex.unlock(init.io);
-        _ = result catch |err| {
-            if (err == error.ForkchoiceUpdateFailed or err == error.ImportCommitFailed) return err;
-            std.log.warn("peer import stopped at last valid head: {s}", .{@errorName(err)});
-            switch (err) {
-                error.InvalidStateRoot, error.InvalidResponseOrder, error.ConflictingParent, error.DuplicateBlock, error.UnrequestedBlock, error.InvalidCellProof, error.InvalidDataColumn => gossip.peers.noteInvalid(p2p.connection.?.connection.peer_id),
-                else => {},
-            }
-            p2p.connection.?.deinit();
-            p2p.connection = null;
-            continue;
-        };
         p2p.status.head_root = coordinator.head;
         p2p.status.head_slot = store.blocks.get(coordinator.head).?.slot;
+        for (0..hightower.consensus.P2PService.max_active_peers) |index| {
+            const active = p2p.peerAt(index) orelse continue;
+            const remote_id = active.connection.peer_id;
+            const remote_head = active.remote_status.head_root;
+            const advertised = @max(active.remote_status.head_slot, announcements.slot);
+            if (advertised < coordinator.next_slot and store.blocks.contains(remote_head)) continue;
+            try mutex.lock(init.io);
+            announcements.importing = true;
+            const result = if (advertised >= coordinator.next_slot)
+                coordinator.step(active, @min(advertised - coordinator.next_slot + 1, 16)) catch |err| switch (err) {
+                    error.UnknownParent => coordinator.importHead(active, remote_head),
+                    else => err,
+                }
+            else
+                coordinator.importHead(active, remote_head);
+            announcements.importing = false;
+            mutex.unlock(init.io);
+            _ = result catch |err| {
+                if (err == error.ForkchoiceUpdateFailed or err == error.ImportCommitFailed) return err;
+                std.log.warn("peer import stopped at last valid head: {s}", .{@errorName(err)});
+                switch (err) {
+                    error.InvalidStateRoot, error.InvalidResponseOrder, error.DuplicateBlock, error.UnrequestedBlock, error.InvalidCellProof, error.InvalidDataColumn => gossip.peers.noteInvalid(remote_id),
+                    else => {},
+                }
+                p2p.dropPeer(index);
+                continue;
+            };
+            p2p.status.head_root = coordinator.head;
+            p2p.status.head_slot = store.blocks.get(coordinator.head).?.slot;
+        }
     }
 }
 
@@ -238,9 +248,11 @@ const Announcements = struct {
         if (!self.importing) try self.mutex.lock(self.coordinator.io);
         defer if (!self.importing) self.mutex.unlock(self.coordinator.io);
         try hightower.consensus.onForkChoiceAttestation(self.coordinator.store, value.*, false);
-        self.coordinator.head = try hightower.consensus.getForkChoiceHeadCached(self.coordinator.store);
-        hightower.consensus.PeerSync.confirmExecutionHeadAt(self.coordinator.store, self.coordinator.engine, self.coordinator.head) catch return error.ForkchoiceUpdateFailed;
-        hightower.consensus.saveForkChoiceStoreAt(self.coordinator.allocator, self.coordinator.io, self.coordinator.dir, "fork-choice.bin", self.coordinator.store, self.coordinator.head) catch return error.ImportCommitFailed;
+        const selected = try hightower.consensus.getForkChoiceHeadCached(self.coordinator.store);
+        hightower.consensus.PeerSync.confirmExecutionHeadAt(self.coordinator.store, self.coordinator.engine, selected) catch return error.ForkchoiceUpdateFailed;
+        hightower.consensus.saveForkChoiceStoreAt(self.coordinator.allocator, self.coordinator.io, self.coordinator.dir, "fork-choice.bin", self.coordinator.store, selected) catch return error.ImportCommitFailed;
+        self.coordinator.head = selected;
+        self.coordinator.next_slot = try std.math.add(u64, self.coordinator.store.blocks.get(selected).?.slot, 1);
     }
     /// Apply an aggregate's attestation through the same gate.
     fn aggregate(context: *anyopaque, value: *const hightower.fulu.SignedAggregateAndProof) !void {

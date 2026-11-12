@@ -1,6 +1,6 @@
 # Local Fulu peer runtime
 
-The runtime imports one peer chain from a trusted Fulu anchor. Supply matching raw SSZ `BeaconState` and `BeaconBlock` files from a verified checkpoint, plus the same network's fork schedule and execution client. Hightower checks the anchor's state root but cannot establish its earlier history. The bundled fixture is only for the local test below.
+The runtime imports peer branches from a trusted Fulu anchor. Supply matching raw SSZ `BeaconState` and `BeaconBlock` files from a verified checkpoint, plus the same network's fork schedule and execution client. Hightower checks the anchor's state root but cannot establish its earlier history. The bundled fixture is only for the local test below.
 
 Copy [runtime.example.json](runtime.example.json) and set its paths and addresses. Keep the JSON file free of credentials. A secret manager should inject `HIGHTOWER_NODE_KEY` and `HIGHTOWER_ENGINE_JWT_SECRET` into each node process. Each must be exactly 32 bytes encoded as 64 hex digits, without `0x`. Use a different node key per node and preserve it across restarts. The JWT secret must match that node's execution client's secret. The runtime rejects either former JSON field, even if its value is `null`; remove both fields when migrating an older config and rotate any credential that was committed or shared. Environment variables are an injection mechanism, not a complete secret-management system.
 
@@ -13,9 +13,9 @@ zig build
 
 A config with only `listen_address` still serves the bundled anchor through a read-only Beacon API; it does not join P2P or read credentials. The Beacon API and `/metrics` bind to `listen_address`.
 
-The importer checks response order, parent roots, selected KZG-proven columns, the execution client's verdict, and the consensus transition before saving `fork-choice.bin`. It requests at most 16 slots per round from one active peer. The column store persists under `data_dir/columns`. Restart loads both stores, asks the execution client to select the snapshot's head, safe, and finalized hashes, and requires `VALID` before either listener binds. It then increments the durable `enr-sequence` for its new P2P ports and continues after the saved head. A disconnected or invalid peer leaves that head intact. The local ENR advertises all 128 custody columns; blob-bearing blocks require a complete column set.
+The service keeps at most two authenticated peers and fills open connections from verified discovery candidates. A disconnected or invalid peer is dropped; the remaining peer stays available while discovery finds a replacement. The importer requests at most 16 slots per runtime round. If a response names an unknown parent or a peer offers a competing head, it fetches missing ancestors by root and imports them from the known parent. It checks response order, parent roots, selected KZG-proven columns, the execution client's verdict, and the consensus transition. Valid side branches remain in `fork-choice.bin` even when fork choice keeps the current head. The Beacon API head changes only after Engine accepts the selected head and the snapshot is saved. The column store persists under `data_dir/columns`. Restart loads both stores, asks the execution client to select the snapshot's head, safe, and finalized hashes, and requires `VALID` before either listener binds. It then increments the durable `enr-sequence` for its new P2P ports and continues after the saved head. The local ENR advertises all 128 custody columns; blob-bearing blocks require a complete column set.
 
-The loop does not select a replacement peer, reconcile competing branches, or backfill archival history. Snapshots are bounded to 256 MiB and 4096 records per map. The advertised fork schedule assumes an anchor already in Fulu with the compiled blob schedule.
+Branch backfill is bounded to 128 blocks per attempt; archival history is not fetched. Snapshots are bounded to 256 MiB and 4096 records per map. The advertised fork schedule assumes an anchor already in Fulu with the compiled blob schedule.
 
 ## Reproducible two-node check
 
@@ -27,7 +27,7 @@ ZIG_GLOBAL_CACHE_DIR=.zig-global-cache zig build
 python3 scripts/test_runtime_network.py
 ```
 
-The script creates a temporary pinned Fulu anchor, a serving node snapshot with two valid successor blocks, two isolated Engine test servers, and two Hightower processes with distinct identities and data directories. Its fixed credentials are disposable test values. It checks startup rejection of missing, malformed, and legacy JSON credentials before any listener binds. It then waits for both Beacon API heads to equal the pinned slot-2 root, stops and restarts the importing node using its persisted directory, and checks the head again. Captured logs are checked for credential bytes. On 2026-11-07 the result was:
+The script creates a temporary pinned Fulu anchor, a serving node snapshot with two valid successor blocks, two isolated Engine test servers, and two Hightower processes with distinct identities and data directories. Its fixed credentials are disposable test values. It checks startup rejection of missing, malformed, and legacy JSON credentials before any listener binds. It then waits for both Beacon API heads to equal the pinned slot-2 root, stops and restarts the importing node using its persisted directory, and checks the head again. Captured logs are checked for credential bytes. On 2026-11-12 the result was:
 
 ```text
 two nodes converged at slot 2, head 0xd6ba53e69bd41b9e75c0650c6dc151bcf1133657c73c450e828076bba0dc6edd; target recovered after restart
