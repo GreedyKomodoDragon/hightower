@@ -18,6 +18,11 @@ const gossip = @import("p2p_gossip.zig");
 const control = @import("p2p_control.zig");
 const Ecdsa = std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
 
+pub const max_active_peers: usize = 2;
+const primary_index: usize = 0;
+const secondary_index: usize = 1;
+const fixed_descriptors: usize = 2; // Discovery socket and TCP listener.
+
 pub const Service = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -114,8 +119,8 @@ pub const Service = struct {
     /// Borrow either authenticated peer, with the primary in slot zero.
     pub fn peerAt(self: *Service, index: usize) ?*peer.Peer {
         return switch (index) {
-            0 => if (self.connection) |*active| active else null,
-            1 => if (self.secondary) |*active| active else null,
+            primary_index => if (self.connection) |*active| active else null,
+            secondary_index => if (self.secondary) |*active| active else null,
             else => null,
         };
     }
@@ -123,7 +128,7 @@ pub const Service = struct {
     /// Authenticate an inbound stream and resolve reciprocal dials by node ID.
     fn acceptInbound(self: *Service, stream: std.Io.net.Stream) !void {
         var transport = try tcp.Connection.accept(self.allocator, self.io, stream, self.identity, self.discovery_service);
-        for (0..2) |index| {
+        for (0..max_active_peers) |index| {
             if (self.peerAt(index)) |existing| {
                 if (std.mem.eql(u8, &existing.connection.peer_id, &transport.peer_id)) {
                     transport.deinit();
@@ -152,10 +157,10 @@ pub const Service = struct {
     /// Drop a failed peer and promote the surviving connection.
     pub fn dropPeer(self: *Service, index: usize) void {
         if (self.peerAt(index)) |active| active.deinit();
-        if (index == 0) {
+        if (index == primary_index) {
             self.connection = self.secondary;
             self.secondary = null;
-        } else if (index == 1) self.secondary = null;
+        } else if (index == secondary_index) self.secondary = null;
     }
 
     /// Poll discovery, listener, and active peer once within a bounded wait.
@@ -175,7 +180,7 @@ pub const Service = struct {
                 break;
             }
         }
-        var descriptors: [4]std.posix.pollfd = undefined;
+        var descriptors: [fixed_descriptors + max_active_peers]std.posix.pollfd = undefined;
         var count: usize = 0;
         descriptors[count] = .{ .fd = self.discovery_service.socket.socket.handle, .events = if (self.pending_dial == null) std.posix.POLL.IN else 0, .revents = 0 };
         count += 1;
@@ -229,8 +234,8 @@ pub const Service = struct {
                 }
             }
         }
-        for (0..2) |index| {
-            if (2 + index >= count or descriptors[2 + index].revents == 0) continue;
+        for (0..max_active_peers) |index| {
+            if (fixed_descriptors + index >= count or descriptors[fixed_descriptors + index].revents == 0) continue;
             const active = self.peerAt(index) orelse continue;
             // A receive error may leave a partially consumed transport record.
             active.step() catch |err| {
@@ -429,7 +434,7 @@ test "two live services discover and connect without a transport address" {
     if (c_context.err) |err| return err;
     try std.testing.expect(a.secondary != null);
     try std.testing.expectEqual(c.discovery_service.local_record.node_id, a.secondary.?.connection.peer_id);
-    a.dropPeer(0);
+    a.dropPeer(primary_index);
     try std.testing.expect(a.connected());
     try std.testing.expect(a.secondary == null);
     try std.testing.expectEqual(c.discovery_service.local_record.node_id, a.connection.?.connection.peer_id);

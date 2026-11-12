@@ -3,6 +3,7 @@
 ## Control flow
 
 - When an `if` branch returns from a function, return inside that branch and place the remaining path after it. Do not wrap the remaining path in an `else` block.
+- Avoid magic values when possible; name meaningful limits, offsets, and indexes.
 
 ## Blockchain code comments
 

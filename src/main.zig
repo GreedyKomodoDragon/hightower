@@ -167,7 +167,7 @@ fn runRuntime(init: std.process.Init) !void {
         try p2p.step(100);
         p2p.status.head_root = coordinator.head;
         p2p.status.head_slot = store.blocks.get(coordinator.head).?.slot;
-        for (0..2) |index| {
+        for (0..hightower.consensus.P2PService.max_active_peers) |index| {
             const active = p2p.peerAt(index) orelse continue;
             const remote_id = active.connection.peer_id;
             const remote_head = active.remote_status.head_root;
