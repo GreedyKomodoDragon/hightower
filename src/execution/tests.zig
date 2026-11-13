@@ -7,6 +7,7 @@ test {
     _ = execution.pool;
     _ = execution.chain;
     _ = execution.rpc;
+    _ = execution.durable;
 }
 
 /// Serializes one valid JSON-RPC test request from structured parameters.
@@ -959,6 +960,31 @@ test "execution state snapshots revert and commit in LIFO order" {
     try testing.expectEqualSlices(u8, &committed_root, &(try state.stateRoot()));
 }
 
+test "execution state checkpoints and deltas restore roots" {
+    const a = testing.allocator;
+    var parent = execution.state.State.init(a);
+    defer parent.deinit();
+    const address: execution.Address = .{0x11} ** 20;
+    try parent.setBalance(address, 100);
+    try parent.setStorage(address, 7, 9);
+    const checkpoint = try parent.checkpointBytes(a);
+    defer a.free(checkpoint);
+    var restored = execution.state.State.init(a);
+    defer restored.deinit();
+    try restored.applyStateBytes(checkpoint);
+    try testing.expectEqualSlices(u8, &(try parent.stateRoot()), &(try restored.stateRoot()));
+    var child = try parent.clone(a);
+    defer child.deinit();
+    try child.setBalance(address, 200);
+    try child.setStorage(address, 7, 0);
+    try child.setStorage(address, 8, 10);
+    const delta = try child.deltaBytes(a, &parent);
+    defer a.free(delta);
+    try restored.applyStateBytes(delta);
+    try testing.expectEqualSlices(u8, &(try child.stateRoot()), &(try restored.stateRoot()));
+    try testing.expectError(error.InvalidStateData, restored.applyStateBytes(delta[0 .. delta.len - 1]));
+}
+
 // Confirms blooms use only log addresses and topics, and combine receipt logs.
 test "receipt blooms include addresses and topics but not data" {
     const logs = [_]execution.Log{.{ .address = .{0x11} ** 20, .topics = &.{.{0x22} ** 32}, .data = "ignored" }};
@@ -1335,6 +1361,28 @@ test "signed local token deployment, transfer, and revert commit through block a
     for (0..3) |i| try testing.expectEqualStrings(rpc_log.get("topics").?.array.items[i].string, receipt_logs[0].object.get("topics").?.array.items[i].string);
     try testing.expectEqualStrings("0x1", rpc_log.get("blockNumber").?.string);
     try testing.expectEqualStrings("0x1", rpc_log.get("transactionIndex").?.string);
+    var durable_dir = testing.tmpDir(.{});
+    defer durable_dir.cleanup();
+    var genesis_state = try chain.records.items[0].world.?.clone(a);
+    defer genesis_state.deinit();
+    var durable_store = try execution.durable.Store.open(a, testing.io, durable_dir.dir, "execution", .fulu, header, &genesis_state);
+    try durable_store.stage(.fulu, next, &raw, &.{}, canonical, &genesis_state, &chain.latest().world.?);
+    try durable_store.commit(chain.latest().hash, chain.records.items[0].hash, chain.records.items[0].hash);
+    durable_store.close();
+    var recovered_world = execution.state.State.init(a);
+    defer recovered_world.deinit();
+    var reopened_store = try execution.durable.Store.open(a, testing.io, durable_dir.dir, "execution", .fulu, header, &recovered_world);
+    defer reopened_store.close();
+    var recovered_chain = try execution.chain.Chain.init(a, 1, .fulu, header, &recovered_world);
+    defer recovered_chain.deinit();
+    try reopened_store.recover(&recovered_chain, &recovered_world);
+    try testing.expectEqualSlices(u8, &next.state_root, &(try recovered_world.stateRoot()));
+    try testing.expectEqual(@as(usize, 3), recovered_chain.latest().receipts().len);
+    var recovered_rpc: execution.rpc.Server = .{ .chain = &recovered_chain, .pool = &pool, .world = &recovered_world };
+    const recovered_receipt = try recovered_rpc.dispatch(a, transfer_receipt_req);
+    try testing.expectEqual(@as(usize, 1), (try std.json.parseFromSlice(std.json.Value, a, recovered_receipt, .{})).value.object.get("result").?.object.get("logs").?.array.items.len);
+    const recovered_logs = try recovered_rpc.dispatch(a, logs_req);
+    try testing.expectEqual(@as(usize, 1), (try std.json.parseFromSlice(std.json.Value, a, recovered_logs, .{})).value.object.get("result").?.array.items.len);
     var alternative = next;
     alternative.extra_data = &.{0x42};
     alternative.timestamp = 2;
@@ -1352,12 +1400,12 @@ test "signed local token deployment, transfer, and revert commit through block a
         .withdrawals_root = alternative.withdrawals_root,
         .logs_bloom = alternative.logs_bloom,
         .gas_used = 0,
-    }, &chain.records.items[0].world);
+    }, &chain.records.items[0].world.?);
     const alternative_hash = chain.records.items[2].hash;
     const alternative_path = try chain.path(a, alternative_hash);
     chain.canonical.deinit(a);
     chain.canonical = alternative_path;
-    const alternative_world = try chain.latest().world.clone(a);
+    const alternative_world = try chain.latest().world.?.clone(a);
     world.deinit();
     world = alternative_world;
     const orphaned_logs = try server.dispatch(a, logs_req);

@@ -2,7 +2,8 @@
 // storage trie and code hash, and the secure state trie commits to all account
 // values. Storage keys are 32-byte words and zero values are absent. Mutations
 // are journaled while snapshots are open so reverting them restores the prior
-// state root. This in-memory model does not persist trie nodes or prune code.
+// state root. Durable checkpoints encode account values and code up to 24 KiB;
+// trie nodes are recomputed rather than persisted.
 //
 // storage slot → secure storage trie ─┐
 // code bytes → Keccak code hash ──────┼→ RLP account → secure state trie → root
@@ -14,6 +15,7 @@ const trie = @import("trie.zig");
 
 pub const Address = [20]u8;
 pub const Hash = [32]u8;
+const max_checkpoint_code_size = 24 * 1024;
 
 /// Derives the CREATE address from the creator and its nonce before creation.
 pub fn createAddress(creator: Address, nonce: u64) Address {
@@ -152,6 +154,100 @@ pub const State = struct {
             for (entry.storage.items) |slot| try copy.setStorage(entry.address, slot.slot, slot.value);
         }
         return copy;
+    }
+
+    /// Encodes every account for a periodic durable checkpoint.
+    pub fn checkpointBytes(self: *const State, allocator: std.mem.Allocator) ![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        try appendStateInt(&out, allocator, u32, @intCast(self.accounts.items.len));
+        for (self.accounts.items) |*entry| try self.writeAccount(&out, allocator, entry);
+        return out.toOwnedSlice(allocator);
+    }
+
+    /// Encodes account replacements and deletions relative to a parent state.
+    pub fn deltaBytes(self: *const State, allocator: std.mem.Allocator, parent: *const State) ![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        try out.appendNTimes(allocator, 0, 4);
+        var count: u32 = 0;
+        for (parent.accounts.items) |entry| if (self.findAccountConst(entry.address) == null) {
+            try out.append(allocator, 0);
+            try out.appendSlice(allocator, &entry.address);
+            count = try std.math.add(u32, count, 1);
+        };
+        for (self.accounts.items) |*entry| {
+            const old = parent.findAccountConst(entry.address);
+            if (old != null and self.sameAccount(parent, entry, old.?)) continue;
+            try self.writeAccount(&out, allocator, entry);
+            count = try std.math.add(u32, count, 1);
+        }
+        std.mem.writeInt(u32, out.items[0..4], count, .little);
+        return out.toOwnedSlice(allocator);
+    }
+
+    /// Applies a checked checkpoint or delta to the current state.
+    pub fn applyStateBytes(self: *State, bytes: []const u8) !void {
+        var offset: usize = 0;
+        const count = try takeStateInt(u32, bytes, &offset);
+        if (count > (bytes.len - offset) / 21) return error.InvalidStateData;
+        var seen: std.AutoHashMap(Address, void) = .init(self.allocator);
+        defer seen.deinit();
+        for (0..count) |_| {
+            const tag = (try takeStateBytes(bytes, &offset, 1))[0];
+            const address = (try takeStateBytes(bytes, &offset, 20))[0..20].*;
+            if (seen.contains(address)) return error.InvalidStateData;
+            try seen.put(address, {});
+            if (tag == 0) {
+                try self.deleteAccount(address);
+                continue;
+            }
+            if (tag != 1) return error.InvalidStateData;
+            const nonce = try takeStateInt(u64, bytes, &offset);
+            const balance = try takeStateInt(u256, bytes, &offset);
+            const code_len = try takeStateInt(u32, bytes, &offset);
+            if (code_len > max_checkpoint_code_size) return error.InvalidStateData;
+            const code = try takeStateBytes(bytes, &offset, code_len);
+            const slots = try takeStateInt(u32, bytes, &offset);
+            if (slots > (bytes.len - offset) / 64) return error.InvalidStateData;
+            try self.deleteAccount(address);
+            try self.createAccount(address);
+            try self.setNonce(address, nonce);
+            try self.setBalance(address, balance);
+            _ = try self.setCode(address, code);
+            for (0..slots) |_| {
+                const slot = try takeStateInt(u256, bytes, &offset);
+                const value = try takeStateInt(u256, bytes, &offset);
+                if (value == 0 or self.getStorage(address, slot) != 0) return error.InvalidStateData;
+                try self.setStorage(address, slot, value);
+            }
+        }
+        if (offset != bytes.len) return error.InvalidStateData;
+    }
+
+    /// Compares consensus account values and storage without depending on slot order.
+    fn sameAccount(self: *const State, parent: *const State, current: *const AccountEntry, old: *const AccountEntry) bool {
+        if (current.nonce != old.nonce or current.balance != old.balance or current.storage.items.len != old.storage.items.len) return false;
+        if (!std.mem.eql(u8, self.getCode(current.address), parent.getCode(old.address))) return false;
+        for (current.storage.items) |slot| if (parent.getStorage(current.address, slot.slot) != slot.value) return false;
+        return true;
+    }
+
+    /// Writes one full account replacement with code and storage.
+    fn writeAccount(self: *const State, out: *std.ArrayList(u8), allocator: std.mem.Allocator, entry: *const AccountEntry) !void {
+        try out.append(allocator, 1);
+        try out.appendSlice(allocator, &entry.address);
+        try appendStateInt(out, allocator, u64, entry.nonce);
+        try appendStateInt(out, allocator, u256, entry.balance);
+        const code = self.getCode(entry.address);
+        if (code.len > max_checkpoint_code_size) return error.ExecutionCodeTooLarge;
+        try appendStateInt(out, allocator, u32, @intCast(code.len));
+        try out.appendSlice(allocator, code);
+        try appendStateInt(out, allocator, u32, @intCast(entry.storage.items.len));
+        for (entry.storage.items) |slot| {
+            try appendStateInt(out, allocator, u256, slot.slot);
+            try appendStateInt(out, allocator, u256, slot.value);
+        }
     }
 
     /// Creates an explicit empty account; creating an existing account is a no-op.
@@ -524,6 +620,27 @@ pub const State = struct {
         entry.* = undefined;
     }
 };
+
+/// Appends a fixed-width state integer in little-endian order.
+fn appendStateInt(out: *std.ArrayList(u8), allocator: std.mem.Allocator, comptime T: type, value: T) !void {
+    var encoded: [@sizeOf(T)]u8 = undefined;
+    std.mem.writeInt(T, &encoded, value, .little);
+    try out.appendSlice(allocator, &encoded);
+}
+
+/// Takes a bounded byte slice from durable state data.
+fn takeStateBytes(bytes: []const u8, offset: *usize, count: usize) ![]const u8 {
+    if (offset.* > bytes.len or count > bytes.len - offset.*) return error.InvalidStateData;
+    const field = bytes[offset.*..][0..count];
+    offset.* += count;
+    return field;
+}
+
+/// Reads a fixed-width state integer from durable data.
+fn takeStateInt(comptime T: type, bytes: []const u8, offset: *usize) !T {
+    const field = try takeStateBytes(bytes, offset, @sizeOf(T));
+    return std.mem.readInt(T, field[0..@sizeOf(T)], .little);
+}
 
 /// Encodes a storage integer as its canonical RLP string.
 fn encodeValue(allocator: std.mem.Allocator, value: u256) ![]u8 {

@@ -14,7 +14,7 @@ pub const Record = struct {
     transactions: [][]u8,
     withdrawals: []execution.Withdrawal,
     result: ?transition.BlockResult,
-    world: execution.state.State,
+    world: ?execution.state.State,
 
     /// Releases a block snapshot and all retained canonical execution data.
     pub fn deinit(self: *Record, allocator: std.mem.Allocator) void {
@@ -23,7 +23,7 @@ pub const Record = struct {
         allocator.free(self.transactions);
         allocator.free(self.withdrawals);
         if (self.result) |*result| result.deinit();
-        self.world.deinit();
+        if (self.world) |*world| world.deinit();
     }
 
     /// Returns the ordered receipts, empty for a genesis anchor.
@@ -41,6 +41,12 @@ pub const Chain = struct {
     canonical: std.ArrayList(usize) = .empty,
     safe_hash: execution.Hash = [_]u8{0} ** 32,
     finalized_hash: execution.Hash = [_]u8{0} ** 32,
+    history_floor: u64 = 0,
+    durability_uncertain: bool = false,
+    state_loader: ?struct {
+        context: *anyopaque,
+        load: *const fn (*anyopaque, *const Chain, std.mem.Allocator, execution.Hash) anyerror!execution.state.State,
+    } = null,
 
     /// Takes a snapshot of genesis state and its already validated header.
     pub fn init(allocator: std.mem.Allocator, chain_id: u256, fork: transition.Fork, genesis: execution.Header, world: *const execution.state.State) !Chain {
@@ -98,6 +104,7 @@ pub const Chain = struct {
 
     /// Resolves a canonical number or block tag.
     pub fn byNumber(self: *const Chain, number: u64) ?*const Record {
+        if (number < self.history_floor and number != self.records.items[0].header.number) return null;
         for (self.canonical.items) |index| {
             const record = &self.records.items[index];
             if (record.header.number == number) return record;
@@ -111,7 +118,16 @@ pub const Chain = struct {
         return null;
     }
 
-    /// Builds the complete canonical path before publishing a fork-choice change.
+    /// Returns an owned post-state from RAM or durable checkpoint and delta data.
+    pub fn loadWorld(self: *const Chain, allocator: std.mem.Allocator, hash: execution.Hash) !execution.state.State {
+        const record = self.byHash(hash) orelse return error.UnknownBlock;
+        if (record.header.number < self.history_floor and record.header.number != self.records.items[0].header.number) return error.PrunedExecutionState;
+        if (record.world) |*world| return world.clone(allocator);
+        const loader = self.state_loader orelse return error.MissingExecutionState;
+        return loader.load(loader.context, self, allocator, hash);
+    }
+
+    /// Builds the canonical path from genesis or the retained checkpoint anchor.
     pub fn path(self: *const Chain, allocator: std.mem.Allocator, head: execution.Hash) !std.ArrayList(usize) {
         var reverse: std.ArrayList(usize) = .empty;
         errdefer reverse.deinit(allocator);
@@ -124,12 +140,15 @@ pub const Chain = struct {
             };
             const index = found orelse return error.UnknownBlock;
             try reverse.append(allocator, index);
-            if (index == 0) break;
+            if (index == 0 or self.records.items[index].header.number == self.history_floor) break;
             current = self.records.items[index].header.parent_hash;
             if (reverse.items.len > self.records.items.len) return error.InvalidAncestry;
         }
         std.mem.reverse(usize, reverse.items);
-        for (reverse.items, 0..) |index, number| if (self.records.items[index].header.number != self.records.items[0].header.number + number) return error.InvalidAncestry;
+        const start = self.records.items[reverse.items[0]].header.number;
+        if (start != self.records.items[0].header.number and start != self.history_floor) return error.InvalidAncestry;
+        for (reverse.items, 0..) |index, number| if (self.records.items[index].header.number != start + number) return error.InvalidAncestry;
+        if (start != self.records.items[0].header.number) try reverse.insert(allocator, 0, 0);
         return reverse;
     }
 
@@ -141,6 +160,37 @@ pub const Chain = struct {
         self.records.items[self.records.items.len - 1].result = result;
     }
 
+    /// Frees excluded records and remaps the canonical indexes.
+    pub fn retainOnly(self: *Chain, keep: []const bool) !void {
+        if (keep.len != self.records.items.len) return error.InvalidPruneMask;
+        if (!keep[0]) return error.InvalidPruneMask;
+        const positions = try self.allocator.alloc(usize, keep.len);
+        defer self.allocator.free(positions);
+        var retained: std.ArrayList(Record) = .empty;
+        errdefer retained.deinit(self.allocator);
+        var canonical: std.ArrayList(usize) = .empty;
+        errdefer canonical.deinit(self.allocator);
+        try canonical.ensureTotalCapacity(self.allocator, self.canonical.items.len);
+        var count: usize = 0;
+        for (keep) |wanted| if (wanted) {
+            count += 1;
+        };
+        try retained.ensureTotalCapacity(self.allocator, count);
+        for (self.records.items, 0..) |*record, index| {
+            if (!keep[index]) {
+                record.deinit(self.allocator);
+                continue;
+            }
+            positions[index] = retained.items.len;
+            retained.appendAssumeCapacity(record.*);
+        }
+        for (self.canonical.items) |index| if (keep[index]) canonical.appendAssumeCapacity(positions[index]);
+        self.records.deinit(self.allocator);
+        self.canonical.deinit(self.allocator);
+        self.records = retained;
+        self.canonical = canonical;
+    }
+
     /// Copies up to 255 canonical ancestors before the current head, newest first.
     pub fn olderHashes(self: *const Chain, allocator: std.mem.Allocator) ![]execution.Hash {
         return self.ancestorHashes(allocator, self.latest().hash);
@@ -149,7 +199,7 @@ pub const Chain = struct {
     /// Copies up to 255 ancestors of any validated block, newest first.
     pub fn ancestorHashes(self: *const Chain, allocator: std.mem.Allocator, head: execution.Hash) ![]execution.Hash {
         const record = self.byHash(head) orelse return error.UnknownBlock;
-        const count = @min(record.header.number - self.records.items[0].header.number, 255);
+        const count = @min(record.header.number - @max(self.records.items[0].header.number, self.history_floor), 255);
         const hashes = try allocator.alloc(execution.Hash, count);
         var current = record;
         for (hashes) |*hash| {
@@ -162,6 +212,7 @@ pub const Chain = struct {
     /// Locates a transaction and its zero-based index in canonical history.
     pub fn transaction(self: *const Chain, hash: execution.Hash) ?struct { record: *const Record, index: usize } {
         for (self.canonical.items) |record_index| for (self.records.items[record_index].transactions, 0..) |raw, index| {
+            if (self.records.items[record_index].header.number < self.history_floor) continue;
             // SAFETY: This value is fully initialized before any read.
             var candidate: execution.Hash = undefined;
             std.crypto.hash.sha3.Keccak256.hash(raw, &candidate, .{});
@@ -183,8 +234,8 @@ pub const Chain = struct {
             raws[i] = try self.allocator.dupe(u8, raw);
             copied += 1;
         }
-        var snapshot = try world.clone(self.allocator);
-        errdefer snapshot.deinit();
+        var snapshot: ?execution.state.State = if (self.state_loader == null) try world.clone(self.allocator) else null;
+        errdefer if (snapshot) |*state| state.deinit();
         const copied_withdrawals = try self.allocator.dupe(execution.Withdrawal, withdrawals);
         errdefer self.allocator.free(copied_withdrawals);
         return .{ .header = owned_header, .hash = try transition.headerHash(self.allocator, self.fork, header), .transactions = raws, .withdrawals = copied_withdrawals, .result = result, .world = snapshot };

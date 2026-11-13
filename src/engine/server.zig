@@ -146,6 +146,7 @@ pub const Server = struct {
     world: *execution.state.State,
     pool: *execution.pool.Pool,
     settings: ?*const execution.kzg.Settings = null,
+    store: ?*execution.durable.Store = null,
     secret: [32]u8,
     // shortcut: pinned fixture hashes stand in for EVM execution; use compatible payloads for full execution validation.
     fixture_payload_hashes: ?[]const execution.Hash = null,
@@ -162,6 +163,7 @@ pub const Server = struct {
 
     /// Authenticates and dispatches one bounded Engine JSON-RPC message.
     pub fn dispatch(self: *Server, allocator: std.mem.Allocator, bearer: []const u8, body: []const u8, now: i64) ![]u8 {
+        if (self.chain.durability_uncertain) return error.DatabaseNeedsReopen;
         try jwt.verify(allocator, self.secret, bearer, now);
         if (body.len > max_body) return error.RequestTooLarge;
         var arena = std.heap.ArenaAllocator.init(allocator);
@@ -250,6 +252,7 @@ pub const Server = struct {
 
     /// Validates against a cloned parent state and stages a valid direct child.
     fn newPayload(self: *Server, a: std.mem.Allocator, params: []const Value, version: u8) !Value {
+        if (self.chain.durability_uncertain) return error.DatabaseNeedsReopen;
         if (params.len != (if (version < 3) @as(usize, 1) else if (version == 3) @as(usize, 3) else @as(usize, 4))) return error.InvalidParams;
         if (version >= 3 and params[1] != .array) return error.InvalidParams;
         if (self.fixture_payload_hashes) |allowed| {
@@ -293,7 +296,13 @@ pub const Server = struct {
         }
         if (self.chain.byHash(payload.block_hash) != null) return status(a, "VALID", payload.block_hash);
         const parent_header = known_parent orelse return status(a, "SYNCING", null);
-        const parent_world: *const execution.state.State = if (self.chain.byHash(payload.parent_hash)) |record| &record.world else blk: {
+        var loaded_parent: ?execution.state.State = null;
+        defer if (loaded_parent) |*state| state.deinit();
+        const parent_world: *const execution.state.State = if (self.chain.byHash(payload.parent_hash)) |record| blk: {
+            if (record.world) |*state| break :blk state;
+            loaded_parent = try self.chain.loadWorld(self.allocator, payload.parent_hash);
+            break :blk &loaded_parent.?;
+        } else blk: {
             for (self.staged.items) |*candidate| if (std.mem.eql(u8, &candidate.payload.block_hash, &payload.parent_hash)) break :blk &candidate.world;
             return status(a, "SYNCING", null);
         };
@@ -316,6 +325,12 @@ pub const Server = struct {
         var retained_result = false;
         defer if (!retained_result) result.deinit();
         for (self.staged.items) |candidate| if (std.mem.eql(u8, &candidate.payload.block_hash, &payload.block_hash)) return status(a, "VALID", payload.block_hash);
+        if (self.store) |store| {
+            try store.stage(self.chain.fork, header, txs, withdrawals, result.receipts, parent_world, &trial);
+            try self.chain.retain(header, txs, withdrawals, result, &trial);
+            retained_result = true;
+            return status(a, "VALID", payload.block_hash);
+        }
         try self.staged.append(self.allocator, .{ .arena = arena, .payload = payload, .hashes = hashes, .parent_beacon_root = beacon_root, .requests_hash = requests_hash, .requests = requests, .header = header, .world = trial, .result = result });
         retained = true;
         retained_trial = true;
@@ -325,6 +340,7 @@ pub const Server = struct {
 
     /// Selects a validated ancestry path after checking markers and build attributes.
     fn forkchoiceUpdated(self: *Server, a: std.mem.Allocator, params: []const Value) !Value {
+        if (self.chain.durability_uncertain) return error.DatabaseNeedsReopen;
         if (params.len != 2) return error.InvalidParams;
         const choice = params[0];
         const head = try wire.fixed(32, try wire.field(choice, "headBlockHash"));
@@ -347,7 +363,13 @@ pub const Server = struct {
         if (!std.mem.allEqual(u8, &self.chain.finalized_hash, 0) and (std.mem.allEqual(u8, &finalized, 0) or !self.isAncestor(finalized, self.chain.finalized_hash))) return error.InvalidForkchoiceState;
         if (std.mem.allEqual(u8, &safe, 0) and !std.mem.allEqual(u8, &finalized, 0)) return error.InvalidForkchoiceState;
         const parent_header = if (known) |record| record.header else self.staged.items[selected.?].header;
-        const parent_world = if (known) |record| &record.world else &self.staged.items[selected.?].world;
+        var loaded_parent: ?execution.state.State = null;
+        defer if (loaded_parent) |*state| state.deinit();
+        const parent_world: *const execution.state.State = if (known) |record| blk: {
+            if (record.world) |*state| break :blk state;
+            loaded_parent = try self.chain.loadWorld(self.allocator, head);
+            break :blk &loaded_parent.?;
+        } else &self.staged.items[selected.?].world;
         var next_world = try parent_world.clone(self.allocator);
         var world_owned = true;
         errdefer if (world_owned) next_world.deinit();
@@ -383,6 +405,11 @@ pub const Server = struct {
             candidate.result = null;
         }
         var path = try self.chain.path(self.allocator, head);
+        errdefer path.deinit(self.allocator);
+        if (self.store) |store| store.commit(head, safe, finalized) catch |err| {
+            self.chain.durability_uncertain = true;
+            return err;
+        };
         self.chain.canonical.deinit(self.allocator);
         self.chain.canonical = path;
         path = .empty;
@@ -392,6 +419,7 @@ pub const Server = struct {
         self.world.* = next_world;
         world_owned = false;
         self.pool.prune(self.world);
+        if (self.store) |store| store.prune(self.chain) catch |err| std.log.err("execution pruning failed after fork-choice commit: {s}", .{@errorName(err)});
         var staged_index = self.staged.items.len;
         while (staged_index > 0) {
             staged_index -= 1;
@@ -955,6 +983,57 @@ test "Engine selects fully executed competing branches and rejects conflicting f
     try std.testing.expectEqualSlices(u8, &child_b.payload.block_hash, &chain.latest().hash);
 }
 
+test "Engine persists validated payload and fork choice for recovery" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var world = execution.state.State.init(a);
+    defer world.deinit();
+    var genesis = std.mem.zeroes(execution.Header);
+    genesis.state_root = try world.stateRoot();
+    genesis.gas_limit = 30_000_000;
+    genesis.base_fee_per_gas = 1;
+    const genesis_hash = try execution.transition.headerHash(a, .paris, genesis);
+    var store = try execution.durable.Store.open(a, std.testing.io, tmp.dir, "execution", .paris, genesis, &world);
+    var chain = try execution.chain.Chain.init(a, 1, .paris, genesis, &world);
+    store.attach(&chain);
+    var pool = execution.pool.Pool.init(a, .{});
+    defer pool.deinit();
+    var server: Server = .{ .allocator = a, .chain = &chain, .world = &world, .pool = &pool, .store = &store, .secret = .{0} ** 32 };
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const temp = arena.allocator();
+    const zero = [_]u8{0} ** 32;
+    var attrs = wire.object();
+    try wire.put(temp, &attrs, "timestamp", try wire.number(temp, @as(u64, 1)));
+    try wire.put(temp, &attrs, "prevRandao", try wire.hex(temp, &zero));
+    try wire.put(temp, &attrs, "suggestedFeeRecipient", try wire.hex(temp, &([_]u8{0} ** 20)));
+    var built = try server.startBuild(temp, attrs, genesis, genesis_hash, &world);
+    defer built.deinit();
+    const hash = built.payload.block_hash;
+    try std.testing.expectEqualStrings("VALID", try wire.string(try wire.field(try server.newPayload(temp, &.{try wire.payloadJson(temp, built.payload, 1)}, 1), "status")));
+    try std.testing.expectEqual(@as(usize, 2), chain.records.items.len);
+    try std.testing.expect(chain.records.items[1].world == null);
+    try std.testing.expectEqualSlices(u8, &genesis_hash, &chain.latest().hash);
+    var choice = wire.object();
+    try wire.put(temp, &choice, "headBlockHash", try wire.hex(temp, &hash));
+    try wire.put(temp, &choice, "safeBlockHash", try wire.hex(temp, &genesis_hash));
+    try wire.put(temp, &choice, "finalizedBlockHash", try wire.hex(temp, &genesis_hash));
+    _ = try server.forkchoiceUpdated(temp, &.{ choice, .null });
+    try std.testing.expectEqualSlices(u8, &hash, &chain.latest().hash);
+    server.deinit();
+    chain.deinit();
+    store.close();
+
+    var reopened = try execution.durable.Store.open(a, std.testing.io, tmp.dir, "execution", .paris, genesis, &world);
+    defer reopened.close();
+    var recovered = try execution.chain.Chain.init(a, 1, .paris, genesis, &world);
+    defer recovered.deinit();
+    try reopened.recover(&recovered, &world);
+    try std.testing.expectEqualSlices(u8, &hash, &recovered.latest().hash);
+    try std.testing.expectEqualSlices(u8, &recovered.latest().header.state_root, &(try world.stateRoot()));
+}
+
 test "partial request queue deployment cannot validate or build Osaka payloads" {
     const a = std.testing.allocator;
     var world = execution.state.State.init(a);
@@ -985,6 +1064,6 @@ test "partial request queue deployment cannot validate or build Osaka payloads" 
     try wire.put(temp, &attrs, "suggestedFeeRecipient", try wire.hex(temp, &([_]u8{0} ** 20)));
     try wire.put(temp, &attrs, "withdrawals", wire.array(temp));
     try wire.put(temp, &attrs, "parentBeaconBlockRoot", try wire.hex(temp, &zero));
-    try std.testing.expectError(error.UnsupportedRequestQueues, server.startBuild(temp, attrs, genesis, parent_hash, &chain.latest().world));
+    try std.testing.expectError(error.UnsupportedRequestQueues, server.startBuild(temp, attrs, genesis, parent_hash, &chain.latest().world.?));
     try std.testing.expectEqual(@as(usize, 1), chain.records.items.len);
 }

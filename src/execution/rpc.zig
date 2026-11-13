@@ -43,6 +43,7 @@ pub const Server = struct {
 
     /// Parses one bounded JSON-RPC body and returns an owned response body.
     pub fn dispatch(self: *Server, allocator: std.mem.Allocator, body: []const u8) ![]u8 {
+        if (self.chain.durability_uncertain) return error.DatabaseNeedsReopen;
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
         const a = arena.allocator();
@@ -149,27 +150,33 @@ pub const Server = struct {
                     .eth_getBlockByNumber => try self.block(try asString(params[0])),
                     else => unreachable,
                 };
-                return if (record) |found| try self.blockJson(a, found, params[1].bool) else .null;
+                return if (record) |found| if (found.header.number >= self.chain.history_floor or found.header.number == self.chain.records.items[0].header.number) try self.blockJson(a, found, params[1].bool) else .null else .null;
             },
             .eth_getBalance => {
                 if (params.len < 1 or params.len > 2) return error.InvalidParams;
                 const address = try parseAddress(try asString(params[0]));
                 const record = if (params.len == 2) (try self.block(try asString(params[1]))) orelse return error.UnknownBlock else self.chain.latest();
-                return quantity(a, record.world.getBalance(address));
+                var world = try self.chain.loadWorld(a, record.hash);
+                defer world.deinit();
+                return quantity(a, world.getBalance(address));
             },
             .eth_getCode => {
                 if (params.len < 1 or params.len > 2) return error.InvalidParams;
                 const address = try parseAddress(try asString(params[0]));
                 const record = if (params.len == 2) (try self.block(try asString(params[1]))) orelse return error.UnknownBlock else self.chain.latest();
-                return string(try hex(a, record.world.getCode(address)));
+                var world = try self.chain.loadWorld(a, record.hash);
+                defer world.deinit();
+                return string(try hex(a, world.getCode(address)));
             },
             .eth_getStorageAt => {
                 if (params.len < 2 or params.len > 3) return error.InvalidParams;
                 const address = try parseAddress(try asString(params[0]));
                 const slot = try parseQuantity(u256, try asString(params[1]));
                 const record = if (params.len == 3) (try self.block(try asString(params[2]))) orelse return error.UnknownBlock else self.chain.latest();
+                var world = try self.chain.loadWorld(a, record.hash);
+                defer world.deinit();
                 var word: [32]u8 = undefined;
-                std.mem.writeInt(u256, &word, record.world.getStorage(address, slot), .big);
+                std.mem.writeInt(u256, &word, world.getStorage(address, slot), .big);
                 return string(try hex(a, &word));
             },
             .eth_call, .eth_estimateGas => {
@@ -231,8 +238,8 @@ pub const Server = struct {
     fn runCall(self: *Server, a: std.mem.Allocator, record: *const chain_mod.Record, call: Call, gas: u64) ![]const u8 {
         const intrinsic = try callIntrinsic(call.data);
         if (gas < intrinsic) return error.IntrinsicGasTooLow;
-        const scratch = record.world.allocator;
-        var world = try record.world.clone(scratch);
+        const scratch = a;
+        var world = try self.chain.loadWorld(scratch, record.hash);
         defer world.deinit();
         if (call.value > world.getBalance(call.from)) return error.InsufficientBalance;
         if (call.value != 0) {
@@ -461,6 +468,7 @@ pub const Server = struct {
         if (to < from) return result;
         for (self.chain.canonical.items) |record_index| {
             const record = &self.chain.records.items[record_index];
+            if (record.header.number < self.chain.history_floor) continue;
             if (requested_hash) |hash| if (!std.mem.eql(u8, &hash, &record.hash)) continue;
             if (record.header.number < from or record.header.number > to) continue;
             var block_log_index: usize = 0;

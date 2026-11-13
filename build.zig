@@ -330,6 +330,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    execution_mod.addImport("storage", storage_mod);
     mod.addImport("storage", storage_mod);
     const consensus_mod = b.createModule(.{
         .root_source_file = b.path("src/consensus/root.zig"),
@@ -608,6 +609,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_storage_tests.step);
     const storage_test_step = b.step("test-storage", "Run durable key-value storage tests");
     storage_test_step.dependOn(&run_storage_tests.step);
+    const durable_execution_tests = b.addTest(.{ .root_module = execution_tests.root_module, .filters = &.{ "durable execution", "execution state checkpoints", "periodic execution checkpoint" } });
+    const durable_execution_step = b.step("test-durable-execution", "Run execution recovery and state-delta tests");
+    durable_execution_step.dependOn(&b.addRunArtifact(durable_execution_tests).step);
     const run_execution_tests = b.addRunArtifact(execution_tests);
     test_step.dependOn(&run_execution_tests.step);
     const token_tests = b.addTest(.{
