@@ -242,6 +242,7 @@ pub const Store = struct {
     fn recoverBlock(self: *Store, chain: *chain_mod.Chain, row: storage.Row) !void {
         if (row.key.len != 2 + 16 + 1 + 64 or row.key[18] != '/' or row.value.len != marker_size) return error.CorruptExecutionBlock;
         const number = std.fmt.parseInt(u64, row.key[2..18], 16) catch return error.CorruptExecutionBlock;
+        // SAFETY: hexToBytes initializes all 32 bytes before the hash is read.
         var hash: execution.Hash = undefined;
         _ = std.fmt.hexToBytes(&hash, row.key[19..83]) catch return error.CorruptExecutionBlock;
         const marker = try decodeMarker(row.value);
@@ -315,7 +316,7 @@ pub const Store = struct {
     fn writeBlob(self: *Store, kind: []const u8, hash: execution.Hash, bytes: []const u8) !BlobInfo {
         if (bytes.len > std.math.maxInt(u32)) return error.ExecutionBlobTooLarge;
         const info: BlobInfo = .{ .len = @intCast(bytes.len), .hash = sha(bytes) };
-        for (0..std.math.divCeil(usize, bytes.len, chunk_size) catch unreachable) |index| {
+        for (0..try std.math.divCeil(usize, bytes.len, chunk_size)) |index| {
             const key = try blobKey(self.allocator, kind, hash, index);
             defer self.allocator.free(key);
             try self.db.put(key, bytes[index * chunk_size .. @min(bytes.len, (index + 1) * chunk_size)]);
@@ -327,7 +328,7 @@ pub const Store = struct {
     fn readBlob(self: *Store, kind: []const u8, hash: execution.Hash, info: BlobInfo) ![]u8 {
         const bytes = try self.allocator.alloc(u8, info.len);
         errdefer self.allocator.free(bytes);
-        for (0..std.math.divCeil(usize, info.len, chunk_size) catch unreachable) |index| {
+        for (0..try std.math.divCeil(usize, info.len, chunk_size)) |index| {
             const key = try blobKey(self.allocator, kind, hash, index);
             defer self.allocator.free(key);
             const chunk = try self.db.get(self.allocator, key) orelse return error.MissingExecutionChunk;
@@ -342,7 +343,7 @@ pub const Store = struct {
 
     /// Tombstones every chunk of a value after the floor marker is durable.
     fn deleteBlob(self: *Store, kind: []const u8, hash: execution.Hash, info: BlobInfo) !void {
-        for (0..std.math.divCeil(usize, info.len, chunk_size) catch unreachable) |index| {
+        for (0..try std.math.divCeil(usize, info.len, chunk_size)) |index| {
             const key = try blobKey(self.allocator, kind, hash, index);
             defer self.allocator.free(key);
             try self.db.delete(key);
@@ -372,6 +373,7 @@ pub const Store = struct {
         defer storage.Database.freeRows(self.allocator, rows);
         for (rows) |row| {
             if (row.key.len != 6 + 64) return error.CorruptExecutionPruneJournal;
+            // SAFETY: hexToBytes initializes all 32 bytes before the hash is read.
             var hash: execution.Hash = undefined;
             _ = std.fmt.hexToBytes(&hash, row.key[6..]) catch return error.CorruptExecutionPruneJournal;
             try self.finishPrune(hash, try decodeMarker(row.value));
@@ -384,6 +386,7 @@ pub const Store = struct {
         var pending: std.ArrayList(execution.Hash) = .empty;
         defer pending.deinit(allocator);
         var current = chain.byHash(hash) orelse return error.UnknownBlock;
+        // SAFETY: each loop exit assigns state before the first read.
         var state: execution.state.State = undefined;
         while (true) {
             if (current.world) |*cached| {
@@ -469,6 +472,7 @@ fn pruneKey(allocator: std.mem.Allocator, hash: execution.Hash) ![]u8 {
 
 /// Calculates a content checksum for an execution blob.
 fn sha(bytes: []const u8) execution.Hash {
+    // SAFETY: Sha256.hash writes the full output before it is returned.
     var hash: execution.Hash = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
     return hash;
