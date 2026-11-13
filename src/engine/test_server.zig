@@ -4,53 +4,6 @@
 const std = @import("std");
 const execution = @import("execution");
 const engine = @import("engine_server");
-const wire = @import("engine_wire");
-
-/// Loads the pinned Osaka genesis accounts and header, checking Geth's block hash.
-fn loadGenesis(a: std.mem.Allocator, io: std.Io, path: []const u8, world: *execution.state.State) !execution.Header {
-    const raw = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(2 * 1024 * 1024));
-    const parsed = try std.json.parseFromSlice(wire.Value, a, raw, .{});
-    const root = parsed.value;
-    const accounts = try wire.field(root, "alloc");
-    if (accounts != .object) return error.InvalidGenesis;
-    var it = accounts.object.iterator();
-    while (it.next()) |entry| {
-        // SAFETY: This value is fully initialized before any read.
-        var address: execution.Address = undefined;
-        if (entry.key_ptr.*.len != 40) return error.InvalidGenesis;
-        _ = try std.fmt.hexToBytes(&address, entry.key_ptr.*);
-        const account = entry.value_ptr.*;
-        try world.createAccount(address);
-        if (account.object.get("balance")) |balance| try world.setBalance(address, try wire.quantity(u256, balance));
-        if (account.object.get("nonce")) |nonce| try world.setNonce(address, try wire.quantity(u64, nonce));
-        if (account.object.get("code")) |code| {
-            const bytes = try wire.bytes(a, code, 1024 * 1024);
-            _ = try world.setCode(address, bytes);
-        }
-    }
-    const empty_root = try execution.trie.orderedRoot(a, &.{});
-    // SAFETY: This value is fully initialized before any read.
-    var ommers: execution.Hash = undefined;
-    std.crypto.hash.sha3.Keccak256.hash(&.{0xc0}, &ommers, .{});
-    // SAFETY: This value is fully initialized before any read.
-    var requests: execution.Hash = undefined;
-    std.crypto.hash.sha2.Sha256.hash(&.{}, &requests, .{});
-    var header = std.mem.zeroes(execution.Header);
-    header.ommers_hash = ommers;
-    header.state_root = try world.stateRoot();
-    header.transactions_root = empty_root;
-    header.receipts_root = empty_root;
-    header.withdrawals_root = empty_root;
-    header.requests_hash = requests;
-    header.gas_limit = try wire.quantity(u64, try wire.field(root, "gasLimit"));
-    header.base_fee_per_gas = try wire.quantity(u256, try wire.field(root, "baseFeePerGas"));
-    header.timestamp = try wire.quantity(u64, try wire.field(root, "timestamp"));
-    header.extra_data = try wire.bytes(a, try wire.field(root, "extraData"), 32);
-    const hash = try execution.transition.headerHash(a, .osaka, header);
-    const expected = try wire.fixed(32, .{ .string = "0xd5bfe455af9e369a28ae13737769879f1ad8d2aa281ebfdbdf8529d48a20ae7f" });
-    if (!std.mem.eql(u8, &hash, &expected)) return error.GenesisHashMismatch;
-    return header;
-}
 
 /// Starts a local authenticated Engine API fixture and prints its genesis hash.
 pub fn main(init: std.process.Init) !void {
@@ -66,11 +19,17 @@ pub fn main(init: std.process.Init) !void {
     var world = execution.state.State.init(a);
     defer world.deinit();
     const has_genesis = args.len == 4;
-    var header = if (has_genesis) try loadGenesis(a, init.io, args[3], &world) else std.mem.zeroes(execution.Header);
+    var header = if (has_genesis) (try execution.genesis.load(a, init.io, args[3], &world)).header else std.mem.zeroes(execution.Header);
     if (!has_genesis) {
         header.state_root = try world.stateRoot();
         header.gas_limit = 30_000_000;
         header.base_fee_per_gas = 1;
+    }
+    if (has_genesis) {
+        // SAFETY: hexToBytes fills the pinned hash or startup fails.
+        var expected: execution.Hash = undefined;
+        _ = try std.fmt.hexToBytes(&expected, "d5bfe455af9e369a28ae13737769879f1ad8d2aa281ebfdbdf8529d48a20ae7f");
+        if (!std.mem.eql(u8, &(try execution.transition.headerHash(a, .osaka, header)), &expected)) return error.GenesisHashMismatch;
     }
     var chain = try execution.chain.Chain.init(a, if (has_genesis) 1337 else 1, .osaka, header, &world);
     defer chain.deinit();

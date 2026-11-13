@@ -15,6 +15,27 @@ fn rpcRequest(a: std.mem.Allocator, id: usize, method: []const u8, params: []con
     return std.json.Stringify.valueAlloc(a, .{ .jsonrpc = "2.0", .id = id, .method = method, .params = params }, .{});
 }
 
+const TransferCollector = struct {
+    allocator: std.mem.Allocator,
+    lines: std.ArrayList([]u8) = .empty,
+    fail: bool = false,
+    poison_cursor_write: ?*execution.durable.Store = null,
+
+    /// Captures emitted lines or simulates a failed stdout write.
+    fn output(context: *anyopaque, line: []const u8) anyerror!void {
+        const self: *TransferCollector = @ptrCast(@alignCast(context));
+        if (self.fail) return error.OutputFailed;
+        try self.lines.append(self.allocator, try self.allocator.dupe(u8, line));
+        if (self.poison_cursor_write) |store| store.db.poisoned = true;
+    }
+
+    /// Releases captured JSON lines.
+    fn deinit(self: *TransferCollector) void {
+        for (self.lines.items) |line| self.allocator.free(line);
+        self.lines.deinit(self.allocator);
+    }
+};
+
 test "pinned c-kzg zero-blob vector accepts its proof and rejects another" {
     var settings = try execution.kzg.loadTrustedSetup("src/execution/trusted_setup.txt");
     defer settings.deinit();
@@ -1277,6 +1298,13 @@ test "signed local token deployment, transfer, and revert commit through block a
     const transfer = tokenTransfer(recipient, 75);
     const failing = tokenTransfer(recipient, 2_000);
     const raw = [_][]const u8{ try tokenTransaction(a, 0, null, initcode), try tokenTransaction(a, 1, contract, &transfer), try tokenTransaction(a, 2, contract, &failing) };
+    const signed = (try std.json.parseFromSlice(std.json.Value, a, @embedFile("fixtures/local_token_signed.json"), .{})).value.object;
+    for (raw, [_][]const u8{ "deployment", "transfer", "reverted" }) |transaction, name| {
+        const hex = signed.get(name).?.string;
+        const decoded = try a.alloc(u8, (hex.len - 2) / 2);
+        _ = try std.fmt.hexToBytes(decoded, hex[2..]);
+        try testing.expectEqualSlices(u8, transaction, decoded);
+    }
     const context: execution.transition.Context = .{ .fork = .fulu, .chain_id = 1, .coinbase = .{0x33} ** 20, .number = 1, .timestamp = 1, .gas_limit = header.gas_limit, .base_fee = 1, .blob_base_fee = 1 };
     var simulated = try world.clone(a);
     defer simulated.deinit();
@@ -1383,6 +1411,36 @@ test "signed local token deployment, transfer, and revert commit through block a
     try testing.expectEqual(@as(usize, 1), (try std.json.parseFromSlice(std.json.Value, a, recovered_receipt, .{})).value.object.get("result").?.object.get("logs").?.array.items.len);
     const recovered_logs = try recovered_rpc.dispatch(a, logs_req);
     try testing.expectEqual(@as(usize, 1), (try std.json.parseFromSlice(std.json.Value, a, recovered_logs, .{})).value.object.get("result").?.array.items.len);
+    var collector = TransferCollector{ .allocator = a };
+    defer collector.deinit();
+    var stream: execution.transfers.Stream = .{ .allocator = a, .store = &reopened_store, .chain = &recovered_chain, .contract = contract, .output = TransferCollector.output, .context = &collector };
+    try stream.catchUp();
+    try testing.expectEqual(@as(usize, 0), collector.lines.items.len);
+    try reopened_store.commit(recovered_chain.latest().hash, recovered_chain.latest().hash, recovered_chain.latest().hash);
+    reopened_store.close();
+    recovered_chain.deinit();
+    reopened_store = try execution.durable.Store.open(a, testing.io, durable_dir.dir, "execution", .fulu, header, &recovered_world);
+    recovered_chain = try execution.chain.Chain.init(a, 1, .fulu, header, &recovered_world);
+    try reopened_store.recover(&recovered_chain, &recovered_world);
+    collector.fail = true;
+    try testing.expectError(error.OutputFailed, stream.catchUp());
+    collector.fail = false;
+    collector.poison_cursor_write = &reopened_store;
+    try testing.expectError(error.DatabaseNeedsReopen, stream.catchUp());
+    reopened_store.db.poisoned = false;
+    collector.poison_cursor_write = null;
+    try stream.catchUp();
+    try testing.expectEqual(@as(usize, 2), collector.lines.items.len);
+    try testing.expectEqualStrings(collector.lines.items[0], collector.lines.items[1]);
+    const transfer_event = (try std.json.parseFromSlice(std.json.Value, a, collector.lines.items[1], .{})).value.object;
+    try testing.expect(std.mem.endsWith(u8, transfer_event.get("amount").?.string, "4b"));
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "0x{s}:0", .{std.fmt.bytesToHex(recovered_chain.latest().hash, .lower)}), transfer_event.get("id").?.string);
+    try testing.expectEqual(@as(i64, 1), transfer_event.get("block_number").?.integer);
+    try testing.expectEqual(@as(i64, 0), transfer_event.get("log_index").?.integer);
+    try stream.catchUp();
+    try testing.expectEqual(@as(usize, 2), collector.lines.items.len);
+    stream.contract = .{0} ** 20;
+    try testing.expectError(error.TransferContractMismatch, stream.catchUp());
     var alternative = next;
     alternative.extra_data = &.{0x42};
     alternative.timestamp = 2;
@@ -1414,5 +1472,16 @@ test "signed local token deployment, transfer, and revert commit through block a
     const orphaned_receipt = try server.dispatch(a, transfer_receipt_req);
     try testing.expect((try std.json.parseFromSlice(std.json.Value, a, orphaned_receipt, .{})).value.object.get("result").? == .null);
     try testing.expect(chain.transaction(tx_hash) == null);
+    var orphan_dir = testing.tmpDir(.{});
+    defer orphan_dir.cleanup();
+    var orphan_genesis = try chain.records.items[0].world.?.clone(a);
+    defer orphan_genesis.deinit();
+    var orphan_store = try execution.durable.Store.open(a, testing.io, orphan_dir.dir, "execution", .fulu, header, &orphan_genesis);
+    defer orphan_store.close();
+    chain.finalized_hash = alternative_hash;
+    stream.store = &orphan_store;
+    stream.chain = &chain;
+    try stream.catchUp();
+    try testing.expectEqual(@as(usize, 2), collector.lines.items.len);
     std.debug.print("LocalToken Transfer block=1 transaction=1 from=0x{s} to=0x{s} amount=75 gas={d}\n", .{ std.fmt.bytesToHex(sender, .lower), std.fmt.bytesToHex(recipient, .lower), gas_used });
 }
