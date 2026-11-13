@@ -330,6 +330,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    execution_mod.addImport("storage", storage_mod);
     mod.addImport("storage", storage_mod);
     const consensus_mod = b.createModule(.{
         .root_source_file = b.path("src/consensus/root.zig"),
@@ -594,6 +595,9 @@ pub fn build(b: *std.Build) void {
     const run_engine_client_tests = b.addRunArtifact(engine_client_tests);
     const engine_server_tests = b.addTest(.{ .root_module = engine_server_mod });
     const run_engine_server_tests = b.addRunArtifact(engine_server_tests);
+    const engine_test_step = b.step("test-engine", "Run Engine API server and client tests");
+    engine_test_step.dependOn(&run_engine_server_tests.step);
+    engine_test_step.dependOn(&run_engine_client_tests.step);
     const run_api_tests = b.addRunArtifact(api_tests);
 
     // A top level step for running all tests. dependOn can be called multiple
@@ -605,6 +609,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_storage_tests.step);
     const storage_test_step = b.step("test-storage", "Run durable key-value storage tests");
     storage_test_step.dependOn(&run_storage_tests.step);
+    const durable_execution_tests = b.addTest(.{ .root_module = execution_tests.root_module, .filters = &.{ "durable execution", "execution state checkpoints", "periodic execution checkpoint" } });
+    const durable_execution_step = b.step("test-durable-execution", "Run execution recovery and state-delta tests");
+    durable_execution_step.dependOn(&b.addRunArtifact(durable_execution_tests).step);
     const run_execution_tests = b.addRunArtifact(execution_tests);
     test_step.dependOn(&run_execution_tests.step);
     const token_tests = b.addTest(.{
