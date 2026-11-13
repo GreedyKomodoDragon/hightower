@@ -39,6 +39,7 @@ pub const Server = struct {
     pool: *pool_mod.Pool,
     world: *execution.state.State,
     settings: ?*const ckzg.Settings = null,
+    mutex: ?*std.Io.Mutex = null,
     revert_data: ?[]const u8 = null,
 
     /// Parses one bounded JSON-RPC body and returns an owned response body.
@@ -90,6 +91,8 @@ pub const Server = struct {
             return err;
         };
         defer allocator.free(body);
+        if (self.mutex) |mutex| try mutex.lock(io);
+        defer if (self.mutex) |mutex| mutex.unlock(io);
         const response = try self.dispatch(allocator, body);
         defer allocator.free(response);
         try request.respond(response, .{ .status = .ok, .keep_alive = false, .extra_headers = headers });

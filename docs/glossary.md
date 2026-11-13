@@ -223,3 +223,9 @@ Chain:      [Block 0] ───────────────────�
 | StatusTimeout | Hightower's error when the initial peer status exchange does not complete within its request deadline; it does not by itself identify which protocol step stalled. |
 | Diagnostic socket override | A local test setting that routes traffic through a capture proxy while retaining the original signed peer record and cryptographic identity checks. |
 | libp2p Identify | A peer protocol that shares its public key and supported protocols after connection authentication, allowing the other node to set up services such as gossip. |
+
+# Execution service terms
+
+- **ERC-20**: An Ethereum token contract interface with a standard `Transfer` event for token movements.
+- **Transfer event**: A contract log whose signature identifies an ERC-20 transfer; its indexed topics hold sender and recipient, and its data holds the raw amount.
+- **Finality cursor**: The last finalized execution block whose transfer logs the service has emitted and recorded durably.

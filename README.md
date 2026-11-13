@@ -47,6 +47,8 @@ zig build test -- --fuzz
 
 The compiled binary lands in `zig-out/bin/hightower`.
 
+The production Osaka execution binary is `zig-out/bin/hightower-execution`. See [execution service configuration and finalized Transfer output](docs/execution-service.md).
+
 CI (`.github/workflows/ci.yml`): `zig fmt --check`, `zig build`, `zig build test`, `zig build test-transition`, pinned Geth v1.17.7–v1.17.10 Engine API interoperability checks, and Bruno HTTP checks on Zig 0.16.0.
 
 ## JSON conventions

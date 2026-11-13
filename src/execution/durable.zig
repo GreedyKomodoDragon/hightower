@@ -68,6 +68,23 @@ pub const Store = struct {
         self.db.close();
     }
 
+    /// Binds a production database to its chain ID and execution fork.
+    pub fn checkIdentity(self: *Store, chain_id: u256, fork: execution.transition.Fork) !void {
+        var identity: [33]u8 = undefined;
+        std.mem.writeInt(u256, identity[0..32], chain_id, .little);
+        identity[32] = @intFromEnum(fork);
+        const saved = try self.db.get(self.allocator, "identity");
+        defer if (saved) |bytes| self.allocator.free(bytes);
+        if (saved) |bytes| {
+            if (!std.mem.eql(u8, bytes, &identity)) return error.ExecutionIdentityMismatch;
+            return;
+        }
+        const choice = try self.db.get(self.allocator, "choice");
+        defer if (choice) |bytes| self.allocator.free(bytes);
+        if (choice != null) return error.MissingExecutionIdentity;
+        try self.db.put("identity", &identity);
+    }
+
     /// Connects a chain to on-demand state reconstruction before staging blocks.
     pub fn attach(self: *Store, chain: *chain_mod.Chain) void {
         chain.state_loader = .{ .context = self, .load = loadState };
