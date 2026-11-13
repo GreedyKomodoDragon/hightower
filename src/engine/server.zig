@@ -2,8 +2,8 @@
 // choice commits them. Validation runs on a clone of the parent post-state;
 // the canonical chain changes only after a valid forkchoice update. A local
 // builder derives a fork-appropriate payload from the selected parent, pool,
-// and supplied withdrawals. Staged branches retain executed post-states until
-// selection; Prague deposit logs and queue outputs are checked against requests.
+// and supplied withdrawals. Volatile staging keeps at most 32 executed
+// candidates; Prague deposit logs and queue outputs are checked against requests.
 //
 // parent snapshot -> execute branch -> validated hash -> forkchoice -> canonical
 const std = @import("std");
@@ -17,6 +17,7 @@ const client = @import("engine_client");
 
 const Value = wire.Value;
 const max_body = 32 * 1024 * 1024;
+const max_staged_payloads = 32;
 
 /// Maps the configured execution fork to its Engine API method generations.
 fn methodVersions(fork: execution.transition.Fork) !@TypeOf(client.versions(.osaka)) {
@@ -331,6 +332,10 @@ pub const Server = struct {
             retained_result = true;
             return status(a, "VALID", payload.block_hash);
         }
+        if (self.staged.items.len == max_staged_payloads) {
+            var oldest = self.staged.orderedRemove(0);
+            oldest.deinit();
+        }
         try self.staged.append(self.allocator, .{ .arena = arena, .payload = payload, .hashes = hashes, .parent_beacon_root = beacon_root, .requests_hash = requests_hash, .requests = requests, .header = header, .world = trial, .result = result });
         retained = true;
         retained_trial = true;
@@ -467,7 +472,7 @@ pub const Server = struct {
         var cursor = head;
         while (hashes.items.len < 255) {
             if (self.chain.byHash(cursor)) |record| {
-                if (record.header.number == self.chain.records.items[0].header.number) break;
+                if (record.header.number == @max(self.chain.records.items[0].header.number, self.chain.history_floor)) break;
                 cursor = record.header.parent_hash;
             } else {
                 var found = false;
@@ -981,6 +986,74 @@ test "Engine selects fully executed competing branches and rejects conflicting f
     choice.object.getPtr("safeBlockHash").?.* = try wire.hex(temp, &hash_a);
     try std.testing.expectError(error.InvalidForkchoiceState, server.forkchoiceUpdated(temp, &.{ choice, .null }));
     try std.testing.expectEqualSlices(u8, &child_b.payload.block_hash, &chain.latest().hash);
+    var first_staged: execution.Hash = .{0} ** 32;
+    for (0..max_staged_payloads + 1) |index| {
+        var sibling_payload = try wire.payloadJson(temp, built.payload, 1);
+        sibling_payload.object.getPtr("extraData").?.* = try wire.hex(temp, &.{@as(u8, @intCast(index + 64))});
+        const parsed = try wire.parsePayload(temp, sibling_payload, 1);
+        const sibling_hash = try execution.transition.headerHash(temp, .paris, try payloadHeader(temp, parsed, zero, try emptyRequestsHash()));
+        sibling_payload.object.getPtr("blockHash").?.* = try wire.hex(temp, &sibling_hash);
+        if (index == 0) first_staged = sibling_hash;
+        try std.testing.expectEqualStrings("VALID", try wire.string(try wire.field(try server.newPayload(temp, &.{sibling_payload}, 1), "status")));
+    }
+    try std.testing.expectEqual(@as(usize, max_staged_payloads), server.staged.items.len);
+    for (server.staged.items) |candidate| try std.testing.expect(!std.mem.eql(u8, &first_staged, &candidate.payload.block_hash));
+}
+
+test "Engine builds and validates after retained history is pruned" {
+    const a = std.testing.allocator;
+    var world = execution.state.State.init(a);
+    defer world.deinit();
+    var genesis = std.mem.zeroes(execution.Header);
+    genesis.state_root = try world.stateRoot();
+    genesis.gas_limit = 30_000_000;
+    genesis.base_fee_per_gas = 1;
+    var chain = try execution.chain.Chain.init(a, 1, .paris, genesis, &world);
+    defer chain.deinit();
+    var pool = execution.pool.Pool.init(a, .{});
+    defer pool.deinit();
+    var server: Server = .{ .allocator = a, .chain = &chain, .world = &world, .pool = &pool, .secret = .{0} ** 32 };
+    defer server.deinit();
+    const retained_floor = 128;
+    var parent_hash = chain.latest().hash;
+    for (retained_floor..retained_floor + 3) |number| {
+        var header = genesis;
+        header.number = @intCast(number);
+        header.timestamp = @intCast(number);
+        header.parent_hash = if (number == retained_floor) .{0x7f} ** 32 else parent_hash;
+        header.transactions_root = try execution.trie.orderedRoot(a, &.{});
+        header.receipts_root = try execution.receiptsRoot(a, &.{});
+        var result_arena = std.heap.ArenaAllocator.init(a);
+        errdefer result_arena.deinit();
+        const result: execution.transition.BlockResult = .{
+            .arena = result_arena,
+            .receipts = try result_arena.allocator().alloc(execution.Receipt, 0),
+            .state_root = header.state_root,
+            .transactions_root = header.transactions_root,
+            .receipts_root = header.receipts_root,
+            .withdrawals_root = null,
+            .logs_bloom = header.logs_bloom,
+            .gas_used = 0,
+        };
+        try chain.retain(header, &.{}, &.{}, result, &world);
+        parent_hash = chain.records.items[chain.records.items.len - 1].hash;
+    }
+    chain.history_floor = retained_floor;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const temp = arena.allocator();
+    const ancestors = try server.olderHashes(temp, parent_hash);
+    try std.testing.expectEqual(@as(usize, 2), ancestors.len);
+    try std.testing.expectEqualSlices(u8, &chain.records.items[1].hash, &ancestors[1]);
+    const zero: execution.Hash = .{0} ** 32;
+    var attrs = wire.object();
+    try wire.put(temp, &attrs, "timestamp", try wire.number(temp, @as(u64, retained_floor + 3)));
+    try wire.put(temp, &attrs, "prevRandao", try wire.hex(temp, &zero));
+    try wire.put(temp, &attrs, "suggestedFeeRecipient", try wire.hex(temp, &([_]u8{0} ** 20)));
+    var built = try server.startBuild(temp, attrs, chain.records.items[3].header, parent_hash, &world);
+    defer built.deinit();
+    const payload = try wire.payloadJson(temp, built.payload, 1);
+    try std.testing.expectEqualStrings("VALID", try wire.string(try wire.field(try server.newPayload(temp, &.{payload}, 1), "status")));
 }
 
 test "Engine persists validated payload and fork choice for recovery" {
