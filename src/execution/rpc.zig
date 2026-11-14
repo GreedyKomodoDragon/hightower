@@ -501,7 +501,9 @@ pub const Server = struct {
             if (!std.math.isFinite(value) or value < 0 or value > 100 or value < previous) return error.InvalidParams;
             previous = value;
         }
-        const oldest = @max(self.chain.records.items[0].header.number, newest.header.number -| (count - 1));
+        const genesis_number = self.chain.records.items[0].header.number;
+        const floor = if (newest.header.number == genesis_number) genesis_number else @max(genesis_number, self.chain.history_floor);
+        const oldest = @max(floor, newest.header.number -| (count - 1));
         var fees = array(a);
         var ratios = array(a);
         var rewards = array(a);

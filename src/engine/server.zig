@@ -435,17 +435,21 @@ pub const Server = struct {
         self.world.* = next_world;
         world_owned = false;
         self.pool.prune(self.world);
-        const head_header = self.chain.latest().header;
-        const pending_context: execution.transition.Context = .{ .fork = self.chain.fork, .chain_id = self.chain.chain_id, .coinbase = head_header.fee_recipient, .number = head_header.number +| 1, .timestamp = head_header.timestamp, .gas_limit = head_header.gas_limit, .base_fee = execution.transition.nextBaseFee(head_header.gas_limit, head_header.gas_used, head_header.base_fee_per_gas) catch head_header.base_fee_per_gas, .prev_randao = head_header.prev_randao, .blob_base_fee = execution.transition.blobBaseFee(self.chain.fork, head_header.excess_blob_gas) catch null };
-        for (previous_path.items) |record_index| for (self.chain.records.items[record_index].transactions) |raw| {
-            // The canonical record retains no blob sidecar after inclusion.
-            if (raw.len == 0 or raw[0] == 3) continue;
-            // SAFETY: Keccak writes all hash bytes before the value is read.
-            var hash: execution.Hash = undefined;
-            std.crypto.hash.sha3.Keccak256.hash(raw, &hash, .{});
-            if (self.chain.transaction(hash) != null or self.pool.get(hash) != null) continue;
-            _ = self.pool.admit(self.world, pending_context, self.settings, raw) catch |err| std.log.warn("orphaned transaction dropped: {s}", .{@errorName(err)});
-        };
+        var shared: usize = 0;
+        while (shared < previous_path.items.len and shared < self.chain.canonical.items.len and previous_path.items[shared] == self.chain.canonical.items[shared]) : (shared += 1) {}
+        if (shared < previous_path.items.len) {
+            const head_header = self.chain.latest().header;
+            const pending_context: execution.transition.Context = .{ .fork = self.chain.fork, .chain_id = self.chain.chain_id, .coinbase = head_header.fee_recipient, .number = head_header.number +| 1, .timestamp = head_header.timestamp, .gas_limit = head_header.gas_limit, .base_fee = execution.transition.nextBaseFee(head_header.gas_limit, head_header.gas_used, head_header.base_fee_per_gas) catch head_header.base_fee_per_gas, .prev_randao = head_header.prev_randao, .blob_base_fee = execution.transition.blobBaseFee(self.chain.fork, head_header.excess_blob_gas) catch null };
+            for (previous_path.items[shared..]) |record_index| for (self.chain.records.items[record_index].transactions) |raw| {
+                // The canonical record retains no blob sidecar after inclusion.
+                if (raw.len == 0 or raw[0] == 3) continue;
+                // SAFETY: Keccak writes all hash bytes before the value is read.
+                var hash: execution.Hash = undefined;
+                std.crypto.hash.sha3.Keccak256.hash(raw, &hash, .{});
+                if (self.chain.transaction(hash) != null or self.pool.get(hash) != null) continue;
+                _ = self.pool.admit(self.world, pending_context, self.settings, raw) catch |err| std.log.warn("orphaned transaction dropped: {s}", .{@errorName(err)});
+            };
+        }
         if (self.transfers) |stream| try stream.catchUp();
         if (self.store) |store| store.prune(self.chain) catch |err| std.log.err("execution pruning failed after fork-choice commit: {s}", .{@errorName(err)});
         var staged_index = self.staged.items.len;
@@ -1126,6 +1130,8 @@ test "Engine re-admits orphaned deployment transactions and serves canonical rec
     try wire.put(temp, &choice, "headBlockHash", try wire.hex(temp, &block_hash));
     try wire.put(temp, &choice, "safeBlockHash", try wire.hex(temp, &genesis));
     try wire.put(temp, &choice, "finalizedBlockHash", try wire.hex(temp, &genesis));
+    _ = try server.forkchoiceUpdated(temp, &.{ choice, .null });
+    try std.testing.expectEqual(@as(usize, 0), pool.entries.items.len);
     _ = try server.forkchoiceUpdated(temp, &.{ choice, .null });
     try std.testing.expectEqual(@as(usize, 0), pool.entries.items.len);
     for (raws, 0..) |raw, index| {

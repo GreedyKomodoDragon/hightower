@@ -1525,6 +1525,14 @@ test "signed local token deployment, transfer, and revert commit through block a
     const alternative_world = try chain.latest().world.?.clone(a);
     world.deinit();
     world = alternative_world;
+    chain.history_floor = 1;
+    const fee_history = try server.dispatch(a, try rpcRequest(a, 42, "eth_feeHistory", &.{ .{ .string = "0x2" }, .{ .string = "latest" } }));
+    const fee_result = (try std.json.parseFromSlice(std.json.Value, a, fee_history, .{})).value.object.get("result").?.object;
+    try testing.expectEqualStrings("0x1", fee_result.get("oldestBlock").?.string);
+    try testing.expectEqual(@as(usize, 2), fee_result.get("baseFeePerGas").?.array.items.len);
+    const genesis_fees = try server.dispatch(a, try rpcRequest(a, 43, "eth_feeHistory", &.{ .{ .string = "0x2" }, .{ .string = "earliest" } }));
+    try testing.expectEqualStrings("0x0", (try std.json.parseFromSlice(std.json.Value, a, genesis_fees, .{})).value.object.get("result").?.object.get("oldestBlock").?.string);
+    chain.history_floor = 0;
     const orphaned_logs = try server.dispatch(a, logs_req);
     try testing.expectEqual(@as(usize, 0), (try std.json.parseFromSlice(std.json.Value, a, orphaned_logs, .{})).value.object.get("result").?.array.items.len);
     std.crypto.hash.sha3.Keccak256.hash(raw[1], &tx_hash, .{});
