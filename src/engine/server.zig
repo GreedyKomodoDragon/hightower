@@ -148,6 +148,8 @@ pub const Server = struct {
     pool: *execution.pool.Pool,
     settings: ?*const execution.kzg.Settings = null,
     store: ?*execution.durable.Store = null,
+    transfers: ?*execution.transfers.Stream = null,
+    mutex: ?*std.Io.Mutex = null,
     secret: [32]u8,
     // shortcut: pinned fixture hashes stand in for EVM execution; use compatible payloads for full execution validation.
     fixture_payload_hashes: ?[]const execution.Hash = null,
@@ -218,11 +220,18 @@ pub const Server = struct {
         };
         const now = std.Io.Timestamp.toSeconds(std.Io.Clock.real.now(io));
         jwt.verify(allocator, self.secret, bearer orelse "", now) catch return request.respond("unauthorized", .{ .status = .unauthorized, .keep_alive = false });
+        const authorization = try allocator.dupe(u8, bearer.?);
+        defer allocator.free(authorization);
         if ((request.head.content_length orelse 0) > max_body) return request.respond("request too large", .{ .status = .payload_too_large, .keep_alive = false });
         const body_reader = request.readerExpectContinue(&body_buffer) catch return;
         const body = body_reader.allocRemaining(allocator, .limited(max_body)) catch return request.respond("request too large", .{ .status = .payload_too_large, .keep_alive = false });
         defer allocator.free(body);
-        const response = self.dispatch(allocator, bearer.?, body, now) catch return request.respond("bad request", .{ .status = .bad_request, .keep_alive = false });
+        if (self.mutex) |mutex| try mutex.lock(io);
+        defer if (self.mutex) |mutex| mutex.unlock(io);
+        const response = self.dispatch(allocator, authorization, body, now) catch |err| {
+            std.log.err("Engine request failed: {s}", .{@errorName(err)});
+            return request.respond("bad request", .{ .status = .bad_request, .keep_alive = false });
+        };
         defer allocator.free(response);
         try request.respond(response, .{ .status = .ok, .keep_alive = false, .extra_headers = headers });
     }
@@ -424,6 +433,7 @@ pub const Server = struct {
         self.world.* = next_world;
         world_owned = false;
         self.pool.prune(self.world);
+        if (self.transfers) |stream| try stream.catchUp();
         if (self.store) |store| store.prune(self.chain) catch |err| std.log.err("execution pruning failed after fork-choice commit: {s}", .{@errorName(err)});
         var staged_index = self.staged.items.len;
         while (staged_index > 0) {

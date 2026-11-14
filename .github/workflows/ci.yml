@@ -30,6 +30,9 @@ jobs:
           version: 0.16.0
       - run: zig fmt --check build.zig build.zig.zon src
       - run: zig build
+      - run: python3 scripts/test_execution_service.py
+      - run: zig build test-execution-service
+      - run: zig build test-execution-service -Doptimize=ReleaseSafe
       - run: bash scripts/test_runtime.sh
       - run: zig build runtime-fixture engine-test-server
       - run: python3 scripts/test_runtime_network.py
@@ -38,6 +41,7 @@ jobs:
       - run: zig build test-execution
       - run: zig build test-execution -Doptimize=ReleaseSafe
       - run: zig build test-token
+      - run: zig build test-token -Doptimize=ReleaseSafe
       - run: bash scripts/test_engine_local.sh
       - run: zig build api-test-server
       - uses: actions/setup-node@v4

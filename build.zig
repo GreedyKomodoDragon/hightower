@@ -427,6 +427,22 @@ pub fn build(b: *std.Build) void {
     });
     const engine_test_server_step = b.step("engine-test-server", "Build the loopback Engine API test server");
     engine_test_server_step.dependOn(&b.addInstallArtifact(engine_test_server, .{}).step);
+    const execution_service = b.addExecutable(.{
+        .name = "hightower-execution",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/execution/service.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "execution", .module = execution_mod },
+                .{ .name = "engine_server", .module = engine_server_mod },
+            },
+        }),
+    });
+    b.installArtifact(execution_service);
+    const execution_service_tests = b.addTest(.{ .root_module = execution_service.root_module });
+    const execution_service_test_step = b.step("test-execution-service", "Run execution service tests");
+    execution_service_test_step.dependOn(&b.addRunArtifact(execution_service_tests).step);
     const runtime_fixture = b.addExecutable(.{
         .name = "hightower-runtime-fixture",
         .root_module = b.createModule(.{
@@ -622,6 +638,7 @@ pub fn build(b: *std.Build) void {
     token_step.dependOn(&b.addRunArtifact(token_tests).step);
     test_step.dependOn(&run_engine_client_tests.step);
     test_step.dependOn(&run_engine_server_tests.step);
+    test_step.dependOn(execution_service_test_step);
     const run_evm_tests = b.addRunArtifact(evm_tests);
     test_step.dependOn(&run_evm_tests.step);
     const run_bloom_filter_tests = b.addRunArtifact(bloom_filter_tests);
