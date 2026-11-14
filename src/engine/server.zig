@@ -440,6 +440,7 @@ pub const Server = struct {
         for (previous_path.items) |record_index| for (self.chain.records.items[record_index].transactions) |raw| {
             // The canonical record retains no blob sidecar after inclusion.
             if (raw.len == 0 or raw[0] == 3) continue;
+            // SAFETY: Keccak writes all hash bytes before the value is read.
             var hash: execution.Hash = undefined;
             std.crypto.hash.sha3.Keccak256.hash(raw, &hash, .{});
             if (self.chain.transaction(hash) != null or self.pool.get(hash) != null) continue;
