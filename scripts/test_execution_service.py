@@ -76,7 +76,11 @@ def run():
         genesis = json.loads((ROOT / "docs/engine/osaka-genesis.json").read_text())
         genesis["config"]["chainId"] = 1
         genesis["baseFeePerGas"] = "0x1"
+        genesis["nonce"] = "0x1"
+        genesis["mixHash"] = "0x" + "ab" * 32
+        genesis["coinbase"] = "0x" + "bc" * 20
         genesis["alloc"][SENDER[2:]] = {"balance": "0x3b9aca00"}
+        genesis["alloc"]["aa" * 20] = {"storage": {"0x1": "0x2"}}
         (temporary / "genesis.json").write_text(json.dumps(genesis))
         signed = json.loads((ROOT / "src/execution/fixtures/local_token_signed.json").read_text())
         engine_port, rpc_port = port(), port()
@@ -122,7 +126,11 @@ def run():
                 )
                 assert b" 413 " in oversized.recv(1024)
             assert request(rpc_port, "eth_chainId", []) == "0x1"
-            head = request(rpc_port, "eth_getBlockByNumber", ["0x0", False])["hash"]
+            anchor = request(rpc_port, "eth_getBlockByNumber", ["0x0", False])
+            assert anchor["nonce"] == "0x0000000000000001"
+            assert anchor["mixHash"] == genesis["mixHash"] and anchor["miner"] == genesis["coinbase"]
+            assert request(rpc_port, "eth_getStorageAt", ["0x" + "aa" * 20, "0x1", "latest"]) == "0x" + "00" * 31 + "02"
+            head = anchor["hash"]
             stop_reads = threading.Event()
             read_errors = []
 
@@ -200,10 +208,12 @@ def run():
             process.terminate()
             process.wait(timeout=5)
             process.stderr.close()
-            for changed, expected in (("chainId", "ExecutionIdentityMismatch"), ("gasLimit", "GenesisMismatch")):
+            for changed, expected in (("chainId", "ExecutionIdentityMismatch"), ("gasLimit", "GenesisMismatch"), ("slotNumber", "UnsupportedGenesisHeaderField")):
                 wrong = json.loads((temporary / "genesis.json").read_text())
                 if changed == "chainId":
                     wrong["config"][changed] = 2
+                elif changed == "slotNumber":
+                    wrong[changed] = "0x1"
                 else:
                     wrong[changed] = "0xaf79e1"
                 (temporary / "wrong-genesis.json").write_text(json.dumps(wrong))

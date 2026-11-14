@@ -1,6 +1,6 @@
 # Production execution service
 
-Build with `zig build`, then start `zig-out/bin/hightower-execution --config path/to/config.json`. The service accepts an Osaka genesis JSON file in the format of [the local example](engine/osaka-genesis.json). Its `config.chainId` becomes the RPC chain ID. The binary uses that genesis header and account allocation; it does not enforce the example's pinned hash. Fork schedules beyond this Osaka-only entrypoint belong to #187.
+Build with `zig build`, then start `zig-out/bin/hightower-execution --config path/to/config.json`. The service accepts an Osaka genesis JSON file in the format of [the local example](engine/osaka-genesis.json). Its `config.chainId` becomes the RPC chain ID. The binary loads account balances, nonces, code, and storage along with supported header fields; it rejects unrecognized account or header fields and does not enforce the example's pinned hash. Fork schedules beyond this Osaka-only entrypoint belong to #187.
 
 The configuration is a JSON object with these fields:
 
