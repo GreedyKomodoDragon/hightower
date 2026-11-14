@@ -229,3 +229,6 @@ Chain:      [Block 0] ───────────────────�
 - **ERC-20**: An Ethereum token contract interface with a standard `Transfer` event for token movements.
 - **Transfer event**: A contract log whose signature identifies an ERC-20 transfer; its indexed topics hold sender and recipient, and its data holds the raw amount.
 - **Finality cursor**: The last finalized execution block whose transfer logs the service has emitted and recorded durably.
+- **Transaction pool**: A node's temporary collection of valid signed execution transactions waiting for block inclusion.
+- **Pending nonce**: The first sender nonce after all consecutive transactions already in the pool; gaps do not advance it.
+- **Fee history**: A JSON-RPC summary of recent canonical block base fees, gas use, and requested priority-fee estimates.

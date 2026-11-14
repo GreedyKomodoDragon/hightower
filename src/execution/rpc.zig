@@ -17,6 +17,8 @@ const max_body = 8 * 1024 * 1024;
 const max_batch = 20;
 const max_log_blocks = 1000;
 const max_log_results = 10_000;
+const max_fee_history = 128;
+const priority_fee: u64 = 1_000_000_000;
 
 const Method = enum {
     eth_chainId,
@@ -26,6 +28,15 @@ const Method = enum {
     eth_getBalance,
     eth_getCode,
     eth_getStorageAt,
+    eth_getTransactionCount,
+    eth_getBlockReceipts,
+    eth_getTransactionByHash,
+    eth_gasPrice,
+    eth_maxPriorityFeePerGas,
+    eth_feeHistory,
+    net_version,
+    web3_clientVersion,
+    eth_syncing,
     eth_call,
     eth_estimateGas,
     eth_sendRawTransaction,
@@ -142,6 +153,22 @@ pub const Server = struct {
                 try noParams(params);
                 return quantity(a, self.chain.chain_id);
             },
+            .net_version => {
+                try noParams(params);
+                return string(try std.fmt.allocPrint(a, "{d}", .{self.chain.chain_id}));
+            },
+            .web3_clientVersion => {
+                try noParams(params);
+                return string("Hightower/0.1.0");
+            },
+            .eth_syncing => {
+                try noParams(params);
+                return .{ .bool = false };
+            },
+            .eth_gasPrice, .eth_maxPriorityFeePerGas => {
+                try noParams(params);
+                return quantity(a, if (method_name == .eth_gasPrice) self.chain.latest().header.base_fee_per_gas +| priority_fee else priority_fee);
+            },
             .eth_blockNumber => {
                 try noParams(params);
                 return quantity(a, self.chain.latest().header.number);
@@ -149,11 +176,26 @@ pub const Server = struct {
             .eth_getBlockByHash, .eth_getBlockByNumber => {
                 if (params.len != 2 or params[1] != .bool) return error.InvalidParams;
                 const record = switch (method_name) {
-                    .eth_getBlockByHash => self.chain.byHash(try parseHash(try asString(params[0]))),
+                    .eth_getBlockByHash => self.chain.canonicalByHash(try parseHash(try asString(params[0]))),
                     .eth_getBlockByNumber => try self.block(try asString(params[0])),
                     else => unreachable,
                 };
                 return if (record) |found| if (found.header.number >= self.chain.history_floor or found.header.number == self.chain.records.items[0].header.number) try self.blockJson(a, found, params[1].bool) else .null else .null;
+            },
+            .eth_getBlockReceipts => {
+                if (params.len != 1) return error.InvalidParams;
+                const tag = try asString(params[0]);
+                const record = (if (tag.len == 66) self.chain.canonicalByHash(try parseHash(tag)) else try self.block(tag)) orelse return .null;
+                var receipts = array(a);
+                for (record.receipts(), 0..) |_, index| try receipts.array.append(try self.receiptJson(a, record, index));
+                return receipts;
+            },
+            .eth_getTransactionByHash => {
+                if (params.len != 1) return error.InvalidParams;
+                const hash = try parseHash(try asString(params[0]));
+                if (self.chain.transaction(hash)) |found| return self.transactionJson(a, found.record, found.index);
+                const entry = self.pool.get(hash) orelse return .null;
+                return self.pendingTransactionJson(a, entry.raw);
             },
             .eth_getBalance => {
                 if (params.len < 1 or params.len > 2) return error.InvalidParams;
@@ -182,6 +224,28 @@ pub const Server = struct {
                 std.mem.writeInt(u256, &word, world.getStorage(address, slot), .big);
                 return string(try hex(a, &word));
             },
+            .eth_getTransactionCount => {
+                if (params.len < 1 or params.len > 2) return error.InvalidParams;
+                const address = try parseAddress(try asString(params[0]));
+                const tag = if (params.len == 2) try asString(params[1]) else "latest";
+                const record = (try self.block(tag)) orelse return error.UnknownBlock;
+                var world = try self.chain.loadWorld(a, record.hash);
+                defer world.deinit();
+                var nonce = world.getNonce(address);
+                if (std.mem.eql(u8, tag, "pending")) {
+                    while (nonce < std.math.maxInt(u64)) {
+                        var found = false;
+                        for (self.pool.entries.items) |entry| if (entry.admission.nonce == nonce and std.mem.eql(u8, &entry.admission.sender, &address)) {
+                            found = true;
+                            break;
+                        };
+                        if (!found) break;
+                        nonce += 1;
+                    }
+                }
+                return quantity(a, nonce);
+            },
+            .eth_feeHistory => return self.feeHistory(a, params),
             .eth_call, .eth_estimateGas => {
                 if (params.len < 1 or params.len > 2 or params[0] != .object) return error.InvalidParams;
                 const record = if (params.len == 2) (try self.block(try asString(params[1]))) orelse return error.UnknownBlock else self.chain.latest();
@@ -190,7 +254,7 @@ pub const Server = struct {
                     const output = try self.runCall(a, record, call, call.gas);
                     return string(try hex(a, output));
                 }
-                const intrinsic = try callIntrinsic(call.data);
+                const intrinsic = try callIntrinsic(call, self.chain.fork);
                 var lo: u64 = intrinsic;
                 var hi: u64 = call.gas;
                 if (lo > hi) return error.IntrinsicGasTooLow;
@@ -229,6 +293,8 @@ pub const Server = struct {
     fn block(self: *Server, tag: []const u8) !?*const chain_mod.Record {
         if (std.mem.eql(u8, tag, "latest") or std.mem.eql(u8, tag, "pending")) return self.chain.latest();
         if (std.mem.eql(u8, tag, "earliest")) return &self.chain.records.items[0];
+        if (std.mem.eql(u8, tag, "safe")) return if (std.mem.allEqual(u8, &self.chain.safe_hash, 0)) self.chain.latest() else self.chain.canonicalByHash(self.chain.safe_hash);
+        if (std.mem.eql(u8, tag, "finalized")) return if (std.mem.allEqual(u8, &self.chain.finalized_hash, 0)) self.chain.latest() else self.chain.canonicalByHash(self.chain.finalized_hash);
         return self.chain.byNumber(try parseQuantity(u64, tag));
     }
 
@@ -239,21 +305,22 @@ pub const Server = struct {
 
     /// Runs an unsigned call on a discarded snapshot and returns its output bytes.
     fn runCall(self: *Server, a: std.mem.Allocator, record: *const chain_mod.Record, call: Call, gas: u64) ![]const u8 {
-        const intrinsic = try callIntrinsic(call.data);
+        const intrinsic = try callIntrinsic(call, self.chain.fork);
         if (gas < intrinsic) return error.IntrinsicGasTooLow;
         const scratch = a;
         var world = try self.chain.loadWorld(scratch, record.hash);
         defer world.deinit();
         if (call.value > world.getBalance(call.from)) return error.InsufficientBalance;
-        if (call.value != 0) {
+        if (call.value != 0 and call.to != null) {
             try world.setBalance(call.from, world.getBalance(call.from) - call.value);
-            try world.setBalance(call.to, std.math.add(u256, world.getBalance(call.to), call.value) catch return error.BalanceOverflow);
+            try world.setBalance(call.to.?, std.math.add(u256, world.getBalance(call.to.?), call.value) catch return error.BalanceOverflow);
         }
         var machine = execution.evm.Machine.init(scratch, &world);
         defer machine.deinit();
         const header = record.header;
-        try machine.configure(.{ .fork = self.chain.fork, .origin = call.from, .gas_price = header.base_fee_per_gas, .coinbase = header.fee_recipient, .timestamp = header.timestamp, .number = header.number, .prev_randao = std.mem.readInt(u256, &header.prev_randao, .big), .gas_limit = header.gas_limit, .chain_id = self.chain.chain_id, .base_fee = header.base_fee_per_gas, .blob_base_fee = transition.blobBaseFee(self.chain.fork, header.excess_blob_gas) catch 0 }, call.from, call.to, &.{});
-        var result = try machine.run(.{ .code = world.getExecutionCode(call.to), .gas = gas - intrinsic, .caller = call.from, .callee = call.to, .value = call.value, .data = call.data });
+        const to = call.to orelse execution.state.createAddress(call.from, world.getNonce(call.from));
+        try machine.configure(.{ .fork = self.chain.fork, .origin = call.from, .gas_price = header.base_fee_per_gas, .coinbase = header.fee_recipient, .timestamp = header.timestamp, .number = header.number, .prev_randao = std.mem.readInt(u256, &header.prev_randao, .big), .gas_limit = header.gas_limit, .chain_id = self.chain.chain_id, .base_fee = header.base_fee_per_gas, .blob_base_fee = transition.blobBaseFee(self.chain.fork, header.excess_blob_gas) catch 0 }, call.from, to, &.{});
+        var result = if (call.to == null) try machine.create(call.from, to, call.value, call.data, gas - intrinsic, 0) else try machine.run(.{ .code = world.getExecutionCode(to), .gas = gas - intrinsic, .caller = call.from, .callee = to, .value = call.value, .data = call.data });
         defer result.deinit(scratch);
         switch (result.status) {
             .success => return a.dupe(u8, result.output),
@@ -405,6 +472,55 @@ pub const Server = struct {
         return out;
     }
 
+    /// Serializes a pool transaction with null coordinates until canonical inclusion.
+    fn pendingTransactionJson(self: *Server, a: std.mem.Allocator, raw: []const u8) !Value {
+        var transactions = [_][]u8{@constCast(raw)};
+        const temporary = chain_mod.Record{ .header = self.chain.latest().header, .hash = .{0} ** 32, .transactions = &transactions, .withdrawals = &.{}, .result = null, .world = null };
+        var out = try self.transactionJson(a, &temporary, 0);
+        try put(a, &out, "blockHash", .null);
+        try put(a, &out, "blockNumber", .null);
+        try put(a, &out, "transactionIndex", .null);
+        return out;
+    }
+
+    /// Returns bounded canonical base fees, gas ratios, and requested rewards.
+    fn feeHistory(self: *Server, a: std.mem.Allocator, params: []const Value) !Value {
+        if (params.len < 2 or params.len > 3) return error.InvalidParams;
+        const count = try parseQuantity(u64, try asString(params[0]));
+        if (count == 0 or count > max_fee_history) return error.InvalidParams;
+        const newest = (try self.block(try asString(params[1]))) orelse return error.UnknownBlock;
+        const percentiles = if (params.len == 3) params[2] else Value{ .array = std.json.Array.init(a) };
+        if (percentiles != .array or percentiles.array.items.len > 100) return error.InvalidParams;
+        var previous: f64 = -1;
+        for (percentiles.array.items) |item| {
+            const value: f64 = switch (item) { .integer => |v| @floatFromInt(v), .float => |v| v, else => return error.InvalidParams };
+            if (!std.math.isFinite(value) or value < 0 or value > 100 or value < previous) return error.InvalidParams;
+            previous = value;
+        }
+        const oldest = @max(self.chain.records.items[0].header.number, newest.header.number -| (count - 1));
+        var fees = array(a);
+        var ratios = array(a);
+        var rewards = array(a);
+        var number = oldest;
+        while (number <= newest.header.number) : (number += 1) {
+            const record = self.chain.byNumber(number) orelse return error.UnknownBlock;
+            try fees.array.append(try quantity(a, record.header.base_fee_per_gas));
+            try ratios.array.append(.{ .float = if (record.header.gas_limit == 0) 0 else @as(f64, @floatFromInt(record.header.gas_used)) / @as(f64, @floatFromInt(record.header.gas_limit)) });
+            var block_rewards = array(a);
+            // shortcut: rewards use the configured estimate, calculate gas-weighted tips when fee-market analytics are needed.
+            for (percentiles.array.items) |_| try block_rewards.array.append(try quantity(a, priority_fee));
+            try rewards.array.append(block_rewards);
+        }
+        const next = try transition.nextBaseFee(newest.header.gas_limit, newest.header.gas_used, newest.header.base_fee_per_gas);
+        try fees.array.append(try quantity(a, next));
+        var out = object(a);
+        try put(a, &out, "oldestBlock", try quantity(a, oldest));
+        try put(a, &out, "baseFeePerGas", fees);
+        try put(a, &out, "gasUsedRatio", ratios);
+        if (params.len == 3) try put(a, &out, "reward", rewards);
+        return out;
+    }
+
     /// Serializes one transaction receipt and its indexed logs.
     fn receiptJson(self: *Server, a: std.mem.Allocator, record: *const chain_mod.Record, index: usize) !Value {
         const receipts = record.receipts();
@@ -462,7 +578,7 @@ pub const Server = struct {
         if (specified_hash != null and (obj.get("fromBlock") != null or obj.get("toBlock") != null)) return error.InvalidParams;
         const requested_hash: ?execution.Hash = if (specified_hash) |v| try parseHash(try asString(v)) else null;
         const from: u64 = if (specified_hash) |v| blk: {
-            const record = self.chain.byHash(try parseHash(try asString(v))) orelse return array(a);
+            const record = self.chain.canonicalByHash(try parseHash(try asString(v))) orelse return array(a);
             break :blk record.header.number;
         } else if (obj.get("fromBlock")) |v| try self.logBound(try asString(v)) else self.chain.latest().header.number;
         const to: u64 = if (specified_hash != null) from else if (obj.get("toBlock")) |v| try self.logBound(try asString(v)) else self.chain.latest().header.number;
@@ -495,11 +611,12 @@ pub const Server = struct {
     fn logBound(self: *Server, tag: []const u8) !u64 {
         if (std.mem.eql(u8, tag, "latest") or std.mem.eql(u8, tag, "pending")) return self.chain.latest().header.number;
         if (std.mem.eql(u8, tag, "earliest")) return self.chain.records.items[0].header.number;
+        if (std.mem.eql(u8, tag, "safe") or std.mem.eql(u8, tag, "finalized")) return (try self.block(tag) orelse return error.UnknownBlock).header.number;
         return parseQuantity(u64, tag);
     }
 };
 
-const Call = struct { from: execution.Address, to: execution.Address, gas: u64, value: u256, data: []const u8 };
+const Call = struct { from: execution.Address, to: ?execution.Address, gas: u64, value: u256, data: []const u8 };
 
 /// Serializes a log with block and transaction coordinates.
 fn logJson(a: std.mem.Allocator, record: *const chain_mod.Record, tx_index: usize, log_index: usize, log: execution.Log) !Value {
@@ -588,7 +705,7 @@ fn validateLogFilter(filter: std.json.ObjectMap) !void {
 /// Parses the fields needed for an unsigned call or gas estimate.
 fn parseCall(a: std.mem.Allocator, value: Value, default_gas: u64) !Call {
     const obj = value.object;
-    const to = try parseAddress(try asString(obj.get("to") orelse return error.InvalidParams));
+    const to: ?execution.Address = if (obj.get("to")) |v| if (v == .null) null else try parseAddress(try asString(v)) else null;
     const from: execution.Address = if (obj.get("from")) |v| try parseAddress(try asString(v)) else .{0} ** 20;
     const gas = if (obj.get("gas")) |v| try parseQuantity(u64, try asString(v)) else default_gas;
     const amount = if (obj.get("value")) |v| try parseQuantity(u256, try asString(v)) else 0;
@@ -597,9 +714,16 @@ fn parseCall(a: std.mem.Allocator, value: Value, default_gas: u64) !Call {
 }
 
 /// Calculates basic transaction intrinsic gas for call estimation.
-fn callIntrinsic(data: []const u8) !u64 {
-    var gas: u64 = 21_000;
-    for (data) |byte| gas = std.math.add(u64, gas, if (byte == 0) 4 else 16) catch return error.GasOverflow;
+fn callIntrinsic(call: Call, fork: transition.Fork) !u64 {
+    var gas: u64 = if (call.to == null) 53_000 else 21_000;
+    if (call.to == null and @intFromEnum(fork) >= @intFromEnum(transition.Fork.shanghai)) {
+        if (call.data.len > 49_152) return error.InitcodeTooLarge;
+        gas = try std.math.add(u64, gas, try std.math.mul(u64, @intCast((call.data.len + 31) / 32), 2));
+    }
+    var tokens: u64 = 0;
+    for (call.data) |byte| gas = std.math.add(u64, gas, if (byte == 0) 4 else 16) catch return error.GasOverflow;
+    for (call.data) |byte| tokens = std.math.add(u64, tokens, if (byte == 0) 1 else 4) catch return error.GasOverflow;
+    if (@intFromEnum(fork) >= @intFromEnum(transition.Fork.prague)) gas = @max(gas, try std.math.add(u64, 21_000, try std.math.mul(u64, tokens, 10)));
     return gas;
 }
 

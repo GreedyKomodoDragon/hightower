@@ -36,6 +36,9 @@ pub const Pool = struct {
     limits: Limits,
     entries: std.ArrayList(Entry) = .empty,
     byte_count: usize = 0,
+    evictions: u64 = 0,
+    replacements: u64 = 0,
+    build_failures: u64 = 0,
 
     /// Creates an empty pool with explicit count and byte limits.
     pub fn init(allocator: std.mem.Allocator, limits: Limits) Pool {
@@ -85,6 +88,7 @@ pub const Pool = struct {
             self.byte_count -= old.bytes();
             self.freeEntry(old);
             self.entries.items[index] = entry;
+            self.replacements += 1;
         } else {
             try self.entries.append(self.allocator, entry);
         }
@@ -99,6 +103,7 @@ pub const Pool = struct {
             self.byte_count -= removed.bytes();
             const removed_submitted = std.mem.eql(u8, &removed.hash, &hash);
             self.freeEntry(removed);
+            self.evictions += 1;
             if (removed_submitted) return error.PoolFull;
         }
         return hash;
