@@ -1,6 +1,5 @@
 // Validated execution blocks retain their parent hash and post-state. Fork
-// choice selects a separate canonical path; block-number and log reads follow
-// that path, while block-hash lookup can find a validated side branch.
+// choice selects a separate canonical path; public reads follow that path.
 //
 // genesis -> A1 -> A2  (validated ancestry)
 //         \-> B1 -> B2  (canonical path selected by fork choice)
@@ -112,9 +111,18 @@ pub const Chain = struct {
         return null;
     }
 
-    /// Resolves a canonical block hash.
+    /// Resolves a validated block hash for Engine ancestry and branch execution.
     pub fn byHash(self: *const Chain, hash: execution.Hash) ?*const Record {
         for (self.records.items) |*record| if (std.mem.eql(u8, &record.hash, &hash)) return record;
+        return null;
+    }
+
+    /// Resolves a block hash only when it belongs to the selected canonical path.
+    pub fn canonicalByHash(self: *const Chain, hash: execution.Hash) ?*const Record {
+        for (self.canonical.items) |index| {
+            const record = &self.records.items[index];
+            if (std.mem.eql(u8, &record.hash, &hash)) return record;
+        }
         return null;
     }
 

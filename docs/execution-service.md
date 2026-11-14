@@ -23,3 +23,24 @@ When `transfer_contract` is set, the service writes one newline-delimited JSON o
 The service stores a cursor after successfully writing every finalized block's events, including blocks without matching logs. On startup it catches up before opening listeners, and after every committed finality update it catches up before pruning. A failed output or cursor write leaves the block eligible for replay. After a crash, consumers may see the last block's records again and should deduplicate by `id`. A partially written line after an output failure should be discarded. There is one configured contract per data directory; changing it causes startup to fail. Enabling the stream after the needed finalized receipts have been pruned also fails explicitly. The existing execution retention policy keeps 4,096 finalized canonical blocks, rounded to a 128-block checkpoint floor, so an operator who disables the stream for long enough may lose the ability to resume it from that database.
 
 Run `python3 scripts/test_execution_service.py` after `zig build` for a local two-listener test with the signed token fixture, finality output, and recovery.
+
+## Public JSON-RPC and transaction pool
+
+| RPC area | Methods | Support |
+| --- | --- | --- |
+| Chain and account reads | `eth_chainId`, `eth_blockNumber`, `eth_getBlockByHash`, `eth_getBlockByNumber`, `eth_getBalance`, `eth_getCode`, `eth_getStorageAt`, `eth_getTransactionCount` | Supported |
+| Transactions and logs | `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getBlockReceipts`, `eth_getLogs` | Supported |
+| Calls and fees | `eth_call`, `eth_estimateGas`, `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_feeHistory` | Supported |
+| Submission | `eth_sendRawTransaction` | Supported |
+| Network and status | `net_version`, `web3_clientVersion`, `eth_syncing` | Supported |
+| Other methods, including filters, subscriptions, tracing, and personal account management | All unlisted methods | `-32601` method not found |
+
+`eth_syncing` is `false` because this Engine-driven service has no active execution sync process. Fee estimates use a fixed 1 gwei priority fee; fee-history rewards use the same estimate rather than a transaction-tip percentile.
+
+Reads use only the selected canonical chain. `latest` and `pending` read the latest committed state; `safe` and `finalized` use their Engine fork-choice checkpoints, falling back to latest before a checkpoint is supplied; `earliest` uses genesis. Hexadecimal numbers select canonical blocks. `pending` transaction count advances only across contiguous sender nonces in the pool. Orphaned block hashes, transactions, receipts, and logs disappear from public reads. `eth_getBlockReceipts` returns `null` for an unknown block. Malformed parameters return `-32602`; a valid but unavailable state block returns `-32001`.
+
+Calls and estimates accept contract creation requests with no `to`; they run initcode on a discarded state snapshot. A successful creation receipt contains the derived `contractAddress`. A reverted creation has status `0x0`, a null `contractAddress`, and no deployed code.
+
+`eth_sendRawTransaction` accepts signed legacy and EIP-2718 types 1 (access list), 2 (dynamic fee), 3 (blob), and 4 (set code) on supported forks. Blob submissions require a valid network sidecar and trusted KZG setup. A successfully submitted hash is pending and queryable through `eth_getTransactionByHash` with null block fields until canonical inclusion. Inclusion gives it a block position and receipt. A 10% bump in all applicable fee caps replaces a pending sender nonce; the old hash then returns `null`. A stale nonce, invalid signature or chain ID, insufficient balance, underpriced replacement, oversized transaction, invalid blob sidecar, or full pool is rejected with a named `-32000` error. Higher-tip entries may evict lower-tip entries. Entries already included or made stale by a canonical commit are pruned. On reorg, valid orphaned non-blob transactions are offered to the pool again; blob transactions are dropped because the included canonical record no longer retains their sidecars. Pending entries and counters are in memory and reset on restart.
+
+The pool holds at most 4,096 entries and 64 MiB of encoded transactions plus sidecars. It records live entry count, owned bytes, evictions, replacements, and payload build failures internally; the public metrics endpoint is tracked by #199. JSON-RPC limits are 8 MiB per request, 20 requests per batch, 1,000 blocks or 10,000 returned logs per log query, and 128 blocks per fee-history query. These limits return a request or query error rather than a partial result.

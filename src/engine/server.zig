@@ -388,6 +388,7 @@ pub const Server = struct {
         var world_owned = true;
         errdefer if (world_owned) next_world.deinit();
         var pending: ?Build = if (params[1] == .null) null else self.startBuild(a, params[1], parent_header, head, parent_world) catch |err| {
+            self.pool.build_failures += 1;
             if (err == error.InvalidParams) return error.InvalidPayloadAttributes;
             return err;
         };
@@ -424,7 +425,8 @@ pub const Server = struct {
             self.chain.durability_uncertain = true;
             return err;
         };
-        self.chain.canonical.deinit(self.allocator);
+        var previous_path = self.chain.canonical;
+        defer previous_path.deinit(self.allocator);
         self.chain.canonical = path;
         path = .empty;
         self.chain.safe_hash = safe;
@@ -433,6 +435,21 @@ pub const Server = struct {
         self.world.* = next_world;
         world_owned = false;
         self.pool.prune(self.world);
+        var shared: usize = 0;
+        while (shared < previous_path.items.len and shared < self.chain.canonical.items.len and previous_path.items[shared] == self.chain.canonical.items[shared]) : (shared += 1) {}
+        if (shared < previous_path.items.len) {
+            const head_header = self.chain.latest().header;
+            const pending_context: execution.transition.Context = .{ .fork = self.chain.fork, .chain_id = self.chain.chain_id, .coinbase = head_header.fee_recipient, .number = head_header.number +| 1, .timestamp = head_header.timestamp, .gas_limit = head_header.gas_limit, .base_fee = execution.transition.nextBaseFee(head_header.gas_limit, head_header.gas_used, head_header.base_fee_per_gas) catch head_header.base_fee_per_gas, .prev_randao = head_header.prev_randao, .blob_base_fee = execution.transition.blobBaseFee(self.chain.fork, head_header.excess_blob_gas) catch null };
+            for (previous_path.items[shared..]) |record_index| for (self.chain.records.items[record_index].transactions) |raw| {
+                // The canonical record retains no blob sidecar after inclusion.
+                if (raw.len == 0 or raw[0] == 3) continue;
+                // SAFETY: Keccak writes all hash bytes before the value is read.
+                var hash: execution.Hash = undefined;
+                std.crypto.hash.sha3.Keccak256.hash(raw, &hash, .{});
+                if (self.chain.transaction(hash) != null or self.pool.get(hash) != null) continue;
+                _ = self.pool.admit(self.world, pending_context, self.settings, raw) catch |err| std.log.warn("orphaned transaction dropped: {s}", .{@errorName(err)});
+            };
+        }
         if (self.transfers) |stream| try stream.catchUp();
         if (self.store) |store| store.prune(self.chain) catch |err| std.log.err("execution pruning failed after fork-choice commit: {s}", .{@errorName(err)});
         var staged_index = self.staged.items.len;
@@ -1064,6 +1081,96 @@ test "Engine builds and validates after retained history is pruned" {
     defer built.deinit();
     const payload = try wire.payloadJson(temp, built.payload, 1);
     try std.testing.expectEqualStrings("VALID", try wire.string(try wire.field(try server.newPayload(temp, &.{payload}, 1), "status")));
+}
+
+test "Engine re-admits orphaned deployment transactions and serves canonical receipts" {
+    const a = std.testing.allocator;
+    var world = execution.state.State.init(a);
+    defer world.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const temp = arena.allocator();
+    const initcodes = [_][]const u8{ &.{ 0x60, 0x2a, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3 }, &.{ 0x60, 0x00, 0x60, 0x00, 0xfd } };
+    var raws: [2][]u8 = undefined;
+    for (initcodes, 0..) |code, index| {
+        const tx: execution.Transaction = .{ .legacy = .{ .nonce = 0, .gas_price = if (index == 0) 3 else 2, .gas_limit = 100_000, .to = null, .value = 0, .data = code, .v = 27, .r = 1, .s = 1 } };
+        try world.setBalance(try execution.recoverSender(temp, tx, 1), 1_000_000_000);
+        raws[index] = try execution.encode(temp, tx);
+    }
+    var genesis_header = std.mem.zeroes(execution.Header);
+    genesis_header.state_root = try world.stateRoot();
+    genesis_header.gas_limit = 30_000_000;
+    genesis_header.base_fee_per_gas = 1;
+    var chain = try execution.chain.Chain.init(a, 1, .paris, genesis_header, &world);
+    defer chain.deinit();
+    var pool = execution.pool.Pool.init(a, .{});
+    defer pool.deinit();
+    var server: Server = .{ .allocator = a, .chain = &chain, .world = &world, .pool = &pool, .secret = .{0} ** 32 };
+    defer server.deinit();
+    const genesis = chain.latest().hash;
+    var hashes: [2]execution.Hash = undefined;
+    for (raws, 0..) |raw, index| {
+        hashes[index] = try pool.admit(&world, .{ .fork = .paris, .chain_id = 1, .coinbase = .{0} ** 20, .number = 1, .timestamp = 1, .gas_limit = genesis_header.gas_limit, .base_fee = 1 }, null, raw);
+    }
+    var rpc: execution.rpc.Server = .{ .chain = &chain, .pool = &pool, .world = &world };
+    const pending_request = .{ .jsonrpc = "2.0", .id = 1, .method = "eth_getTransactionByHash", .params = .{try wire.hex(temp, &hashes[0])} };
+    const pending_reply = try rpc.dispatch(temp, try std.json.Stringify.valueAlloc(temp, pending_request, .{}));
+    const submitted = try wire.field((try std.json.parseFromSlice(Value, temp, pending_reply, .{})).value, "result");
+    try std.testing.expect((try wire.field(submitted, "blockHash")) == .null);
+    var attrs = wire.object();
+    try wire.put(temp, &attrs, "timestamp", try wire.number(temp, @as(u64, 1)));
+    try wire.put(temp, &attrs, "prevRandao", try wire.hex(temp, &([_]u8{0} ** 32)));
+    try wire.put(temp, &attrs, "suggestedFeeRecipient", try wire.hex(temp, &([_]u8{0} ** 20)));
+    var built = try server.startBuild(temp, attrs, genesis_header, genesis, &world);
+    defer built.deinit();
+    try std.testing.expectEqual(@as(usize, 2), built.payload.transactions.data.len);
+    const block_hash = built.payload.block_hash;
+    try std.testing.expectEqualStrings("VALID", try wire.string(try wire.field(try server.newPayload(temp, &.{try wire.payloadJson(temp, built.payload, 1)}, 1), "status")));
+    var choice = wire.object();
+    try wire.put(temp, &choice, "headBlockHash", try wire.hex(temp, &block_hash));
+    try wire.put(temp, &choice, "safeBlockHash", try wire.hex(temp, &genesis));
+    try wire.put(temp, &choice, "finalizedBlockHash", try wire.hex(temp, &genesis));
+    _ = try server.forkchoiceUpdated(temp, &.{ choice, .null });
+    try std.testing.expectEqual(@as(usize, 0), pool.entries.items.len);
+    _ = try server.forkchoiceUpdated(temp, &.{ choice, .null });
+    try std.testing.expectEqual(@as(usize, 0), pool.entries.items.len);
+    for (raws, 0..) |raw, index| {
+        var decoded = try execution.parse(execution.Transaction, temp, raw);
+        defer decoded.deinit();
+        const creator = try execution.recoverSender(temp, decoded.value, 1);
+        const address = execution.state.createAddress(creator, 0);
+        try std.testing.expectEqual(index == 0, world.getCode(address).len != 0);
+    }
+    for (hashes, 0..) |hash, index| {
+        const request = .{ .jsonrpc = "2.0", .id = index, .method = "eth_getTransactionReceipt", .params = .{try wire.hex(temp, &hash)} };
+        const reply = try rpc.dispatch(temp, try std.json.Stringify.valueAlloc(temp, request, .{}));
+        const receipt = try wire.field((try std.json.parseFromSlice(Value, temp, reply, .{})).value, "result");
+        try std.testing.expectEqualStrings(if (index == 0) "0x1" else "0x0", try wire.string(try wire.field(receipt, "status")));
+        const address = try wire.field(receipt, "contractAddress");
+        try std.testing.expect(if (index == 0) address == .string else address == .null);
+        const tx_request = .{ .jsonrpc = "2.0", .id = index, .method = "eth_getTransactionByHash", .params = .{try wire.hex(temp, &hash)} };
+        const tx_reply = try rpc.dispatch(temp, try std.json.Stringify.valueAlloc(temp, tx_request, .{}));
+        const included = try wire.field((try std.json.parseFromSlice(Value, temp, tx_reply, .{})).value, "result");
+        try std.testing.expectEqualStrings(try wire.string(try wire.hex(temp, &block_hash)), try wire.string(try wire.field(included, "blockHash")));
+    }
+    var sibling_attrs = wire.object();
+    try wire.put(temp, &sibling_attrs, "timestamp", try wire.number(temp, @as(u64, 2)));
+    try wire.put(temp, &sibling_attrs, "prevRandao", try wire.hex(temp, &([_]u8{0} ** 32)));
+    try wire.put(temp, &sibling_attrs, "suggestedFeeRecipient", try wire.hex(temp, &([_]u8{0} ** 20)));
+    var sibling = try server.startBuild(temp, sibling_attrs, genesis_header, genesis, &chain.records.items[0].world.?);
+    defer sibling.deinit();
+    try std.testing.expectEqual(@as(usize, 0), sibling.payload.transactions.data.len);
+    try std.testing.expectEqualStrings("VALID", try wire.string(try wire.field(try server.newPayload(temp, &.{try wire.payloadJson(temp, sibling.payload, 1)}, 1), "status")));
+    choice.object.getPtr("headBlockHash").?.* = try wire.hex(temp, &sibling.payload.block_hash);
+    _ = try server.forkchoiceUpdated(temp, &.{ choice, .null });
+    try std.testing.expectEqual(@as(usize, 2), pool.entries.items.len);
+    for (hashes) |hash| {
+        try std.testing.expect(pool.get(hash) != null);
+        const request = .{ .jsonrpc = "2.0", .id = 3, .method = "eth_getTransactionByHash", .params = .{try wire.hex(temp, &hash)} };
+        const reply = try rpc.dispatch(temp, try std.json.Stringify.valueAlloc(temp, request, .{}));
+        const pending_tx = try wire.field((try std.json.parseFromSlice(Value, temp, reply, .{})).value, "result");
+        try std.testing.expect((try wire.field(pending_tx, "blockHash")) == .null);
+    }
 }
 
 test "Engine persists validated payload and fork choice for recovery" {

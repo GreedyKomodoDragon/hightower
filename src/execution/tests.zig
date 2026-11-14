@@ -178,6 +178,52 @@ test "execution JSON-RPC dispatches chain and block methods with bounded input" 
         defer parsed.deinit();
         try std.testing.expect(parsed.value.object.contains("result") or parsed.value.object.contains("error"));
     }
+    for ([_]struct { method: []const u8, params: []const std.json.Value, expected: []const u8 }{
+        .{ .method = "net_version", .params = &.{}, .expected = "1" },
+        .{ .method = "eth_getTransactionCount", .params = &.{ .{ .string = zero_address }, .{ .string = "pending" } }, .expected = "0x0" },
+        .{ .method = "eth_getTransactionCount", .params = &.{ .{ .string = zero_address }, .{ .string = "safe" } }, .expected = "0x0" },
+    }) |case| {
+        const reply = try server.dispatch(a, try rpcRequest(temp, 30, case.method, case.params));
+        defer a.free(reply);
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, reply, .{});
+        defer parsed.deinit();
+        try testing.expectEqualStrings(case.expected, parsed.value.object.get("result").?.string);
+    }
+    var creation = std.json.Value{ .object = .empty };
+    try creation.object.put(temp, "data", .{ .string = "0x60006000f3" });
+    const estimate = try server.dispatch(a, try rpcRequest(temp, 31, "eth_estimateGas", &.{creation}));
+    defer a.free(estimate);
+    var parsed_estimate = try std.json.parseFromSlice(std.json.Value, a, estimate, .{});
+    defer parsed_estimate.deinit();
+    try testing.expect(try std.fmt.parseInt(u64, parsed_estimate.value.object.get("result").?.string[2..], 16) >= 53_000);
+    const fee_reply = try server.dispatch(a, try rpcRequest(temp, 32, "eth_feeHistory", &.{ .{ .string = "0x1" }, .{ .string = "latest" }, .{ .array = std.json.Array.init(temp) } }));
+    defer a.free(fee_reply);
+    var parsed_fee = try std.json.parseFromSlice(std.json.Value, a, fee_reply, .{});
+    defer parsed_fee.deinit();
+    try testing.expectEqual(@as(usize, 2), parsed_fee.value.object.get("result").?.object.get("baseFeePerGas").?.array.items.len);
+    const sender: execution.Address = .{ 0x7e, 0x5f, 0x45, 0x52, 0x09, 0x1a, 0x69, 0x12, 0x5d, 0x5d, 0xfc, 0xb7, 0xb8, 0xc2, 0x65, 0x90, 0x29, 0x39, 0x5b, 0xdf };
+    try world.setBalance(sender, 1_000_000_000);
+    const raw = try pendingDynamic(a, 0);
+    defer a.free(raw);
+    const hash = try pool.admit(&world, .{ .fork = .fulu, .chain_id = 1, .coinbase = .{0} ** 20, .number = 1, .timestamp = 1, .gas_limit = header.gas_limit, .base_fee = 1 }, null, raw);
+    const hash_hex = try std.fmt.allocPrint(temp, "0x{s}", .{std.fmt.bytesToHex(hash, .lower)});
+    const pending_reply = try server.dispatch(a, try rpcRequest(temp, 33, "eth_getTransactionByHash", &.{.{ .string = hash_hex }}));
+    defer a.free(pending_reply);
+    var parsed_pending = try std.json.parseFromSlice(std.json.Value, a, pending_reply, .{});
+    defer parsed_pending.deinit();
+    try testing.expect(parsed_pending.value.object.get("result").?.object.get("blockHash").? == .null);
+    const count_reply = try server.dispatch(a, try rpcRequest(temp, 34, "eth_getTransactionCount", &.{ .{ .string = try std.fmt.allocPrint(temp, "0x{s}", .{std.fmt.bytesToHex(sender, .lower)}) }, .{ .string = "pending" } }));
+    defer a.free(count_reply);
+    var parsed_count = try std.json.parseFromSlice(std.json.Value, a, count_reply, .{});
+    defer parsed_count.deinit();
+    try testing.expectEqualStrings("0x1", parsed_count.value.object.get("result").?.string);
+    try world.setNonce(sender, 1);
+    pool.prune(&world);
+    const dropped_reply = try server.dispatch(a, try rpcRequest(temp, 35, "eth_getTransactionByHash", &.{.{ .string = hash_hex }}));
+    defer a.free(dropped_reply);
+    var parsed_dropped = try std.json.parseFromSlice(std.json.Value, a, dropped_reply, .{});
+    defer parsed_dropped.deinit();
+    try testing.expect(parsed_dropped.value.object.get("result").? == .null);
     const serve_fn: *const fn (*execution.rpc.Server, std.mem.Allocator, std.Io, std.Io.net.Stream) anyerror!void = execution.rpc.Server.serveConnection;
     _ = serve_fn;
 }
@@ -370,6 +416,7 @@ test "pool budgets blobs, preserves nonce gaps, selects prefixes, and enforces r
             break :blk network;
         } else try execution.encode(a, tx);
         defer a.free(raw);
+        if (tx == .blob) try testing.expectError(error.KzgUnavailable, pool.admit(&world, context, null, raw));
         _ = try pool.admit(&world, context, &settings, raw);
     }
     try testing.expectEqual(@as(usize, 6), pool.entries.items.len);
@@ -394,7 +441,7 @@ test "pool budgets blobs, preserves nonce gaps, selects prefixes, and enforces r
     try expectSyntheticSender(a, &gap);
     const gap_raw = try execution.encode(a, gap);
     defer a.free(gap_raw);
-    _ = try pool.admit(&world, context, &settings, gap_raw);
+    const replaced_hash = try pool.admit(&world, context, &settings, gap_raw);
     const selected_gap = try pool.select(a, &world, context, 1_000_000, 2);
     defer a.free(selected_gap);
     try testing.expectEqual(@as(usize, 6), selected_gap.len);
@@ -409,6 +456,8 @@ test "pool budgets blobs, preserves nonce gaps, selects prefixes, and enforces r
     const replacement = try execution.encode(a, gap);
     defer a.free(replacement);
     _ = try pool.admit(&world, context, &settings, replacement);
+    try testing.expectEqual(@as(u64, 1), pool.replacements);
+    try testing.expect(pool.get(replaced_hash) == null);
 }
 
 /// Builds a signed dynamic-fee transaction at one nonce for pool bound tests.
@@ -477,6 +526,16 @@ test "pool keeps the accepted transaction when a larger replacement loses evicti
     try testing.expectEqual(old_raw.len + high_raw.len, pool.byte_count);
     try testing.expectEqualSlices(u8, old_raw, pool.get(old_hash).?.raw);
     try testing.expectEqualSlices(u8, high_raw, pool.get(high_hash).?.raw);
+    var top = low;
+    top.dynamic_fee.nonce = 2;
+    top.dynamic_fee.max_priority_fee_per_gas = 200;
+    top.dynamic_fee.max_fee_per_gas = 2000;
+    try expectSyntheticSender(a, &top);
+    const top_raw = try execution.encode(a, top);
+    defer a.free(top_raw);
+    _ = try pool.admit(&world, context, null, top_raw);
+    try testing.expect(pool.evictions > 0);
+    try testing.expect(pool.get(old_hash) == null);
 }
 const rlp = @import("rlp");
 const testing = std.testing;
@@ -1466,12 +1525,25 @@ test "signed local token deployment, transfer, and revert commit through block a
     const alternative_world = try chain.latest().world.?.clone(a);
     world.deinit();
     world = alternative_world;
+    chain.history_floor = 1;
+    const fee_history = try server.dispatch(a, try rpcRequest(a, 42, "eth_feeHistory", &.{ .{ .string = "0x2" }, .{ .string = "latest" } }));
+    const fee_result = (try std.json.parseFromSlice(std.json.Value, a, fee_history, .{})).value.object.get("result").?.object;
+    try testing.expectEqualStrings("0x1", fee_result.get("oldestBlock").?.string);
+    try testing.expectEqual(@as(usize, 2), fee_result.get("baseFeePerGas").?.array.items.len);
+    const genesis_fees = try server.dispatch(a, try rpcRequest(a, 43, "eth_feeHistory", &.{ .{ .string = "0x2" }, .{ .string = "earliest" } }));
+    try testing.expectEqualStrings("0x0", (try std.json.parseFromSlice(std.json.Value, a, genesis_fees, .{})).value.object.get("result").?.object.get("oldestBlock").?.string);
+    chain.history_floor = 0;
     const orphaned_logs = try server.dispatch(a, logs_req);
     try testing.expectEqual(@as(usize, 0), (try std.json.parseFromSlice(std.json.Value, a, orphaned_logs, .{})).value.object.get("result").?.array.items.len);
     std.crypto.hash.sha3.Keccak256.hash(raw[1], &tx_hash, .{});
     const orphaned_receipt = try server.dispatch(a, transfer_receipt_req);
     try testing.expect((try std.json.parseFromSlice(std.json.Value, a, orphaned_receipt, .{})).value.object.get("result").? == .null);
     try testing.expect(chain.transaction(tx_hash) == null);
+    const orphan_hash_hex = try std.fmt.allocPrint(a, "0x{s}", .{std.fmt.bytesToHex(chain.records.items[1].hash, .lower)});
+    const orphan_block = try server.dispatch(a, try rpcRequest(a, 40, "eth_getBlockByHash", &.{ .{ .string = orphan_hash_hex }, .{ .bool = false } }));
+    try testing.expect((try std.json.parseFromSlice(std.json.Value, a, orphan_block, .{})).value.object.get("result").? == .null);
+    const orphan_tx = try server.dispatch(a, try rpcRequest(a, 41, "eth_getTransactionByHash", &.{.{ .string = try std.fmt.allocPrint(a, "0x{s}", .{std.fmt.bytesToHex(tx_hash, .lower)}) }}));
+    try testing.expect((try std.json.parseFromSlice(std.json.Value, a, orphan_tx, .{})).value.object.get("result").? == .null);
     var orphan_dir = testing.tmpDir(.{});
     defer orphan_dir.cleanup();
     var orphan_genesis = try chain.records.items[0].world.?.clone(a);
