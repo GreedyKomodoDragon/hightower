@@ -493,7 +493,11 @@ pub const Server = struct {
         if (percentiles != .array or percentiles.array.items.len > 100) return error.InvalidParams;
         var previous: f64 = -1;
         for (percentiles.array.items) |item| {
-            const value: f64 = switch (item) { .integer => |v| @floatFromInt(v), .float => |v| v, else => return error.InvalidParams };
+            const value: f64 = switch (item) {
+                .integer => |v| @floatFromInt(v),
+                .float => |v| v,
+                else => return error.InvalidParams,
+            };
             if (!std.math.isFinite(value) or value < 0 or value > 100 or value < previous) return error.InvalidParams;
             previous = value;
         }
