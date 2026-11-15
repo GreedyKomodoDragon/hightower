@@ -48,14 +48,19 @@ pub const Coordinator = struct {
 
     /// Fetch one bounded range after the last scanned slot.
     pub fn step(self: *Coordinator, remote: *peer.Peer, count: u64) !usize {
+        const start = self.next_slot;
+        const imported = try self.stepFrom(remote, start, count);
+        self.next_slot = @max(try std.math.add(u64, self.store.blocks.get(self.head).?.slot, 1), try std.math.add(u64, start, count));
+        return imported;
+    }
+
+    /// Scan a peer's own bounded range without advancing another peer's cursor.
+    pub fn stepFrom(self: *Coordinator, remote: *peer.Peer, start: u64, count: u64) !usize {
         if (self.cancelled) |flag| if (flag.load(.acquire)) return error.Canceled;
         if (count == 0 or count > 16) return error.InvalidRequest;
-        const start = self.next_slot;
         var fetched = try remote.fetchBlocksByRange(start, count, 1);
         defer fetched.deinit();
-        const imported = try self.importBlocks(remote, fetched.items.items, start, count);
-        self.next_slot = try std.math.add(u64, start, count);
-        return imported;
+        return self.importBlocks(remote, fetched.items.items, start, count);
     }
 
     /// Fetch missing ancestors by root, then import the branch from its known parent.
@@ -361,6 +366,8 @@ test "two peers catch up from an anchor and resume after restart" {
     const deadline = std.Io.Clock.awake.now(io).nanoseconds + 20 * std.time.ns_per_s;
     while (!target_service.connected() and std.Io.Clock.awake.now(io).nanoseconds < deadline) try target_service.step(10);
     if (!target_service.connected()) return target_service.last_handshake_error orelse error.ConnectionTimeout;
+    try std.testing.expectEqual(@as(usize, 0), try target_sync.stepFrom(try target_service.activePeer(), 19, 16));
+    try std.testing.expectEqual(@as(u64, 1), target_sync.next_slot);
     try std.testing.expectEqual(@as(usize, 1), try target_sync.step(try target_service.activePeer(), 1));
     var restored = try snapshot.loadForkChoiceStore(allocator, io, target_dir.dir, "fork-choice.bin");
     defer restored.deinit();
@@ -369,6 +376,9 @@ test "two peers catch up from an anchor and resume after restart" {
     try std.testing.expectEqual(source_sync.head, resumed.head);
     try std.testing.expectEqual(second.message.body.execution_payload.block_hash, target_engine.head.?);
     try std.testing.expectEqual(try merkle.HashTreeRoot(allocator, source_chain.block_states.get(source_sync.head).?), try merkle.HashTreeRoot(allocator, restored.block_states.get(resumed.head).?));
+    resumed.next_slot = 1;
+    try std.testing.expectEqual(@as(usize, 0), try resumed.step(try target_service.activePeer(), 1));
+    try std.testing.expectEqual(@as(u64, 3), resumed.next_slot);
     try std.testing.expectError(error.InvalidRequest, resumed.step(try target_service.activePeer(), 17));
     try std.testing.expectEqual(@as(usize, 0), try resumed.step(try target_service.activePeer(), 16));
     try std.testing.expectEqual(@as(u64, 19), resumed.next_slot);
