@@ -1,0 +1,149 @@
+{
+  "compilerVersion": "0.8.28+commit.7893614a.Emscripten.clang",
+  "contracts": {
+    "Counter": {
+      "abi": [
+        {
+          "inputs": [
+            {
+              "internalType": "uint256",
+              "name": "initialValue",
+              "type": "uint256"
+            }
+          ],
+          "stateMutability": "nonpayable",
+          "type": "constructor"
+        },
+        {
+          "inputs": [],
+          "name": "increment",
+          "outputs": [],
+          "stateMutability": "nonpayable",
+          "type": "function"
+        },
+        {
+          "inputs": [],
+          "name": "value",
+          "outputs": [
+            {
+              "internalType": "uint256",
+              "name": "",
+              "type": "uint256"
+            }
+          ],
+          "stateMutability": "view",
+          "type": "function"
+        }
+      ],
+      "evm": {
+        "bytecode": {
+          "object": "6080604052348015600e575f5ffd5b50604051610118380380610118833981016040819052602b916031565b5f556047565b5f602082840312156040575f5ffd5b5051919050565b60c5806100535f395ff3fe6080604052348015600e575f5ffd5b50600436106030575f3560e01c80633fa4f245146034578063d09de08a14604d575b5f5ffd5b603b5f5481565b60405190815260200160405180910390f35b60536055565b005b60015f5f82825460649190606b565b9091555050565b80820180821115608957634e487b7160e01b5f52601160045260245ffd5b9291505056fea2646970667358221220fd5890c90e162e63b31228485ab67823b2ef07784353b9b5003f482e367607f364736f6c634300081c0033"
+        },
+        "deployedBytecode": {
+          "object": "6080604052348015600e575f5ffd5b50600436106030575f3560e01c80633fa4f245146034578063d09de08a14604d575b5f5ffd5b603b5f5481565b60405190815260200160405180910390f35b60536055565b005b60015f5f82825460649190606b565b9091555050565b80820180821115608957634e487b7160e01b5f52601160045260245ffd5b9291505056fea2646970667358221220fd5890c90e162e63b31228485ab67823b2ef07784353b9b5003f482e367607f364736f6c634300081c0033"
+        },
+        "methodIdentifiers": {
+          "increment()": "d09de08a",
+          "value()": "3fa4f245"
+        }
+      },
+      "metadata": "{\"compiler\":{\"version\":\"0.8.28+commit.7893614a\"},\"language\":\"Solidity\",\"output\":{\"abi\":[{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"initialValue\",\"type\":\"uint256\"}],\"stateMutability\":\"nonpayable\",\"type\":\"constructor\"},{\"inputs\":[],\"name\":\"increment\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"value\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"}],\"devdoc\":{\"kind\":\"dev\",\"methods\":{},\"version\":1},\"userdoc\":{\"kind\":\"user\",\"methods\":{\"constructor\":{\"notice\":\"Initializes the stored counter value.\"},\"increment()\":{\"notice\":\"Increments the counter by one, reverting on uint256 overflow.\"}},\"version\":1}},\"settings\":{\"compilationTarget\":{\"Contracts.sol\":\"Counter\"},\"evmVersion\":\"shanghai\",\"libraries\":{},\"metadata\":{\"bytecodeHash\":\"ipfs\"},\"optimizer\":{\"enabled\":true,\"runs\":200},\"remappings\":[]},\"sources\":{\"Contracts.sol\":{\"keccak256\":\"0xccf8a94bc7bfa742b9f282beada7afe81305bfd1e0e34de5d7fe3a785f530366\",\"license\":\"MIT\",\"urls\":[\"bzz-raw://b5ebc047ca168023e6e2681d686c6c62bf9f6c12000e452baa37fca8491c8c7c\",\"dweb:/ipfs/QmPSgtRU9wXp2EonBzWZFoBjhvWsZzi93vsKM5hWJosp7w\"]}},\"version\":1}"
+    },
+    "MinimalToken": {
+      "abi": [
+        {
+          "inputs": [
+            {
+              "internalType": "uint256",
+              "name": "supply",
+              "type": "uint256"
+            }
+          ],
+          "stateMutability": "nonpayable",
+          "type": "constructor"
+        },
+        {
+          "anonymous": false,
+          "inputs": [
+            {
+              "indexed": true,
+              "internalType": "address",
+              "name": "from",
+              "type": "address"
+            },
+            {
+              "indexed": true,
+              "internalType": "address",
+              "name": "to",
+              "type": "address"
+            },
+            {
+              "indexed": false,
+              "internalType": "uint256",
+              "name": "amount",
+              "type": "uint256"
+            }
+          ],
+          "name": "Transfer",
+          "type": "event"
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "address",
+              "name": "owner",
+              "type": "address"
+            }
+          ],
+          "name": "balanceOf",
+          "outputs": [
+            {
+              "internalType": "uint256",
+              "name": "",
+              "type": "uint256"
+            }
+          ],
+          "stateMutability": "view",
+          "type": "function"
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "address",
+              "name": "to",
+              "type": "address"
+            },
+            {
+              "internalType": "uint256",
+              "name": "amount",
+              "type": "uint256"
+            }
+          ],
+          "name": "transfer",
+          "outputs": [
+            {
+              "internalType": "bool",
+              "name": "",
+              "type": "bool"
+            }
+          ],
+          "stateMutability": "nonpayable",
+          "type": "function"
+        }
+      ],
+      "evm": {
+        "bytecode": {
+          "object": "6080604052348015600e575f5ffd5b506040516102ef3803806102ef833981016040819052602b916071565b335f81815260208181526040808320859055518481527fddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef910160405180910390a3506087565b5f602082840312156080575f5ffd5b5051919050565b61025b806100945f395ff3fe608060405234801561000f575f5ffd5b5060043610610034575f3560e01c806370a0823114610038578063a9059cbb14610073575b5f5ffd5b6100606100463660046101a3565b6001600160a01b03165f9081526020819052604090205490565b6040519081526020015b60405180910390f35b6100866100813660046101c3565b610096565b604051901515815260200161006a565b335f908152602081905260408120548211156100ef5760405162461bcd60e51b8152602060048201526014602482015273696e73756666696369656e742062616c616e636560601b604482015260640160405180910390fd5b335f908152602081905260408120805484929061010d9084906101ff565b90915550506001600160a01b0383165f9081526020819052604081208054849290610139908490610212565b90915550506040518281526001600160a01b0384169033907fddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef9060200160405180910390a35060015b92915050565b80356001600160a01b038116811461019e575f5ffd5b919050565b5f602082840312156101b3575f5ffd5b6101bc82610188565b9392505050565b5f5f604083850312156101d4575f5ffd5b6101dd83610188565b946020939093013593505050565b634e487b7160e01b5f52601160045260245ffd5b81810381811115610182576101826101eb565b80820180821115610182576101826101eb56fea264697066735822122012ac471395a0d5a4d51b4c7229046c97a33186fb08e1448b0e4c95a6aecb43a964736f6c634300081c0033"
+        },
+        "deployedBytecode": {
+          "object": "608060405234801561000f575f5ffd5b5060043610610034575f3560e01c806370a0823114610038578063a9059cbb14610073575b5f5ffd5b6100606100463660046101a3565b6001600160a01b03165f9081526020819052604090205490565b6040519081526020015b60405180910390f35b6100866100813660046101c3565b610096565b604051901515815260200161006a565b335f908152602081905260408120548211156100ef5760405162461bcd60e51b8152602060048201526014602482015273696e73756666696369656e742062616c616e636560601b604482015260640160405180910390fd5b335f908152602081905260408120805484929061010d9084906101ff565b90915550506001600160a01b0383165f9081526020819052604081208054849290610139908490610212565b90915550506040518281526001600160a01b0384169033907fddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef9060200160405180910390a35060015b92915050565b80356001600160a01b038116811461019e575f5ffd5b919050565b5f602082840312156101b3575f5ffd5b6101bc82610188565b9392505050565b5f5f604083850312156101d4575f5ffd5b6101dd83610188565b946020939093013593505050565b634e487b7160e01b5f52601160045260245ffd5b81810381811115610182576101826101eb565b80820180821115610182576101826101eb56fea264697066735822122012ac471395a0d5a4d51b4c7229046c97a33186fb08e1448b0e4c95a6aecb43a964736f6c634300081c0033"
+        },
+        "methodIdentifiers": {
+          "balanceOf(address)": "70a08231",
+          "transfer(address,uint256)": "a9059cbb"
+        }
+      },
+      "metadata": "{\"compiler\":{\"version\":\"0.8.28+commit.7893614a\"},\"language\":\"Solidity\",\"output\":{\"abi\":[{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"supply\",\"type\":\"uint256\"}],\"stateMutability\":\"nonpayable\",\"type\":\"constructor\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"internalType\":\"address\",\"name\":\"from\",\"type\":\"address\"},{\"indexed\":true,\"internalType\":\"address\",\"name\":\"to\",\"type\":\"address\"},{\"indexed\":false,\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"}],\"name\":\"Transfer\",\"type\":\"event\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"owner\",\"type\":\"address\"}],\"name\":\"balanceOf\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"to\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"}],\"name\":\"transfer\",\"outputs\":[{\"internalType\":\"bool\",\"name\":\"\",\"type\":\"bool\"}],\"stateMutability\":\"nonpayable\",\"type\":\"function\"}],\"devdoc\":{\"kind\":\"dev\",\"methods\":{},\"version\":1},\"userdoc\":{\"kind\":\"user\",\"methods\":{\"balanceOf(address)\":{\"notice\":\"Returns the owner's balance without changing state.\"},\"constructor\":{\"notice\":\"Mints the supplied amount to the deploying address.\"},\"transfer(address,uint256)\":{\"notice\":\"Moves tokens to a recipient or reverts with the encoded balance error.\"}},\"version\":1}},\"settings\":{\"compilationTarget\":{\"Contracts.sol\":\"MinimalToken\"},\"evmVersion\":\"shanghai\",\"libraries\":{},\"metadata\":{\"bytecodeHash\":\"ipfs\"},\"optimizer\":{\"enabled\":true,\"runs\":200},\"remappings\":[]},\"sources\":{\"Contracts.sol\":{\"keccak256\":\"0xccf8a94bc7bfa742b9f282beada7afe81305bfd1e0e34de5d7fe3a785f530366\",\"license\":\"MIT\",\"urls\":[\"bzz-raw://b5ebc047ca168023e6e2681d686c6c62bf9f6c12000e452baa37fca8491c8c7c\",\"dweb:/ipfs/QmPSgtRU9wXp2EonBzWZFoBjhvWsZzi93vsKM5hWJosp7w\"]}},\"version\":1}"
+    }
+  }
+}

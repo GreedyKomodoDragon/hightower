@@ -241,7 +241,7 @@ fn applyAuthorizations(allocator: std.mem.Allocator, world: *state.State, chain_
 }
 
 /// Executes the value transfer and EVM frame, copying logs before the machine is released.
-fn executeFrame(allocator: std.mem.Allocator, owner: std.mem.Allocator, world: *state.State, context: Context, tx: ValidatedTx, effects: AuthorizationEffects) !FrameOutcome {
+fn executeFrame(allocator: std.mem.Allocator, owner: std.mem.Allocator, world: *state.State, context: Context, tx: ValidatedTx, effects: AuthorizationEffects, hook: ?evm.Hook) !FrameOutcome {
     const frame = try world.snapshot();
     var frame_open = true;
     errdefer if (frame_open) world.revert(frame) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
@@ -251,6 +251,7 @@ fn executeFrame(allocator: std.mem.Allocator, owner: std.mem.Allocator, world: *
     }
     var machine = evm.Machine.init(allocator, world);
     defer machine.deinit();
+    machine.hook = hook;
     const access = try owner.alloc(evm.Access, tx.fields.access_list.len);
     for (tx.fields.access_list, 0..) |item, i| {
         const keys = try owner.alloc(u256, item.storage_keys.len);
@@ -292,6 +293,11 @@ fn settleFees(world: *state.State, context: Context, tx: ValidatedTx, gas_used: 
 
 /// Applies one signed encoded transaction, leaving state untouched for invalid input.
 pub fn applyTransaction(allocator: std.mem.Allocator, world: *state.State, context: Context, raw: []const u8, available_gas: u64, cumulative_gas: u64) !Outcome {
+    return applyTransactionTraced(allocator, world, context, raw, available_gas, cumulative_gas, null);
+}
+
+/// Replays one transaction with an optional EVM observer; normal execution passes null.
+pub fn applyTransactionTraced(allocator: std.mem.Allocator, world: *state.State, context: Context, raw: []const u8, available_gas: u64, cumulative_gas: u64, hook: ?evm.Hook) !Outcome {
     var decoded = try execution.parse(execution.Transaction, allocator, raw);
     defer decoded.deinit();
     const tx = try validateTransaction(allocator, world, context, decoded.value, available_gas);
@@ -303,7 +309,7 @@ pub fn applyTransaction(allocator: std.mem.Allocator, world: *state.State, conte
     try world.setBalance(tx.sender, world.getBalance(tx.sender) - tx.max_cost);
     try world.setNonce(tx.sender, tx.fields.nonce + 1);
     const effects = try applyAuthorizations(arena.allocator(), world, context.chain_id, tx.fields.authorizations);
-    const frame = try executeFrame(allocator, arena.allocator(), world, context, tx, effects);
+    const frame = try executeFrame(allocator, arena.allocator(), world, context, tx, effects, hook);
     const spent = tx.fields.gas_limit - frame.gas_remaining;
     const floor = if (@intFromEnum(context.fork) >= @intFromEnum(Fork.prague)) try calldataFloor(tx.fields.data) else 0;
     const gas_used = @max(spent - frame.refund, floor);
