@@ -137,6 +137,8 @@ fn runRuntime(init: std.process.Init) !void {
     var engine = try hightower.engine_client.Client.init(allocator, init.io, settings.engine_url, jwt, .osaka);
     defer engine.deinit();
     try hightower.consensus.PeerSync.confirmExecutionHead(&store, engine.interface());
+    // Recovery needs a durable anchor before the first peer can mutate fork choice.
+    try hightower.consensus.saveForkChoiceStore(allocator, init.io, dir, "fork-choice.bin", &store);
     const identity = try nodeId(allocator, key);
     var columns = try hightower.consensus.DataColumns.Store.open(allocator, init.io, dir, "columns", state.genesis_validators_root, identity, 128);
     defer columns.deinit();
@@ -172,6 +174,13 @@ fn runRuntime(init: std.process.Init) !void {
             const remote_id = active.connection.peer_id;
             const remote_head = active.remote_status.head_root;
             const advertised = @max(active.remote_status.head_slot, announcements.slot);
+            if (store.blocks.get(remote_head)) |known| {
+                if (known.slot != active.remote_status.head_slot) {
+                    gossip.peers.noteInvalid(remote_id);
+                    p2p.dropPeer(index);
+                    continue;
+                }
+            }
             if (advertised < coordinator.next_slot and store.blocks.contains(remote_head)) continue;
             try mutex.lock(init.io);
             announcements.importing = true;
@@ -247,6 +256,7 @@ const Announcements = struct {
         const self: *Announcements = @ptrCast(@alignCast(context));
         if (!self.importing) try self.mutex.lock(self.coordinator.io);
         defer if (!self.importing) self.mutex.unlock(self.coordinator.io);
+        errdefer self.coordinator.restoreSnapshot() catch @panic("cannot restore durable fork-choice snapshot");
         try hightower.consensus.onForkChoiceAttestation(self.coordinator.store, value.*, false);
         const selected = try hightower.consensus.getForkChoiceHeadCached(self.coordinator.store);
         hightower.consensus.PeerSync.confirmExecutionHeadAt(self.coordinator.store, self.coordinator.engine, selected) catch return error.ForkchoiceUpdateFailed;

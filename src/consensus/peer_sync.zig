@@ -126,6 +126,7 @@ pub const Coordinator = struct {
             if (!try self.columns.available(root, &block)) return error.DataUnavailable;
         }
         const at_slot = try std.math.add(u64, self.store.genesis_time, try std.math.mul(u64, block.slot, @import("consensus_preset").Config.SECONDS_PER_SLOT));
+        errdefer self.restoreSnapshot() catch @panic("cannot restore durable fork-choice snapshot");
         if (at_slot > self.store.time) try fork_choice.onTick(self.store, at_slot);
         try fork_choice.onBlock(self.store, signed.*, self.engine, .{ .context = self.columns, .is_available = columns.Store.check });
         const selected = fork_choice.getHeadCached(self.store) catch return error.ImportCommitFailed;
@@ -133,6 +134,15 @@ pub const Coordinator = struct {
         snapshot.saveForkChoiceStoreAt(self.allocator, self.io, self.dir, "fork-choice.bin", self.store, selected) catch return error.ImportCommitFailed;
         self.head = selected;
         self.next_slot = @max(self.next_slot, try std.math.add(u64, self.store.blocks.get(selected).?.slot, 1));
+    }
+
+    /// Restore the last committed store after an import changes memory but cannot commit.
+    pub fn restoreSnapshot(self: *Coordinator) !void {
+        const restored = try snapshot.loadForkChoiceStore(self.allocator, self.io, self.dir, "fork-choice.bin");
+        self.store.deinit();
+        self.store.* = restored;
+        self.head = try fork_choice.getHeadCached(self.store);
+        self.next_slot = try std.math.add(u64, self.store.blocks.get(self.head).?.slot, 1);
     }
 
     /// Serve a retained signed block by its message root.
@@ -217,14 +227,11 @@ test "ordered import saves a valid head and skips a duplicate replay" {
     try std.testing.expectEqual(accepted, resumed.head);
     engine.forkchoice_status = .syncing;
     try std.testing.expectError(error.ForkchoiceUpdateFailed, resumed.importBlocks(null, &.{second}, 2, 1));
+    try std.testing.expectEqual(accepted, try fork_choice.getHeadCached(&restored));
+    try std.testing.expect(!restored.block_states.contains(try merkle.HashTreeRoot(allocator, second.message)));
     var durable = try snapshot.loadForkChoiceStore(allocator, io, tmp.dir, "fork-choice.bin");
     defer durable.deinit();
     try std.testing.expectEqual(accepted, try fork_choice.getHead(&durable));
-    const reloaded = try snapshot.loadForkChoiceStore(allocator, io, tmp.dir, "fork-choice.bin");
-    restored.deinit();
-    restored = reloaded;
-    resumed.head = accepted;
-    resumed.next_slot = 2;
     engine.forkchoice_status = null;
     try std.testing.expectEqual(@as(usize, 1), try resumed.importBlocks(null, &.{second}, 2, 1));
     const next = resumed.head;
