@@ -56,6 +56,12 @@ def request(port_number, method, params, bearer=None):
     return result["result"]
 
 
+def get(port_number, path):
+    """Read a local non-RPC service endpoint."""
+    with urllib.request.urlopen(f"http://127.0.0.1:{port_number}{path}", timeout=5) as response:
+        return response.status, response.read().decode()
+
+
 def wait_ready(process, port_number):
     """Wait until the public listener accepts TCP connections."""
     for _ in range(100):
@@ -111,6 +117,14 @@ def run():
 
         process = start()
         try:
+            status, health = get(rpc_port, "/health")
+            assert status == 200 and health == "ok\n", (status, health)
+            assert request(rpc_port, "eth_syncing", []) is False
+            status, metrics = get(rpc_port, "/metrics")
+            assert status == 200
+            for metric in ("execution_head_number", "execution_safe_number", "execution_finalized_number", "execution_syncing", "execution_pool_entries", "execution_pool_bytes", "execution_rpc_requests_total", "execution_rpc_errors_total", "execution_payload_build_nanoseconds_total", "execution_storage_healthy"):
+                assert f"hightower_{metric} " in metrics, metric
+            assert secret.hex() not in metrics
             bad = urllib.request.Request(
                 f"http://127.0.0.1:{engine_port}/",
                 json.dumps({"jsonrpc": "2.0", "id": 1, "method": "engine_exchangeCapabilities", "params": [[]]}).encode(),
@@ -200,6 +214,9 @@ def run():
             assert event["transaction_hash"] == hashes[1]
             assert event["block_number"] == 2 and event["log_index"] == 0
             process = start()
+            status, health = get(rpc_port, "/health")
+            assert status == 200 and health == "ok\n", (status, health)
+            assert secret.hex() not in get(rpc_port, "/metrics")[1]
             assert request(rpc_port, "eth_blockNumber", []) == "0x2"
             assert request(rpc_port, "eth_getBlockByHash", [head, False])["number"] == "0x2"
             assert request(rpc_port, "eth_getLogs", [{"fromBlock": "0x1"}]) == logs
