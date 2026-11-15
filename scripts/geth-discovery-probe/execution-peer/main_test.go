@@ -32,6 +32,20 @@ func TestOsakaFixtureIdentity(t *testing.T) {
 	}
 }
 
+// TestPeerFlags keeps the configured peer set within the service limit.
+func TestPeerFlags(t *testing.T) {
+	var peers peerFlags
+	if err := peers.Set("first"); err != nil {
+		t.Fatal(err)
+	}
+	if err := peers.Set("second"); err != nil {
+		t.Fatal(err)
+	}
+	if err := peers.Set("third"); err == nil {
+		t.Fatal("accepted a third peer")
+	}
+}
+
 // TestHeaderRequest checks bounded requests and rejects an unrelated header.
 func TestHeaderRequest(t *testing.T) {
 	for _, wrong := range []bool{false, true} {

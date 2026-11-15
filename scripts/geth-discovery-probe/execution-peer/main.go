@@ -80,21 +80,36 @@ type session struct {
 	next   uint64
 }
 
+type peerFlags []string
+
+// String renders configured peer records for flag diagnostics.
+func (p peerFlags) String() string { return strings.Join(p, ",") }
+
+// Set accepts at most two static peers; discovery may still replace either.
+func (p *peerFlags) Set(value string) error {
+	if len(*p) >= 2 {
+		return errors.New("at most two execution peers are supported")
+	}
+	*p = append(*p, value)
+	return nil
+}
+
 // main starts a bounded eth peer worker against the existing Engine listener.
 func main() {
 	configPath := flag.String("config", "", "execution service config")
-	peerURI := flag.String("peer", "", "reference enode or ENR")
+	var peers peerFlags
+	flag.Var(&peers, "peer", "reference enode or ENR (repeat for a second peer)")
 	flag.Parse()
-	if *configPath == "" || *peerURI == "" {
+	if *configPath == "" || len(peers) == 0 {
 		log.Fatal("usage: execution-peer --config service.json --peer enode://...")
 	}
-	if err := run(*configPath, *peerURI); err != nil {
+	if err := run(*configPath, peers); err != nil {
 		log.Fatal(err)
 	}
 }
 
 // run loads the trusted chain identity and keeps one reference peer connected.
-func run(configPath, peerURI string) error {
+func run(configPath string, peerURIs []string) error {
 	raw, err := os.ReadFile(configPath)
 	if err != nil {
 		return err
@@ -142,10 +157,6 @@ func run(configPath, peerURI string) error {
 	if err != nil || len(secret) != 32 {
 		return errors.New("invalid Engine JWT secret")
 	}
-	node, err := enode.Parse(enode.ValidSchemes, peerURI)
-	if err != nil {
-		return err
-	}
 	key, err := crypto.GenerateKey()
 	if err != nil {
 		return err
@@ -154,14 +165,22 @@ func run(configPath, peerURI string) error {
 	defer stop()
 	w := &worker{api: &api{url: "http://" + cfg.EngineBind, secret: secret, client: http.Client{Timeout: requestTimeout}}, genesis: &genesis, anchor: anchor, ctx: ctx}
 	bootstrap := []*enode.Node(nil)
+	static := make([]*enode.Node, 0, len(peerURIs))
 	discovery := false
-	if endpoint, ok := node.UDPEndpoint(); ok && endpoint.Port() != 0 {
-		bootstrap = []*enode.Node{node}
-		discovery = true
+	for _, uri := range peerURIs {
+		node, err := enode.Parse(enode.ValidSchemes, uri)
+		if err != nil {
+			return err
+		}
+		static = append(static, node)
+		if endpoint, ok := node.UDPEndpoint(); ok && endpoint.Port() != 0 {
+			bootstrap = append(bootstrap, node)
+			discovery = true
+		}
 	}
 	server := &p2p.Server{Config: p2p.Config{
 		PrivateKey: key, MaxPeers: 2, ListenAddr: ":0", DiscoveryV4: discovery, NoDiscovery: !discovery,
-		BootstrapNodes: bootstrap, StaticNodes: []*enode.Node{node},
+		BootstrapNodes: bootstrap, StaticNodes: static,
 		Protocols: []p2p.Protocol{{Name: "eth", Version: eth.ETH69, Length: 18, Run: w.serve}},
 	}}
 	if err := server.Start(); err != nil {
