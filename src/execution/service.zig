@@ -111,7 +111,9 @@ pub fn main(init: std.process.Init) !void {
     }
     var engine_server: engine.Server = .{ .allocator = a, .chain = &chain, .world = &world, .pool = &pool, .settings = &settings, .store = &store, .transfers = transfers, .mutex = &mutex, .secret = secret };
     defer engine_server.deinit();
-    var rpc_server: execution.rpc.Server = .{ .chain = &chain, .pool = &pool, .world = &world, .store = &store, .settings = &settings, .mutex = &mutex, .payload_build_ns = &engine_server.payload_build_ns };
+    var sync_progress: execution.rpc.SyncProgress = .{};
+    engine_server.sync_progress = &sync_progress;
+    var rpc_server: execution.rpc.Server = .{ .chain = &chain, .pool = &pool, .world = &world, .store = &store, .settings = &settings, .mutex = &mutex, .payload_build_ns = &engine_server.payload_build_ns, .sync_progress = &sync_progress };
     var engine_listener = try parsed.engine_address.listen(init.io, .{ .reuse_address = true });
     defer engine_listener.deinit(init.io);
     var rpc_listener = try parsed.rpc_address.listen(init.io, .{ .reuse_address = true });

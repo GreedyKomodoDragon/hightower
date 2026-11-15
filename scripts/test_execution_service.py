@@ -116,8 +116,59 @@ def compare_block(hightower_port, geth_port, number):
             raise AssertionError(f"block {number} {method} mismatch: Hightower={lresult!r}; Geth={rresult!r}")
 
 
-def run(geth_bin=None):
+def test_peer_catchup(temporary, config, secret, geth_rpc_port, peer_bin, head, number, payload, execution_requests):
+    """Fetch Geth's blocks over eth/69 into a fresh Hightower database."""
+    fresh = dict(config, data_dir=str(temporary / "peer-data"), engine_bind=f"127.0.0.1:{port()}", rpc_bind=f"127.0.0.1:{port()}")
+    fresh.pop("transfer_contract", None)
+    fresh_path = temporary / "peer-config.json"
+    fresh_path.write_text(json.dumps(fresh))
+    enode = request(geth_rpc_port, "admin_nodeInfo", [])["enode"]
+    peer_log = (temporary / "execution-peer.log").open("wb")
+    service = None
+    worker = None
+    try:
+        service = subprocess.Popen([str(ROOT / "zig-out/bin/hightower-execution"), "--config", str(fresh_path)], cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        wait_ready(service, int(fresh["rpc_bind"].split(":")[-1]))
+        fresh_engine = int(fresh["engine_bind"].split(":")[-1])
+        missing = request(fresh_engine, "engine_newPayloadV4", [payload, [], ZERO, execution_requests], token(secret))
+        assert missing["status"] == "SYNCING", missing
+        assert request(fresh_engine, "hightower_missingExecutionParents", [], token(secret)) == [payload["parentHash"]]
+        worker = subprocess.Popen([peer_bin, "--config", str(fresh_path), "--peer", enode], cwd=ROOT, stdout=peer_log, stderr=peer_log)
+        for _ in range(300):
+            assert worker.poll() is None, f"execution peer exited: {(temporary / 'execution-peer.log').read_text()}"
+            if request(fresh_engine, "hightower_hasExecutionBlock", [head], token(secret)):
+                break
+            time.sleep(0.1)
+        else:
+            raise AssertionError(f"execution peer did not import Geth head: {(temporary / 'execution-peer.log').read_text()}")
+        assert request(fresh_engine, "hightower_missingExecutionParents", [], token(secret)) == []
+        anchor = request(int(fresh["rpc_bind"].split(":")[-1]), "eth_getBlockByNumber", ["0x0", False])["hash"]
+        choice = {"headBlockHash": head, "safeBlockHash": anchor, "finalizedBlockHash": anchor}
+        selected = request(int(fresh["engine_bind"].split(":")[-1]), "engine_forkchoiceUpdatedV3", [choice, None], token(secret))
+        assert selected["payloadStatus"]["status"] == "VALID", selected
+        fresh_rpc = int(fresh["rpc_bind"].split(":")[-1])
+        assert request(fresh_rpc, "eth_blockNumber", []) == hex(number)
+        compare_block(fresh_rpc, geth_rpc_port, number)
+        worker.terminate()
+        worker.wait(timeout=5)
+        worker = None
+        stop(service, secret)
+        service = subprocess.Popen([str(ROOT / "zig-out/bin/hightower-execution"), "--config", str(fresh_path)], cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        wait_ready(service, fresh_rpc)
+        assert request(fresh_rpc, "eth_getBlockByNumber", ["latest", False])["hash"] == head
+    finally:
+        if worker and worker.poll() is None:
+            worker.terminate()
+            worker.wait(timeout=5)
+        if service and not service.stderr.closed:
+            stop(service, secret)
+        peer_log.close()
+
+
+def run(geth_bin=None, peer_bin=None):
     """Import two blocks, query canonical RPC, restart, and query again."""
+    if peer_bin and not geth_bin:
+        raise ValueError("--peer-bin requires --geth-bin")
     with tempfile.TemporaryDirectory() as directory:
         temporary = pathlib.Path(directory)
         secret = secrets.token_bytes(32)
@@ -129,7 +180,7 @@ def run(geth_bin=None):
         genesis["mixHash"] = "0x" + "ab" * 32
         genesis["coinbase"] = "0x" + "bc" * 20
         genesis["alloc"][SENDER[2:]] = {"balance": "0x3b9aca00"}
-        genesis["alloc"]["aa" * 20] = {"storage": {"0x1": "0x2"}}
+        genesis["alloc"]["aa" * 20] = {"balance": "0x0", "storage": {"0x" + "0" * 63 + "1": "0x" + "0" * 63 + "2"}}
         (temporary / "genesis.json").write_text(json.dumps(genesis))
         signed = json.loads((ROOT / "src/execution/fixtures/solidity/reference.json").read_text())["signedTransactions"]
         engine_port, rpc_port = port(), port()
@@ -144,10 +195,14 @@ def run(geth_bin=None):
                 raise AssertionError(f"expected pinned Geth v1.17.10, got {version.splitlines()[0]}")
             geth_rpc_port, geth_engine_port = port(), port()
             geth_data = temporary / "geth-data"
-            subprocess.run([geth_bin, "--datadir", str(geth_data), "init", str(temporary / "genesis.json")], check=True, capture_output=True, timeout=30)
+            initialized = subprocess.run([geth_bin, "--datadir", str(geth_data), "init", str(temporary / "genesis.json")], capture_output=True, timeout=30)
+            assert initialized.returncode == 0, initialized.stderr.decode()
             geth_log = (temporary / "geth.log").open("wb")
+            geth_args = [geth_bin, "--datadir", str(geth_data), "--networkid", "1", "--syncmode", "full", "--authrpc.addr", "127.0.0.1", "--authrpc.port", str(geth_engine_port), "--authrpc.vhosts", "*", "--authrpc.jwtsecret", str(temporary / "jwt.hex"), "--http", "--http.addr", "127.0.0.1", "--http.port", str(geth_rpc_port), "--http.api", "eth,net,web3,admin" if peer_bin else "eth,net,web3", "--nodiscover", "--maxpeers", "2" if peer_bin else "0"]
+            if peer_bin:
+                geth_args += ["--port", str(port()), "--nat", "extip:127.0.0.1"]
             geth_process = subprocess.Popen(
-                [geth_bin, "--datadir", str(geth_data), "--networkid", "1", "--authrpc.addr", "127.0.0.1", "--authrpc.port", str(geth_engine_port), "--authrpc.vhosts", "*", "--authrpc.jwtsecret", str(temporary / "jwt.hex"), "--http", "--http.addr", "127.0.0.1", "--http.port", str(geth_rpc_port), "--http.api", "eth,net,web3", "--nodiscover", "--maxpeers", "0"],
+                geth_args,
                 cwd=ROOT,
                 stdout=subprocess.DEVNULL,
                 stderr=geth_log,
@@ -242,7 +297,7 @@ def run(geth_bin=None):
             reader.start()
             for number in (1, 2):
                 bearer = token(secret)
-                raws = signed[:2] if number == 1 else signed[2:]
+                raws = signed[:2] if number == 1 else [] if peer_bin else signed[2:]
                 hashes = [request(rpc_port, "eth_sendRawTransaction", [raw]) for raw in raws]
                 choice = {"headBlockHash": head, "safeBlockHash": safe_hash if geth_process else head, "finalizedBlockHash": safe_hash if geth_process else head}
                 attributes = {
@@ -260,7 +315,7 @@ def run(geth_bin=None):
                 assert verdict["status"] == "VALID"
                 if geth_process:
                     geth_verdict = request(geth_engine_port, "engine_newPayloadV4", [payload, [], ZERO, built["executionRequests"]], bearer)
-                    assert geth_verdict["status"] == "VALID", f"Geth rejected block {number}: {geth_verdict!r}; Hightower payload={payload!r}"
+                    assert geth_verdict["status"] == "VALID", f"Geth rejected block {number}: {geth_verdict!r}; Geth log tail={(temporary / 'geth.log').read_text()[-4000:]}"
                     geth_choice = {"headBlockHash": payload["blockHash"], "safeBlockHash": safe_hash if geth_process else payload["blockHash"], "finalizedBlockHash": safe_hash if geth_process else payload["blockHash"]}
                     selected = request(geth_engine_port, "engine_forkchoiceUpdatedV3", [geth_choice, None], bearer)
                     assert selected["payloadStatus"]["status"] == "VALID", f"Geth did not select block {number}: {selected!r}"
@@ -276,6 +331,9 @@ def run(geth_bin=None):
             stop_reads.set()
             reader.join(timeout=5)
             assert not read_errors, read_errors
+            if peer_bin:
+                test_peer_catchup(temporary, config, secret, geth_rpc_port, peer_bin, head, 2, payload, built["executionRequests"])
+                return
             assert request(rpc_port, "eth_getBalance", [SENDER, "latest"]) != "0x3b9aca00"
             logs = request(rpc_port, "eth_getLogs", [{"fromBlock": "0x1"}])
             assert len(logs) == 2 and all(log["address"].lower() == CONTRACT for log in logs), logs
@@ -423,5 +481,6 @@ def run(geth_bin=None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--geth-bin", help="run the differential checks against pinned Geth v1.17.10")
+    parser.add_argument("--peer-bin", help="also sync a fresh database through the eth/69 worker")
     arguments = parser.parse_args()
-    run(arguments.geth_bin)
+    run(arguments.geth_bin, arguments.peer_bin)

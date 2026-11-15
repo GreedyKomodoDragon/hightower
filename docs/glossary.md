@@ -39,6 +39,9 @@ Chain:      [Block 0] ───────────────────�
 | Term | Plain-language definition |
 | --- | --- |
 | Recursive Length Prefix (RLP) | The byte format used to encode ordered execution-layer values and lists. |
+| devp2p | Ethereum's peer connection and discovery protocols used to exchange execution-chain data. |
+| eth/69 | A version of Ethereum's execution peer protocol that exchanges block headers, bodies, and related messages. |
+| SNAP | An execution peer protocol for downloading authenticated state ranges around a recent block. |
 | Contract creation transaction | A transaction with no recipient address; its input runs as initcode at an address derived from the sender and nonce. |
 | CREATE | The EVM instruction that runs initcode at an address derived from the creating account and its current nonce. |
 | CREATE2 | The EVM instruction that derives a new contract address from a creator, salt, and initcode hash. |

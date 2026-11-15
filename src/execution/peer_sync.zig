@@ -1,7 +1,7 @@
 // An execution peer supplies untrusted RLP blocks. The requested hash binds a
 // response to its header; the parent must already have a validated post-state.
 // Blocks execute in ancestry order, and a durable marker precedes retention.
-// Fork choice alone selects the canonical head. Responses are limited to 16 MiB.
+// Fork choice alone selects the canonical head. Responses are limited to 11 MiB.
 //
 // checkpoint -> verified parent -> execute block -> durable marker -> fork choice
 const std = @import("std");
@@ -9,7 +9,7 @@ const execution = @import("execution.zig");
 const chain_mod = @import("chain.zig");
 const durable = @import("durable.zig");
 
-const max_block_bytes = 16 * 1024 * 1024;
+const max_block_bytes = 11 * 1024 * 1024;
 
 /// Verifies one requested peer block and retains it off the canonical path.
 /// The caller serializes access to chain and store; unknown parents are retried

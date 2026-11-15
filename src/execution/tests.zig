@@ -58,6 +58,9 @@ test "peer block verifies requested hash and requests before retention" {
     parent.state_root = try world.stateRoot();
     var chain = try execution.chain.Chain.init(a, 1, .osaka, parent, &world);
     defer chain.deinit();
+    const oversized = try a.alloc(u8, 11 * 1024 * 1024 + 1);
+    defer a.free(oversized);
+    try std.testing.expectError(error.PeerBlockTooLarge, execution.peer_sync.importBlock(a, &chain, null, .{0} ** 32, oversized));
     var header = parent;
     header.parent_hash = chain.latest().hash;
     header.number = 1;
@@ -88,6 +91,13 @@ test "peer block verifies requested hash and requests before retention" {
     const bad_hash = try execution.transition.headerHash(a, .osaka, bad);
     try std.testing.expectError(error.InvalidExecutionRequests, execution.peer_sync.importBlock(a, &chain, &store, bad_hash, bad_raw));
     try std.testing.expectEqual(@as(usize, 2), chain.records.items.len);
+    bad = header;
+    bad.transactions_root = .{0x33} ** 32;
+    const corrupt_body = try execution.encode(a, execution.Block{ .header = bad, .transactions = &.{}, .withdrawals = &.{} });
+    defer a.free(corrupt_body);
+    const corrupt_hash = try execution.transition.headerHash(a, .osaka, bad);
+    try std.testing.expectError(error.InvalidCommitment, execution.peer_sync.importBlock(a, &chain, &store, corrupt_hash, corrupt_body));
+    try std.testing.expectEqual(@as(usize, 2), chain.records.items.len);
     try store.commit(hash, chain.records.items[0].hash, chain.records.items[0].hash);
     store.close();
     var recovered_world = execution.state.State.init(a);
@@ -99,6 +109,42 @@ test "peer block verifies requested hash and requests before retention" {
     try reopened.recover(&recovered, &recovered_world);
     try std.testing.expectEqualSlices(u8, &hash, &recovered.latest().hash);
     try std.testing.expect(recovered.byHash(bad_hash) == null);
+    try std.testing.expect(recovered.byHash(corrupt_hash) == null);
+}
+
+test "execution sync progress expires when the peer worker stops" {
+    var progress: execution.rpc.SyncProgress = .{ .current = 12, .target = 20, .updated_at = 100 };
+    try std.testing.expect(progress.active(100));
+    try std.testing.expect(progress.active(110));
+    try std.testing.expect(!progress.active(111));
+    progress.current = 20;
+    try std.testing.expect(!progress.active(100));
+    var world = execution.state.State.init(std.testing.allocator);
+    defer world.deinit();
+    var anchor = std.mem.zeroes(execution.Header);
+    anchor.state_root = try world.stateRoot();
+    var chain = try execution.chain.Chain.init(std.testing.allocator, 1, .osaka, anchor, &world);
+    defer chain.deinit();
+    var pool = execution.pool.Pool.init(std.testing.allocator, .{});
+    defer pool.deinit();
+    const io = std.testing.io;
+    progress = .{ .current = 12, .target = 20, .updated_at = std.Io.Timestamp.toSeconds(std.Io.Clock.real.now(io)) };
+    var server: execution.rpc.Server = .{ .chain = &chain, .pool = &pool, .world = &world, .io = io, .sync_progress = &progress };
+    const request_body = try rpcRequest(std.testing.allocator, 1, "eth_syncing", &.{});
+    defer std.testing.allocator.free(request_body);
+    const active_response = try server.dispatch(std.testing.allocator, request_body);
+    defer std.testing.allocator.free(active_response);
+    var active = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, active_response, .{});
+    defer active.deinit();
+    const result = active.value.object.get("result").?.object;
+    try std.testing.expectEqualStrings("0xc", result.get("currentBlock").?.string);
+    try std.testing.expectEqualStrings("0x14", result.get("highestBlock").?.string);
+    progress.updated_at -= 11;
+    const stale_response = try server.dispatch(std.testing.allocator, request_body);
+    defer std.testing.allocator.free(stale_response);
+    var stale = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, stale_response, .{});
+    defer stale.deinit();
+    try std.testing.expect(!stale.value.object.get("result").?.bool);
 }
 
 /// Serializes one valid JSON-RPC test request from structured parameters.

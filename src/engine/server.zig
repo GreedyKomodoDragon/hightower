@@ -171,6 +171,7 @@ pub const Server = struct {
     next_id: u64 = 1,
     io: ?std.Io = null,
     payload_build_ns: u64 = 0,
+    sync_progress: ?*execution.rpc.SyncProgress = null,
 
     /// Releases staged payloads without changing canonical state.
     pub fn deinit(self: *Server) void {
@@ -269,6 +270,40 @@ pub const Server = struct {
             var capabilities = wire.array(a);
             for ([_][]const u8{ "engine_newPayloadV1", "engine_newPayloadV2", "engine_newPayloadV3", "engine_newPayloadV4", "engine_forkchoiceUpdatedV1", "engine_forkchoiceUpdatedV2", "engine_forkchoiceUpdatedV3", "engine_getPayloadV1", "engine_getPayloadV2", "engine_getPayloadV3", "engine_getPayloadV4", "engine_getPayloadV5" }) |capability| try capabilities.array.append(.{ .string = capability });
             return capabilities;
+        }
+        if (std.mem.eql(u8, name, "hightower_missingExecutionParents")) {
+            if (params.len != 0) return error.InvalidParams;
+            const hashes = try self.missingParents(a);
+            var result = wire.array(a);
+            for (hashes) |hash| try result.array.append(try wire.hex(a, &hash));
+            return result;
+        }
+        if (std.mem.eql(u8, name, "hightower_executionSyncProgress")) {
+            if (params.len != 2) return error.InvalidParams;
+            const progress = self.sync_progress orelse return error.MissingSyncProgress;
+            const current = try wire.quantity(u64, params[0]);
+            const target = try wire.quantity(u64, params[1]);
+            if (target < current) return error.InvalidParams;
+            const io = self.io orelse return error.MissingIo;
+            progress.* = .{ .current = current, .target = target, .updated_at = std.Io.Timestamp.toSeconds(std.Io.Clock.real.now(io)) };
+            return .{ .bool = true };
+        }
+        if (std.mem.eql(u8, name, "hightower_hasExecutionBlock")) {
+            if (params.len != 1) return error.InvalidParams;
+            const hash = try wire.fixed(32, params[0]);
+            return .{ .bool = self.chain.byHash(hash) != null };
+        }
+        if (std.mem.eql(u8, name, "hightower_importExecutionBlock")) {
+            if (params.len != 2) return error.InvalidParams;
+            const store = self.store orelse return error.MissingExecutionStore;
+            const hash = try wire.fixed(32, params[0]);
+            const raw = try wire.bytes(a, params[1], 11 * 1024 * 1024);
+            execution.peer_sync.importBlock(self.allocator, self.chain, store, hash, raw) catch |err| {
+                if (err == error.UnknownParent) return .{ .string = "SYNCING" };
+                return err;
+            };
+            try self.retryPending();
+            return .{ .string = "VALID" };
         }
         const versions = try methodVersions(self.chain.fork);
         if (std.mem.eql(u8, name, try std.fmt.allocPrint(a, "engine_newPayloadV{d}", .{versions.new_payload}))) return self.newPayload(a, params, versions.new_payload);
@@ -1039,6 +1074,13 @@ fn checkBuiltFork(fork: execution.transition.Fork) !void {
     try std.testing.expectEqual(max_pending_payloads, server.pending.items.len);
     const missing = try server.missingParents(temp);
     try std.testing.expectEqualSlices(execution.Hash, &.{.{0x77} ** 32}, missing);
+    const reported = try server.method(temp, "hightower_missingExecutionParents", &.{});
+    try std.testing.expectEqual(@as(usize, 1), reported.array.items.len);
+    try std.testing.expectEqualStrings(try wire.string(try wire.hex(temp, &missing[0])), try wire.string(reported.array.items[0]));
+    const has_anchor = try server.method(temp, "hightower_hasExecutionBlock", &.{try wire.hex(temp, &genesis)});
+    try std.testing.expect(has_anchor.bool);
+    const has_orphan = try server.method(temp, "hightower_hasExecutionBlock", &.{try wire.hex(temp, &orphan_hash)});
+    try std.testing.expect(!has_orphan.bool);
 }
 
 test "every Engine fork builds, validates, and commits a payload" {

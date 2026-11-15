@@ -24,6 +24,18 @@ const max_trace_bytes = 1024 * 1024;
 const trace_deadline_ns = 2 * std.time.ns_per_s;
 const priority_fee: u64 = 1_000_000_000;
 
+/// Tracks a live peer worker's last bounded catch-up report.
+pub const SyncProgress = struct {
+    current: u64 = 0,
+    target: u64 = 0,
+    updated_at: i64 = 0,
+
+    /// Reports catch-up only while a recent worker update is behind its target.
+    pub fn active(self: SyncProgress, now: i64) bool {
+        return self.target > self.current and now >= self.updated_at and now - self.updated_at <= 10;
+    }
+};
+
 const Method = enum {
     eth_chainId,
     eth_blockNumber,
@@ -60,8 +72,16 @@ pub const Server = struct {
     revert_data: ?[]const u8 = null,
     io: ?std.Io = null,
     payload_build_ns: ?*const u64 = null,
+    sync_progress: ?*const SyncProgress = null,
     requests: u64 = 0,
     errors: u64 = 0,
+
+    /// Checks whether a peer worker has reported unfinished progress recently.
+    fn syncActive(self: *const Server) bool {
+        const progress = self.sync_progress orelse return false;
+        const io = self.io orelse return false;
+        return progress.active(std.Io.Timestamp.toSeconds(std.Io.Clock.real.now(io)));
+    }
 
     /// Parses one bounded JSON-RPC body and returns an owned response body.
     pub fn dispatch(self: *Server, allocator: std.mem.Allocator, body: []const u8) ![]u8 {
@@ -110,8 +130,8 @@ pub const Server = struct {
             const finalized = self.chain.byHash(self.chain.finalized_hash) orelse head;
             const body = try std.fmt.allocPrint(
                 allocator,
-                "hightower_execution_head_number {d}\nhightower_execution_safe_number {d}\nhightower_execution_finalized_number {d}\nhightower_execution_syncing 0\nhightower_execution_pool_entries {d}\nhightower_execution_pool_bytes {d}\nhightower_execution_rpc_requests_total {d}\nhightower_execution_rpc_errors_total {d}\nhightower_execution_payload_build_failures_total {d}\nhightower_execution_payload_build_nanoseconds_total {d}\nhightower_execution_storage_healthy {d}\n",
-                .{ head.header.number, safe.header.number, finalized.header.number, self.pool.entries.items.len, self.pool.byte_count, self.requests, self.errors, self.pool.build_failures, if (self.payload_build_ns) |elapsed| elapsed.* else 0, @intFromBool(self.storageHealthy(allocator)) },
+                "hightower_execution_head_number {d}\nhightower_execution_safe_number {d}\nhightower_execution_finalized_number {d}\nhightower_execution_syncing {d}\nhightower_execution_pool_entries {d}\nhightower_execution_pool_bytes {d}\nhightower_execution_rpc_requests_total {d}\nhightower_execution_rpc_errors_total {d}\nhightower_execution_payload_build_failures_total {d}\nhightower_execution_payload_build_nanoseconds_total {d}\nhightower_execution_storage_healthy {d}\n",
+                .{ head.header.number, safe.header.number, finalized.header.number, @intFromBool(self.syncActive()), self.pool.entries.items.len, self.pool.byte_count, self.requests, self.errors, self.pool.build_failures, if (self.payload_build_ns) |elapsed| elapsed.* else 0, @intFromBool(self.storageHealthy(allocator)) },
             );
             defer allocator.free(body);
             return request.respond(body, .{ .status = .ok, .keep_alive = false, .extra_headers = metrics_headers });
@@ -225,7 +245,13 @@ pub const Server = struct {
             },
             .eth_syncing => {
                 try noParams(params);
-                return .{ .bool = false };
+                if (!self.syncActive()) return .{ .bool = false };
+                const progress = self.sync_progress.?.*;
+                var result = object(a);
+                try put(a, &result, "startingBlock", try quantity(a, self.chain.records.items[0].header.number));
+                try put(a, &result, "currentBlock", try quantity(a, progress.current));
+                try put(a, &result, "highestBlock", try quantity(a, progress.target));
+                return result;
             },
             .eth_gasPrice, .eth_maxPriorityFeePerGas => {
                 try noParams(params);
