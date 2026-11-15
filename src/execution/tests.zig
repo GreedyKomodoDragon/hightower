@@ -75,7 +75,10 @@ test "peer block verifies requested hash and requests before retention" {
     const hash = try execution.transition.headerHash(a, .osaka, header);
     try std.testing.expectError(error.UnrequestedPeerBlock, execution.peer_sync.importBlock(a, &chain, null, .{0} ** 32, raw));
     try std.testing.expectEqual(@as(usize, 1), chain.records.items.len);
-    try execution.peer_sync.importBlock(a, &chain, null, hash, raw);
+    var durable_dir = std.testing.tmpDir(.{});
+    defer durable_dir.cleanup();
+    var store = try execution.durable.Store.open(a, std.testing.io, durable_dir.dir, "execution", .osaka, parent, &world);
+    try execution.peer_sync.importBlock(a, &chain, &store, hash, raw);
     try std.testing.expectEqual(@as(usize, 2), chain.records.items.len);
     try std.testing.expectEqualSlices(u8, &chain.latest().hash, &header.parent_hash);
     var bad = header;
@@ -83,8 +86,19 @@ test "peer block verifies requested hash and requests before retention" {
     const bad_raw = try execution.encode(a, execution.Block{ .header = bad, .transactions = &.{}, .withdrawals = &.{} });
     defer a.free(bad_raw);
     const bad_hash = try execution.transition.headerHash(a, .osaka, bad);
-    try std.testing.expectError(error.InvalidExecutionRequests, execution.peer_sync.importBlock(a, &chain, null, bad_hash, bad_raw));
+    try std.testing.expectError(error.InvalidExecutionRequests, execution.peer_sync.importBlock(a, &chain, &store, bad_hash, bad_raw));
     try std.testing.expectEqual(@as(usize, 2), chain.records.items.len);
+    try store.commit(hash, chain.records.items[0].hash, chain.records.items[0].hash);
+    store.close();
+    var recovered_world = execution.state.State.init(a);
+    defer recovered_world.deinit();
+    var reopened = try execution.durable.Store.open(a, std.testing.io, durable_dir.dir, "execution", .osaka, parent, &recovered_world);
+    defer reopened.close();
+    var recovered = try execution.chain.Chain.init(a, 1, .osaka, parent, &recovered_world);
+    defer recovered.deinit();
+    try reopened.recover(&recovered, &recovered_world);
+    try std.testing.expectEqualSlices(u8, &hash, &recovered.latest().hash);
+    try std.testing.expect(recovered.byHash(bad_hash) == null);
 }
 
 /// Serializes one valid JSON-RPC test request from structured parameters.

@@ -23,7 +23,8 @@ pub fn importBlock(allocator: std.mem.Allocator, chain: *chain_mod.Chain, store:
     if (!std.mem.eql(u8, &hash, &requested)) return error.UnrequestedPeerBlock;
     if (chain.byHash(hash) != null) return;
     const parent = chain.byHash(block.header.parent_hash) orelse return error.UnknownParent;
-    if (block.header.number != parent.header.number + 1) return error.InvalidPeerAncestry;
+    const next_number = std.math.add(u64, parent.header.number, 1) catch return error.InvalidPeerAncestry;
+    if (block.header.number != next_number) return error.InvalidPeerAncestry;
     var parent_world = try chain.loadWorld(allocator, parent.hash);
     defer parent_world.deinit();
     var world = try parent_world.clone(allocator);
