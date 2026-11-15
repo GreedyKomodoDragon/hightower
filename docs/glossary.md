@@ -103,6 +103,7 @@ Chain:      [Block 0] ───────────────────�
 | Side branch | A valid-looking sequence of blocks that diverges from the currently selected execution chain. |
 | Canonical path | The ancestry selected by fork choice for block-number, transaction, receipt, and log reads. |
 | Safe block | A fork-choice checkpoint expected to remain on the chosen execution chain. |
+| Execution checkpoint | A trusted execution block header and complete post-state used as the starting point for validating later blocks. |
 | Finalized block | A fork-choice checkpoint whose consensus history has been finalized. |
 | Payload ID | An eight-byte identifier for a block-building job started by a forkchoice update. |
 | Paris | The execution upgrade associated with Ethereum's switch from mining to proof of stake. |

@@ -7,6 +7,9 @@ The configuration is a JSON object with these fields:
 | Field | Meaning |
 | --- | --- |
 | `genesis` | Path to the Osaka genesis JSON file |
+| `checkpoint_header` | Optional path to an RLP-encoded Osaka execution header |
+| `checkpoint_state` | Optional path to a complete Hightower state checkpoint created by `State.checkpointBytes` |
+| `checkpoint_hash` | Required with the two checkpoint paths: trusted `0x`-prefixed 32-byte hash of the header |
 | `data_dir` | Exclusive execution database directory |
 | `jwt_secret` | Path to a file containing 32 bytes as 64 hexadecimal characters |
 | `trusted_setup` | Path to the KZG trusted setup file |
@@ -14,7 +17,9 @@ The configuration is a JSON object with these fields:
 | `rpc_bind` | Separate IPv4 host and port for public execution JSON-RPC, such as `127.0.0.1:8545` |
 | `transfer_contract` | Optional `0x`-prefixed 20-byte ERC-20 contract address |
 
-The Engine listener requires the existing short-lived HS256 JWT on every request. Bind both listeners to loopback unless the deployment provides its own network access controls. Both HTTP handlers share one chain, state, transaction pool, and KZG setup. Startup verifies the genesis hash, persisted chain ID and fork, recovered canonical ancestry, and state and receipt roots before either listener opens. A changed genesis or chain ID requires a new data directory.
+The Engine listener requires the existing short-lived HS256 JWT on every request. Bind both listeners to loopback unless the deployment provides its own network access controls. Both HTTP handlers share one chain, state, transaction pool, and KZG setup. Startup verifies the starting header hash, persisted chain ID and fork, recovered canonical ancestry, and state and receipt roots before either listener opens. A changed starting header or chain ID requires a new data directory.
+
+The three checkpoint fields must be supplied together. The operator must trust the checkpoint hash and its history; Hightower checks the RLP header against that hash and the complete state against the header's state root before opening the database. The genesis file still supplies the chain ID. This local checkpoint format requires full account addresses, storage keys, and code; it is not a SNAP download. Input is limited to a 16 KiB header and 512 MiB state file. Use a new data directory when changing the checkpoint. The database retains 4,096 finalized canonical blocks, aligned to 128-block state checkpoints, and cannot serve older pruned bodies or state. `zig build test` exercises the pinned Osaka genesis fixture through checkpoint loading, corrupt-state rejection, and the existing execution recovery tests.
 
 The public RPC listener also serves unauthenticated `GET /health` (`200` when the durable identity record can be read, `503` after a durable choice write becomes uncertain or the storage read fails) and `GET /metrics` in Prometheus text format. Metrics report head, safe, and finalized block numbers, syncing state, pool entries and bytes, RPC requests and JSON-RPC errors, cumulative payload-build nanoseconds and failures, and the storage health flag. Credentials and hashes are not returned. `eth_syncing` remains `false`: this Engine-driven service has no execution sync worker. Storage health performs a durable marker read; it does not perform a write probe.
 

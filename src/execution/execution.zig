@@ -23,6 +23,7 @@ pub const pool = @import("pool.zig");
 pub const chain = @import("chain.zig");
 pub const durable = @import("durable.zig");
 pub const genesis = @import("genesis.zig");
+pub const checkpoint = @import("checkpoint.zig");
 pub const transfers = @import("transfers.zig");
 pub const rpc = @import("rpc.zig");
 pub const trie = @import("trie.zig");

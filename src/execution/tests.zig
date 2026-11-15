@@ -10,6 +10,44 @@ test {
     _ = execution.durable;
 }
 
+test "trusted execution checkpoint verifies its header and complete fixture state" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = execution.state.State.init(a);
+    defer fixture.deinit();
+    const genesis = try execution.genesis.load(a, io, "docs/engine/osaka-genesis.json", &fixture);
+    var header = genesis.header;
+    header.number = 128;
+    header.parent_hash = .{0x42} ** 32;
+    const header_bytes = try execution.encode(a, header);
+    const state_bytes = try fixture.checkpointBytes(a);
+    try tmp.dir.writeFile(io, .{ .sub_path = "header.rlp", .data = header_bytes });
+    try tmp.dir.writeFile(io, .{ .sub_path = "state.bin", .data = state_bytes });
+    const header_path = try tmp.dir.realPathFileAlloc(io, "header.rlp", a);
+    const state_path = try tmp.dir.realPathFileAlloc(io, "state.bin", a);
+    const hash = try execution.transition.headerHash(a, .osaka, header);
+    var world = execution.state.State.init(a);
+    defer world.deinit();
+    try std.testing.expectError(error.UntrustedCheckpoint, execution.checkpoint.load(a, io, header_path, state_path, .{0} ** 32, &world));
+    try std.testing.expectEqual(@as(usize, 0), world.accounts.items.len);
+    const loaded = try execution.checkpoint.load(a, io, header_path, state_path, hash, &world);
+    try std.testing.expectEqual(@as(u64, 128), loaded.number);
+    try std.testing.expectEqual(header.state_root, try world.stateRoot());
+    var other = execution.state.State.init(a);
+    defer other.deinit();
+    try other.setBalance(.{0x22} ** 20, 1);
+    try tmp.dir.writeFile(io, .{ .sub_path = "state.bin", .data = try other.checkpointBytes(a) });
+    try std.testing.expectError(error.InvalidCheckpointState, execution.checkpoint.load(a, io, header_path, state_path, hash, &world));
+    try std.testing.expectEqual(header.state_root, try world.stateRoot());
+    try tmp.dir.writeFile(io, .{ .sub_path = "state.bin", .data = state_bytes[0 .. state_bytes.len - 1] });
+    try std.testing.expectError(error.InvalidStateData, execution.checkpoint.load(a, io, header_path, state_path, hash, &world));
+    try std.testing.expectEqual(header.state_root, try world.stateRoot());
+}
+
 /// Serializes one valid JSON-RPC test request from structured parameters.
 fn rpcRequest(a: std.mem.Allocator, id: usize, method: []const u8, params: []const std.json.Value) ![]u8 {
     return std.json.Stringify.valueAlloc(a, .{ .jsonrpc = "2.0", .id = id, .method = method, .params = params }, .{});
