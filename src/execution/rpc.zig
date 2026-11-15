@@ -18,6 +18,10 @@ const max_batch = 20;
 const max_log_blocks = 1000;
 const max_log_results = 10_000;
 const max_fee_history = 128;
+const max_trace_frames = 1024;
+const max_trace_steps = 1_000_000;
+const max_trace_bytes = 1024 * 1024;
+const trace_deadline_ns = 2 * std.time.ns_per_s;
 const priority_fee: u64 = 1_000_000_000;
 
 const Method = enum {
@@ -42,6 +46,7 @@ const Method = enum {
     eth_sendRawTransaction,
     eth_getTransactionReceipt,
     eth_getLogs,
+    debug_traceTransaction,
 };
 
 /// Owns no chain data; callers keep these dependencies alive while serving.
@@ -52,6 +57,7 @@ pub const Server = struct {
     settings: ?*const ckzg.Settings = null,
     mutex: ?*std.Io.Mutex = null,
     revert_data: ?[]const u8 = null,
+    io: ?std.Io = null,
 
     /// Parses one bounded JSON-RPC body and returns an owned response body.
     pub fn dispatch(self: *Server, allocator: std.mem.Allocator, body: []const u8) ![]u8 {
@@ -104,6 +110,7 @@ pub const Server = struct {
         defer allocator.free(body);
         if (self.mutex) |mutex| try mutex.lock(io);
         defer if (self.mutex) |mutex| mutex.unlock(io);
+        self.io = io;
         const response = try self.dispatch(allocator, body);
         defer allocator.free(response);
         try request.respond(response, .{ .status = .ok, .keep_alive = false, .extra_headers = headers });
@@ -135,6 +142,8 @@ pub const Server = struct {
                 error.UnknownBlock => rpcError(allocator, id, -32001, "unknown block", null),
                 error.ExecutionReverted => rpcError(allocator, id, 3, "execution reverted", self.revert_data),
                 error.LogRangeTooLarge, error.TooManyLogs => rpcError(allocator, id, -32005, "query limit exceeded", null),
+                error.TraceLimitExceeded => rpcError(allocator, id, -32005, "trace limit exceeded", null),
+                error.UnknownTransaction => rpcError(allocator, id, -32000, "unknown transaction", null),
                 else => rpcError(allocator, id, -32000, @errorName(err), null),
             };
         };
@@ -142,6 +151,8 @@ pub const Server = struct {
         try put(allocator, &response, "jsonrpc", string("2.0"));
         try put(allocator, &response, "id", id);
         try put(allocator, &response, "result", result);
+        if (std.mem.eql(u8, method_value.string, "debug_traceTransaction") and (try std.json.Stringify.valueAlloc(allocator, response, .{})).len > max_trace_bytes)
+            return rpcError(allocator, id, -32005, "trace limit exceeded", null);
         return response;
     }
 
@@ -286,7 +297,50 @@ pub const Server = struct {
                 if (params.len != 1 or params[0] != .object) return error.InvalidParams;
                 return self.logsJson(a, params[0]);
             },
+            .debug_traceTransaction => {
+                if (params.len < 1 or params.len > 2) return error.InvalidParams;
+                if (params.len == 2) {
+                    if (params[1] != .object) return error.InvalidParams;
+                    const tracer = params[1].object.get("tracer") orelse return error.InvalidParams;
+                    if (tracer != .string or !std.mem.eql(u8, tracer.string, "callTracer") or params[1].object.count() != 1) return error.InvalidParams;
+                }
+                const hash = try parseHash(try asString(params[0]));
+                const found = self.chain.transaction(hash) orelse return error.UnknownTransaction;
+                return self.traceTransaction(a, found.record, found.index);
+            },
         }
+    }
+
+    /// Replays a canonical block from its parent state and traces its selected transaction.
+    fn traceTransaction(self: *Server, a: std.mem.Allocator, record: *const chain_mod.Record, index: usize) !Value {
+        const io = self.io orelse std.Io.Threaded.global_single_threaded.io();
+        var trace = Trace{ .allocator = a, .io = io, .started = std.Io.Clock.awake.now(io).nanoseconds };
+        const parent = self.chain.canonicalByHash(record.header.parent_hash) orelse return error.PrunedExecutionState;
+        var world = try self.chain.loadWorld(a, parent.hash);
+        defer world.deinit();
+        const older = try self.chain.ancestorHashes(a, parent.hash);
+        const hashes = try a.alloc(execution.Hash, older.len + 1);
+        hashes[0] = parent.hash;
+        @memcpy(hashes[1..], older);
+        var tx_context = self.context(record.header);
+        tx_context.block_hashes = hashes;
+        try transition.applySystemTransitions(a, &world, tx_context, parent.hash, record.header.parent_beacon_block_root);
+        var cumulative: u64 = 0;
+        for (record.transactions[0 .. index + 1], 0..) |raw, tx_index| {
+            try trace.check();
+            var outcome = try transition.applyTransactionTraced(a, &world, tx_context, raw, record.header.gas_limit - cumulative, cumulative, if (tx_index == index) trace.hook() else null);
+            defer outcome.deinit();
+            cumulative += outcome.gas_used;
+            if (tx_index == index) {
+                if (trace.frames.items.len == 0) return error.MissingTraceFrame;
+                var decoded = try execution.parse(execution.Transaction, a, raw);
+                defer decoded.deinit();
+                trace.frames.items[0].gas = (try transition.fields(decoded.value, self.chain.fork)).gas_limit;
+                trace.frames.items[0].gas_used = outcome.gas_used;
+                return trace.response();
+            }
+        }
+        return error.UnknownTransaction;
     }
 
     /// Resolves latest, earliest, pending, or a canonical hexadecimal block number.
@@ -300,7 +354,7 @@ pub const Server = struct {
 
     /// Builds an EVM host context from a stored block header.
     fn context(self: *Server, header: execution.Header) transition.Context {
-        return .{ .fork = self.chain.fork, .chain_id = self.chain.chain_id, .coinbase = header.fee_recipient, .number = header.number, .timestamp = header.timestamp, .gas_limit = header.gas_limit, .base_fee = header.base_fee_per_gas, .prev_randao = header.prev_randao, .blob_base_fee = transition.blobBaseFee(self.chain.fork, header.excess_blob_gas) catch null };
+        return .{ .fork = self.chain.fork, .chain_id = self.chain.chain_id, .coinbase = header.fee_recipient, .number = header.number, .timestamp = header.timestamp, .gas_limit = header.gas_limit, .base_fee = header.base_fee_per_gas, .prev_randao = header.prev_randao, .difficulty = header.difficulty, .blob_base_fee = transition.blobBaseFee(self.chain.fork, header.excess_blob_gas) catch null };
     }
 
     /// Runs an unsigned call on a discarded snapshot and returns its output bytes.
@@ -645,6 +699,221 @@ fn logJson(a: std.mem.Allocator, record: *const chain_mod.Record, tx_index: usiz
 }
 
 /// Applies Ethereum address and positional topic filters to one log.
+// A trace owns frame bytes only for one RPC request; child indexes preserve call order.
+const Trace = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    started: i96,
+    steps: usize = 0,
+    bytes: usize = 0,
+    frames: std.ArrayList(Frame) = .empty,
+    open: std.ArrayList(usize) = .empty,
+    last_closed: ?usize = null,
+
+    const Frame = struct {
+        parent: ?usize,
+        kind: execution.evm.Kind,
+        from: execution.Address,
+        to: execution.Address,
+        value: u256,
+        input: []const u8,
+        output: []const u8 = &.{},
+        gas: u64,
+        gas_used: u64 = 0,
+        status: execution.evm.Status = .success,
+    };
+
+    /// Returns the optional observer installed on a single transaction machine.
+    fn hook(self: *Trace) execution.evm.Hook {
+        return .{ .context = self, .begin = begin, .step = step, .end = end, .amend_create = amendCreate };
+    }
+
+    /// Enforces a monotonic deadline during replay and EVM execution.
+    fn check(self: *Trace) !void {
+        if (std.Io.Clock.awake.now(self.io).nanoseconds - self.started >= trace_deadline_ns) return error.TraceLimitExceeded;
+    }
+
+    /// Captures the next frame under the currently executing parent.
+    fn begin(context: *anyopaque, input: execution.evm.Input) anyerror!void {
+        const self: *Trace = @ptrCast(@alignCast(context));
+        try self.check();
+        if (self.frames.items.len >= max_trace_frames or self.bytes +| (input.data.len *| 2) > max_trace_bytes) return error.TraceLimitExceeded;
+        const parent = if (self.open.items.len == 0) null else self.open.items[self.open.items.len - 1];
+        try self.frames.append(self.allocator, .{ .parent = parent, .kind = input.kind, .from = if (parent) |p| self.frames.items[p].to else input.caller, .to = input.target orelse input.callee, .value = input.value, .input = try self.allocator.dupe(u8, input.data), .gas = input.gas });
+        try self.open.append(self.allocator, self.frames.items.len - 1);
+        self.bytes += input.data.len * 2;
+    }
+
+    /// Counts every fetched opcode, including those in nested frames.
+    fn step(context: *anyopaque) anyerror!void {
+        const self: *Trace = @ptrCast(@alignCast(context));
+        self.steps += 1;
+        if (self.steps > max_trace_steps) return error.TraceLimitExceeded;
+        try self.check();
+    }
+
+    /// Captures return or revert bytes before the EVM releases its result.
+    fn end(context: *anyopaque, _: execution.evm.Input, result: execution.evm.Result) anyerror!void {
+        const self: *Trace = @ptrCast(@alignCast(context));
+        if (self.bytes +| (result.output.len *| 2) > max_trace_bytes) return error.TraceLimitExceeded;
+        const index = self.open.pop() orelse return error.MissingTraceFrame;
+        self.last_closed = index;
+        const frame = &self.frames.items[index];
+        frame.output = try self.allocator.dupe(u8, result.output);
+        frame.gas_used = frame.gas - result.gas_remaining;
+        frame.status = result.status;
+        self.bytes += result.output.len * 2;
+    }
+
+    /// Includes final code-deposit gas and status after initcode has returned.
+    fn amendCreate(context: *anyopaque, result: execution.evm.Result) void {
+        const self: *Trace = @ptrCast(@alignCast(context));
+        const index = self.last_closed orelse return;
+        const frame = &self.frames.items[index];
+        frame.gas_used = frame.gas - result.gas_remaining;
+        frame.status = result.status;
+    }
+
+    /// Renders one Geth callTracer frame with children in execution order.
+    fn json(self: *Trace, index: usize) anyerror!Value {
+        const a = self.allocator;
+        const frame = self.frames.items[index];
+        var out = object(a);
+        try put(a, &out, "type", string(switch (frame.kind) {
+            .call => "CALL",
+            .callcode => "CALLCODE",
+            .delegatecall => "DELEGATECALL",
+            .staticcall => "STATICCALL",
+            .create => "CREATE",
+            .create2 => "CREATE2",
+        }));
+        try put(a, &out, "from", string(try hex(a, &frame.from)));
+        try put(a, &out, "to", string(try hex(a, &frame.to)));
+        try put(a, &out, "value", try quantity(a, frame.value));
+        try put(a, &out, "input", string(try hex(a, frame.input)));
+        try put(a, &out, "output", string(try hex(a, frame.output)));
+        try put(a, &out, "gas", try quantity(a, frame.gas));
+        try put(a, &out, "gasUsed", try quantity(a, frame.gas_used));
+        switch (frame.status) {
+            .success => {},
+            .revert => try put(a, &out, "error", string("execution reverted")),
+            .fault => |fault| try put(a, &out, "error", string(switch (fault) {
+                .out_of_gas => "out of gas",
+                .stack_underflow => "stack underflow",
+                .stack_overflow => "stack overflow",
+                .invalid_opcode => "invalid opcode",
+                .invalid_jump => "invalid jump destination",
+                .depth => "max call depth exceeded",
+                .write_protection => "write protection",
+                .memory_overflow => "memory overflow",
+                .missing_context => "missing context",
+                .unsupported_precompile => "unsupported precompile",
+                .unsupported_opcode => "unsupported opcode",
+            })),
+        }
+        var calls = array(a);
+        for (self.frames.items, 0..) |child, child_index| if (child.parent != null and child.parent.? == index) {
+            try calls.array.append(try self.json(child_index));
+        };
+        if (calls.array.items.len != 0) try put(a, &out, "calls", calls);
+        return out;
+    }
+
+    /// Checks the complete serialized response after bounded frame collection.
+    fn response(self: *Trace) !Value {
+        const value = try self.json(0);
+        const encoded = try std.json.Stringify.valueAlloc(self.allocator, value, .{});
+        if (encoded.len > max_trace_bytes - 128) return error.TraceLimitExceeded;
+        return value;
+    }
+};
+
+test "call tracing preserves nested order and enforces every limit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var trace = Trace{ .allocator = a, .io = io, .started = std.Io.Clock.awake.now(io).nanoseconds };
+    const input: execution.evm.Input = .{ .code = &.{}, .gas = 100, .caller = .{1} ** 20, .callee = .{2} ** 20 };
+    try Trace.begin(&trace, input);
+    var child = input;
+    child.target = .{3} ** 20;
+    child.kind = .staticcall;
+    try Trace.begin(&trace, child);
+    try Trace.end(&trace, child, .{ .status = .revert, .gas_remaining = 70, .output = @constCast(&.{ 0xde, 0xad }) });
+    try Trace.end(&trace, input, .{ .status = .success, .gas_remaining = 50, .output = @constCast(&.{}) });
+    const rendered = try trace.json(0);
+    try std.testing.expectEqualStrings("STATICCALL", rendered.object.get("calls").?.array.items[0].object.get("type").?.string);
+    try std.testing.expectEqualStrings("0xdead", rendered.object.get("calls").?.array.items[0].object.get("output").?.string);
+    trace.steps = max_trace_steps;
+    try std.testing.expectError(error.TraceLimitExceeded, Trace.step(&trace));
+    trace.steps = 0;
+    trace.started -= trace_deadline_ns;
+    try std.testing.expectError(error.TraceLimitExceeded, trace.check());
+    trace.started = std.Io.Clock.awake.now(io).nanoseconds;
+    trace.bytes = max_trace_bytes;
+    var oversized = input;
+    oversized.data = &.{0};
+    try std.testing.expectError(error.TraceLimitExceeded, Trace.begin(&trace, oversized));
+    trace.bytes = 0;
+    try trace.frames.resize(a, max_trace_frames);
+    try std.testing.expectError(error.TraceLimitExceeded, Trace.begin(&trace, input));
+    trace.frames.items.len = 2;
+}
+
+test "call trace serialized response has a separate size cap" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var trace = Trace{ .allocator = a, .io = io, .started = std.Io.Clock.awake.now(io).nanoseconds };
+    const input: execution.evm.Input = .{ .code = &.{}, .gas = 100, .caller = .{1} ** 20, .callee = .{2} ** 20 };
+    try Trace.begin(&trace, input);
+    const output = try a.alloc(u8, max_trace_bytes / 2 - 50);
+    @memset(output, 0);
+    try Trace.end(&trace, input, .{ .status = .success, .gas_remaining = 0, .output = output });
+    try std.testing.expectError(error.TraceLimitExceeded, trace.response());
+}
+
+test "EVM hook records a nested contract call" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var world = execution.state.State.init(a);
+    defer world.deinit();
+    const parent: execution.Address = .{2} ** 20;
+    const child: execution.Address = .{3} ** 20;
+    const second_child: execution.Address = .{4} ** 20;
+    const child_code = [_]u8{ 0x60, 0x2a, 0x60, 0, 0x52, 0x60, 0x20, 0x60, 0, 0xf3 };
+    _ = try world.setCode(child, &child_code);
+    _ = try world.setCode(second_child, &child_code);
+    const call_prefix = [_]u8{ 0x60, 0, 0x60, 0, 0x60, 0, 0x60, 0, 0x60, 0, 0x73 };
+    const call_suffix = [_]u8{ 0x60, 0xff, 0xf1, 0x50 };
+    const parent_code = call_prefix ++ ([_]u8{3} ** 20) ++ call_suffix ++ call_prefix ++ ([_]u8{4} ** 20) ++ call_suffix ++ [_]u8{0x00};
+    _ = try world.setCode(parent, &parent_code);
+    var trace = Trace{ .allocator = a, .io = io, .started = std.Io.Clock.awake.now(io).nanoseconds };
+    var machine = execution.evm.Machine.init(a, &world);
+    defer machine.deinit();
+    machine.hook = trace.hook();
+    var result = try machine.run(.{ .code = &parent_code, .gas = 100_000, .caller = .{1} ** 20, .callee = parent });
+    defer result.deinit(a);
+    try std.testing.expect(result.status == .success);
+    try std.testing.expectEqual(@as(usize, 3), trace.frames.items.len);
+    try std.testing.expectEqual(@as(?usize, 0), trace.frames.items[1].parent);
+    try std.testing.expectEqual(@as(?usize, 0), trace.frames.items[2].parent);
+    const rendered = try trace.json(0);
+    const nested = rendered.object.get("calls").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), nested.len);
+    try std.testing.expectEqualStrings("CALL", nested[0].object.get("type").?.string);
+    try std.testing.expectEqualStrings(try hex(a, &child), nested[0].object.get("to").?.string);
+    try std.testing.expectEqualStrings(try hex(a, &second_child), nested[1].object.get("to").?.string);
+    var fault = try machine.run(.{ .code = &.{0xfe}, .gas = 100, .caller = .{1} ** 20, .callee = parent });
+    defer fault.deinit(a);
+    try std.testing.expect(fault.status == .fault);
+    try std.testing.expect(trace.frames.items[3].status == .fault);
+}
+
 fn logMatches(filter: std.json.ObjectMap, log: execution.Log) !bool {
     if (filter.get("address")) |address| {
         if (address == .string) {

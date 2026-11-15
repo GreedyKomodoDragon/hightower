@@ -20,7 +20,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 ZERO = "0x" + "00" * 32
 ENGINE_MAX_BODY = 32 * 1024 * 1024
 SENDER = "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"
-CONTRACT = "0xf2e246bb76df876cef8b38ae84130f4f55de395b"
+COUNTER = "0xf2e246bb76df876cef8b38ae84130f4f55de395b"
+CONTRACT = "0x2946259e0334f33a064106302415ad3391bed384"
 
 
 def port():
@@ -82,7 +83,7 @@ def run():
         genesis["alloc"][SENDER[2:]] = {"balance": "0x3b9aca00"}
         genesis["alloc"]["aa" * 20] = {"storage": {"0x1": "0x2"}}
         (temporary / "genesis.json").write_text(json.dumps(genesis))
-        signed = json.loads((ROOT / "src/execution/fixtures/local_token_signed.json").read_text())
+        signed = json.loads((ROOT / "src/execution/fixtures/solidity/reference.json").read_text())["signedTransactions"]
         engine_port, rpc_port = port(), port()
         assert engine_port != rpc_port
         config = {
@@ -148,7 +149,7 @@ def run():
             reader.start()
             for number in (1, 2):
                 bearer = token(secret)
-                raws = [signed["deployment"]] if number == 1 else [signed["transfer"], signed["reverted"]]
+                raws = signed[:2] if number == 1 else signed[2:]
                 hashes = [request(rpc_port, "eth_sendRawTransaction", [raw]) for raw in raws]
                 choice = {"headBlockHash": head, "safeBlockHash": head, "finalizedBlockHash": head}
                 attributes = {
@@ -175,25 +176,36 @@ def run():
             reader.join(timeout=5)
             assert not read_errors, read_errors
             assert request(rpc_port, "eth_getBalance", [SENDER, "latest"]) != "0x3b9aca00"
-            logs = request(rpc_port, "eth_getLogs", [{}])
-            assert len(logs) == 1 and logs[0]["address"].lower() == CONTRACT
+            logs = request(rpc_port, "eth_getLogs", [{"fromBlock": "0x1"}])
+            assert len(logs) == 2 and all(log["address"].lower() == CONTRACT for log in logs), logs
+            assert request(rpc_port, "eth_getStorageAt", [COUNTER, "0x0", "latest"]) == "0x" + "00" * 31 + "2a"
+            balance_call = "0x70a08231" + "00" * 12 + SENDER[2:]
+            assert int(request(rpc_port, "eth_call", [{"to": CONTRACT, "data": balance_call}, "latest"]), 16) == 925
+            transfer_trace = request(rpc_port, "debug_traceTransaction", [hashes[1], {"tracer": "callTracer"}])
+            assert transfer_trace["type"] == "CALL" and transfer_trace["to"].lower() == CONTRACT
+            assert transfer_trace["output"].endswith("01") and "error" not in transfer_trace
+            reverted_trace = request(rpc_port, "debug_traceTransaction", [hashes[2], {"tracer": "callTracer"}])
+            assert reverted_trace["error"] == "execution reverted" and reverted_trace["output"].startswith("0x08c379a0")
             process.terminate()
             process.wait(timeout=5)
             process.stderr.close()
             lines = (temporary / "events.jsonl").read_text().splitlines()
-            assert len(lines) == 1
-            event = json.loads(lines[0])
+            assert len(lines) == 2
+            minted = json.loads(lines[0])
+            assert minted["contract"] == CONTRACT and minted["amount"].endswith("03e8")
+            event = json.loads(lines[1])
             assert event["id"] == f"{head}:0"
             assert event["contract"] == CONTRACT and event["from"] == SENDER
             assert event["to"] == "0x" + "44" * 20 and event["amount"].endswith("4b")
-            assert event["transaction_hash"] == hashes[0]
+            assert event["transaction_hash"] == hashes[1]
             assert event["block_number"] == 2 and event["log_index"] == 0
             process = start()
             assert request(rpc_port, "eth_blockNumber", []) == "0x2"
             assert request(rpc_port, "eth_getBlockByHash", [head, False])["number"] == "0x2"
-            assert request(rpc_port, "eth_getLogs", [{}]) == logs
-            assert request(rpc_port, "eth_getTransactionReceipt", [hashes[0]])["status"] == "0x1"
-            assert len((temporary / "events.jsonl").read_text().splitlines()) == 1
+            assert request(rpc_port, "eth_getLogs", [{"fromBlock": "0x1"}]) == logs
+            assert request(rpc_port, "eth_getTransactionReceipt", [hashes[1]])["status"] == "0x1"
+            assert request(rpc_port, "debug_traceTransaction", [hashes[1], {"tracer": "callTracer"}])["output"] == transfer_trace["output"]
+            assert len((temporary / "events.jsonl").read_text().splitlines()) == 2
             bearer = token(secret)
             choice = {"headBlockHash": head, "safeBlockHash": head, "finalizedBlockHash": head}
             attributes = {"timestamp": "0x3", "prevRandao": ZERO, "suggestedFeeRecipient": "0x" + "00" * 20, "withdrawals": [], "parentBeaconBlockRoot": ZERO}

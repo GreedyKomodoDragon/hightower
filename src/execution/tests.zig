@@ -1330,6 +1330,113 @@ fn tokenTransfer(to: execution.Address, amount: u256) [68]u8 {
     return data;
 }
 
+/// Decodes compiler-produced hex into bytes owned by a test arena.
+fn fixtureHex(a: std.mem.Allocator, value: []const u8) ![]u8 {
+    const bytes = try a.alloc(u8, value.len / 2);
+    _ = try std.fmt.hexToBytes(bytes, value);
+    return bytes;
+}
+
+test "pinned Solidity 0.8.28 counter and ERC-20 execute from compiler bytecode" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const input = (try std.json.parseFromSlice(std.json.Value, a, @embedFile("fixtures/solidity/compiler-input.json"), .{})).value.object;
+    try testing.expectEqualStrings(@embedFile("fixtures/solidity/Contracts.sol"), input.get("sources").?.object.get("Contracts.sol").?.object.get("content").?.string);
+    const settings = input.get("settings").?.object;
+    try testing.expectEqualStrings("shanghai", settings.get("evmVersion").?.string);
+    try testing.expect(settings.get("optimizer").?.object.get("enabled").?.bool);
+    try testing.expectEqual(@as(i64, 200), settings.get("optimizer").?.object.get("runs").?.integer);
+    const artifacts = (try std.json.parseFromSlice(std.json.Value, a, @embedFile("fixtures/solidity/artifacts.json"), .{})).value.object;
+    try testing.expectEqualStrings("0.8.28+commit.7893614a.Emscripten.clang", artifacts.get("compilerVersion").?.string);
+    const contracts = artifacts.get("contracts").?.object;
+    const counter = contracts.get("Counter").?.object.get("evm").?.object;
+    const token = contracts.get("MinimalToken").?.object.get("evm").?.object;
+    const counter_bytecode = try fixtureHex(a, counter.get("bytecode").?.object.get("object").?.string);
+    const token_bytecode = try fixtureHex(a, token.get("bytecode").?.object.get("object").?.string);
+    const counter_runtime = try fixtureHex(a, counter.get("deployedBytecode").?.object.get("object").?.string);
+    const token_runtime = try fixtureHex(a, token.get("deployedBytecode").?.object.get("object").?.string);
+    const oracle = (try std.json.parseFromSlice(std.json.Value, a, @embedFile("fixtures/solidity/reference.json"), .{})).value.object;
+    const source_hash = std.crypto.hash.sha2.Sha256.hash;
+    var digest: execution.Hash = undefined;
+    source_hash(@embedFile("fixtures/solidity/Contracts.sol"), &digest, .{});
+    try testing.expectEqualStrings(oracle.get("sourceSha256").?.string[2..], &std.fmt.bytesToHex(digest, .lower));
+    source_hash(@embedFile("fixtures/solidity/compiler-input.json"), &digest, .{});
+    try testing.expectEqualStrings(oracle.get("compilerInputSha256").?.string[2..], &std.fmt.bytesToHex(digest, .lower));
+    for ([_][]const u8{ "Counter", "MinimalToken" }, [_][]const u8{ counter.get("bytecode").?.object.get("object").?.string, token.get("bytecode").?.object.get("object").?.string }, [_][]const u8{ counter.get("deployedBytecode").?.object.get("object").?.string, token.get("deployedBytecode").?.object.get("object").?.string }) |name, creation, runtime| {
+        const expected = oracle.get("contracts").?.object.get(name).?.object;
+        source_hash(try fixtureHex(a, creation), &digest, .{});
+        try testing.expectEqualStrings(expected.get("creationSha256").?.string[2..], &std.fmt.bytesToHex(digest, .lower));
+        source_hash(try fixtureHex(a, runtime), &digest, .{});
+        try testing.expectEqualStrings(expected.get("runtimeSha256").?.string[2..], &std.fmt.bytesToHex(digest, .lower));
+    }
+    var world = execution.state.State.init(a);
+    defer world.deinit();
+    const sender: execution.Address = .{ 0x7e, 0x5f, 0x45, 0x52, 0x09, 0x1a, 0x69, 0x12, 0x5d, 0x5d, 0xfc, 0xb7, 0xb8, 0xc2, 0x65, 0x90, 0x29, 0x39, 0x5b, 0xdf };
+    const recipient: execution.Address = .{0x44} ** 20;
+    try world.setBalance(sender, 1_000_000_000);
+    const counter_init = try a.alloc(u8, counter_bytecode.len + 32);
+    @memcpy(counter_init[0..counter_bytecode.len], counter_bytecode);
+    std.mem.writeInt(u256, counter_init[counter_bytecode.len..][0..32], 41, .big);
+    const token_init = try a.alloc(u8, token_bytecode.len + 32);
+    @memcpy(token_init[0..token_bytecode.len], token_bytecode);
+    std.mem.writeInt(u256, token_init[token_bytecode.len..][0..32], 1000, .big);
+    const counter_address = execution.state.createAddress(sender, 0);
+    const token_address = execution.state.createAddress(sender, 1);
+    const transfer = tokenTransfer(recipient, 75);
+    const failing = tokenTransfer(recipient, 2000);
+    const increment = [_]u8{ 0xd0, 0x9d, 0xe0, 0x8a };
+    var raw: [5][]const u8 = undefined;
+    const calls = [_][]const u8{ counter_init, token_init, &increment, &transfer, &failing };
+    for (&raw, oracle.get("signedTransactions").?.array.items, calls, 0..) |*bytes, expected, data, i| {
+        bytes.* = try fixtureHex(a, expected.string[2..]);
+        var decoded = try execution.parse(execution.Transaction, a, bytes.*);
+        defer decoded.deinit();
+        const fields = try execution.transition.fields(decoded.value, .shanghai);
+        try testing.expectEqual(@as(u64, @intCast(i)), fields.nonce);
+        try testing.expectEqualSlices(u8, data, fields.data);
+    }
+    const context: execution.transition.Context = .{ .fork = .shanghai, .chain_id = 1, .coinbase = .{0x33} ** 20, .number = 1, .timestamp = 1, .gas_limit = 30_000_000, .base_fee = 1 };
+    var receipts: [raw.len]execution.Receipt = undefined;
+    var cumulative: u64 = 0;
+    for (raw, oracle.get("receipts").?.array.items, 0..) |bytes, expected, i| {
+        var outcome = try execution.transition.applyTransaction(a, &world, context, bytes, context.gas_limit - cumulative, cumulative);
+        defer outcome.deinit();
+        cumulative += outcome.gas_used;
+        const expected_receipt = expected.object;
+        try testing.expectEqual(try std.fmt.parseInt(u64, expected_receipt.get("gasUsed").?.string[2..], 16), outcome.gas_used);
+        try testing.expectEqual(try std.fmt.parseInt(u64, expected_receipt.get("cumulativeGasUsed").?.string[2..], 16), cumulative);
+        try testing.expectEqual(try std.fmt.parseInt(u8, expected_receipt.get("status").?.string[2..], 16), outcome.receipt.dynamic_fee.status);
+        const source_logs = outcome.receipt.dynamic_fee.logs;
+        const expected_logs = expected_receipt.get("logs").?.array.items;
+        try testing.expectEqual(expected_logs.len, source_logs.len);
+        const copied_logs = try a.alloc(execution.Log, source_logs.len);
+        for (source_logs, expected_logs, copied_logs) |log, expected_log, *dest| {
+            const expected_event = expected_log.object;
+            try testing.expectEqualStrings(expected_event.get("address").?.string[2..], &std.fmt.bytesToHex(log.address, .lower));
+            try testing.expectEqual(@as(usize, 32), log.data.len);
+            try testing.expectEqualStrings(expected_event.get("data").?.string[2..], &std.fmt.bytesToHex(log.data[0..32].*, .lower));
+            for (log.topics, expected_event.get("topics").?.array.items) |topic, expected_topic| try testing.expectEqualStrings(expected_topic.string[2..], &std.fmt.bytesToHex(topic, .lower));
+            dest.* = .{ .address = log.address, .topics = try a.dupe(execution.Hash, log.topics), .data = try a.dupe(u8, log.data) };
+        }
+        receipts[i] = .{ .dynamic_fee = .{ .status = outcome.receipt.dynamic_fee.status, .cumulative_gas_used = cumulative, .logs = copied_logs, .logs_bloom = execution.logsBloom(copied_logs) } };
+    }
+    const root = try world.stateRoot();
+    try testing.expectEqualStrings(oracle.get("stateRoot").?.string[2..], &std.fmt.bytesToHex(root, .lower));
+    try testing.expectEqualStrings(oracle.get("receiptsRoot").?.string[2..], &std.fmt.bytesToHex(try execution.receiptsRoot(a, &receipts), .lower));
+    try testing.expectEqualSlices(u8, counter_runtime, world.getCode(counter_address));
+    try testing.expectEqualSlices(u8, token_runtime, world.getCode(token_address));
+    try testing.expectEqual(@as(u256, 42), world.getStorage(counter_address, 0));
+    var slot: [64]u8 = .{0} ** 64;
+    @memcpy(slot[12..32], &sender);
+    std.crypto.hash.sha3.Keccak256.hash(&slot, &digest, .{});
+    try testing.expectEqual(@as(u256, 925), world.getStorage(token_address, std.mem.readInt(u256, &digest, .big)));
+    @memcpy(slot[12..32], &recipient);
+    std.crypto.hash.sha3.Keccak256.hash(&slot, &digest, .{});
+    try testing.expectEqual(@as(u256, 75), world.getStorage(token_address, std.mem.readInt(u256, &digest, .big)));
+    try testing.expectEqual(@as(u8, 0), receipts[4].dynamic_fee.status);
+}
+
 test "signed local token deployment, transfer, and revert commit through block and RPC" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1426,6 +1533,22 @@ test "signed local token deployment, transfer, and revert commit through block a
     const transfer_receipt_body = try server.dispatch(a, transfer_receipt_req);
     const transfer_receipt = (try std.json.parseFromSlice(std.json.Value, a, transfer_receipt_body, .{})).value.object.get("result").?;
     try testing.expectEqualStrings("0x1", transfer_receipt.object.get("status").?.string);
+    const trace_req = try rpcRequest(a, 5, "debug_traceTransaction", &.{ .{ .string = try std.fmt.allocPrint(a, "0x{s}", .{std.fmt.bytesToHex(tx_hash, .lower)}) }, .{ .object = blk: {
+        var options: std.json.ObjectMap = .empty;
+        try options.put(a, "tracer", .{ .string = "callTracer" });
+        break :blk options;
+    } } });
+    const trace_reply = (try std.json.parseFromSlice(std.json.Value, a, try server.dispatch(a, trace_req), .{})).value.object.get("result").?;
+    try testing.expectEqualStrings("CALL", trace_reply.object.get("type").?.string);
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "0x{s}", .{std.fmt.bytesToHex(contract, .lower)}), trace_reply.object.get("to").?.string);
+    try testing.expectEqualStrings("0x", trace_reply.object.get("output").?.string[0..2]);
+    try testing.expect(trace_reply.object.get("error") == null);
+    const bad_tracer = try rpcRequest(a, 6, "debug_traceTransaction", &.{ .{ .string = try std.fmt.allocPrint(a, "0x{s}", .{std.fmt.bytesToHex(tx_hash, .lower)}) }, .{ .object = blk: {
+        var options: std.json.ObjectMap = .empty;
+        try options.put(a, "tracer", .{ .string = "prestateTracer" });
+        break :blk options;
+    } } });
+    try testing.expectEqual(@as(i64, -32602), (try std.json.parseFromSlice(std.json.Value, a, try server.dispatch(a, bad_tracer), .{})).value.object.get("error").?.object.get("code").?.integer);
     const receipt_logs = transfer_receipt.object.get("logs").?.array.items;
     try testing.expectEqual(@as(usize, 1), receipt_logs.len);
     std.crypto.hash.sha3.Keccak256.hash(raw[2], &tx_hash, .{});
@@ -1433,6 +1556,9 @@ test "signed local token deployment, transfer, and revert commit through block a
     const reverted_receipt_body = try server.dispatch(a, reverted_receipt_req);
     const reverted_receipt = (try std.json.parseFromSlice(std.json.Value, a, reverted_receipt_body, .{})).value.object.get("result").?;
     try testing.expectEqualStrings("0x0", reverted_receipt.object.get("status").?.string);
+    const revert_trace = (try std.json.parseFromSlice(std.json.Value, a, try server.dispatch(a, try rpcRequest(a, 7, "debug_traceTransaction", &.{.{ .string = try std.fmt.allocPrint(a, "0x{s}", .{std.fmt.bytesToHex(tx_hash, .lower)}) }})), .{})).value.object.get("result").?;
+    try testing.expectEqualStrings("execution reverted", revert_trace.object.get("error").?.string);
+    try testing.expectEqualStrings("0x", revert_trace.object.get("output").?.string);
     try testing.expectEqual(@as(usize, 0), reverted_receipt.object.get("logs").?.array.items.len);
     const logs_req = try rpcRequest(a, 2, "eth_getLogs", &.{.{ .object = .empty }});
     const logs_body = try server.dispatch(a, logs_req);
@@ -1470,6 +1596,8 @@ test "signed local token deployment, transfer, and revert commit through block a
     try testing.expectEqual(@as(usize, 1), (try std.json.parseFromSlice(std.json.Value, a, recovered_receipt, .{})).value.object.get("result").?.object.get("logs").?.array.items.len);
     const recovered_logs = try recovered_rpc.dispatch(a, logs_req);
     try testing.expectEqual(@as(usize, 1), (try std.json.parseFromSlice(std.json.Value, a, recovered_logs, .{})).value.object.get("result").?.array.items.len);
+    const recovered_trace = try recovered_rpc.dispatch(a, trace_req);
+    try testing.expectEqualStrings("CALL", (try std.json.parseFromSlice(std.json.Value, a, recovered_trace, .{})).value.object.get("result").?.object.get("type").?.string);
     var collector = TransferCollector{ .allocator = a };
     defer collector.deinit();
     var stream: execution.transfers.Stream = .{ .allocator = a, .store = &reopened_store, .chain = &recovered_chain, .contract = contract, .output = TransferCollector.output, .context = &collector };
@@ -1544,6 +1672,10 @@ test "signed local token deployment, transfer, and revert commit through block a
     try testing.expect((try std.json.parseFromSlice(std.json.Value, a, orphan_block, .{})).value.object.get("result").? == .null);
     const orphan_tx = try server.dispatch(a, try rpcRequest(a, 41, "eth_getTransactionByHash", &.{.{ .string = try std.fmt.allocPrint(a, "0x{s}", .{std.fmt.bytesToHex(tx_hash, .lower)}) }}));
     try testing.expect((try std.json.parseFromSlice(std.json.Value, a, orphan_tx, .{})).value.object.get("result").? == .null);
+    const orphan_trace = try server.dispatch(a, trace_req);
+    try testing.expectEqual(@as(i64, -32000), (try std.json.parseFromSlice(std.json.Value, a, orphan_trace, .{})).value.object.get("error").?.object.get("code").?.integer);
+    const unknown_trace = try server.dispatch(a, try rpcRequest(a, 44, "debug_traceTransaction", &.{.{ .string = "0x" ++ ("00" ** 32) }}));
+    try testing.expectEqual(@as(i64, -32000), (try std.json.parseFromSlice(std.json.Value, a, unknown_trace, .{})).value.object.get("error").?.object.get("code").?.integer);
     var orphan_dir = testing.tmpDir(.{});
     defer orphan_dir.cleanup();
     var orphan_genesis = try chain.records.items[0].world.?.clone(a);

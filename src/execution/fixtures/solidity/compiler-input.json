@@ -1,0 +1,26 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "Contracts.sol": {
+      "content": "// Counter and token state changes are ordered EVM transactions. The constructor\n// writes initial storage before runtime code is installed; a reverted transfer\n// restores its balance writes and emits no Transfer log.\n//\n// deploy -> read -> transfer or revert\n// Balances and counter values fit uint256; these fixtures use no precompiles.\n// SPDX-License-Identifier: MIT\npragma solidity 0.8.28;\n\ncontract Counter {\n    uint256 public value;\n\n    /// Initializes the stored counter value.\n    constructor(uint256 initialValue) {\n        value = initialValue;\n    }\n\n    /// Increments the counter by one, reverting on uint256 overflow.\n    function increment() external {\n        value += 1;\n    }\n}\n\ncontract MinimalToken {\n    mapping(address => uint256) private balances;\n    event Transfer(address indexed from, address indexed to, uint256 amount);\n\n    /// Mints the supplied amount to the deploying address.\n    constructor(uint256 supply) {\n        balances[msg.sender] = supply;\n        emit Transfer(address(0), msg.sender, supply);\n    }\n\n    /// Returns the owner's balance without changing state.\n    function balanceOf(address owner) external view returns (uint256) {\n        return balances[owner];\n    }\n\n    /// Moves tokens to a recipient or reverts with the encoded balance error.\n    function transfer(address to, uint256 amount) external returns (bool) {\n        require(balances[msg.sender] >= amount, \"insufficient balance\");\n        balances[msg.sender] -= amount;\n        balances[to] += amount;\n        emit Transfer(msg.sender, to, amount);\n        return true;\n    }\n}\n"
+    }
+  },
+  "settings": {
+    "optimizer": {
+      "enabled": true,
+      "runs": 200
+    },
+    "evmVersion": "shanghai",
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi",
+          "evm.bytecode.object",
+          "evm.deployedBytecode.object",
+          "metadata",
+          "evm.methodIdentifiers"
+        ]
+      }
+    }
+  }
+}

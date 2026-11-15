@@ -144,6 +144,17 @@ pub const Input = struct {
     data: []const u8 = &.{},
     depth: u16 = 0,
     is_static: bool = false,
+    kind: Kind = .call,
+    target: ?state.Address = null,
+};
+pub const Kind = enum { call, callcode, delegatecall, staticcall, create, create2 };
+/// Observes frames and steps only when a caller explicitly requests tracing.
+pub const Hook = struct {
+    context: *anyopaque,
+    begin: *const fn (*anyopaque, Input) anyerror!void,
+    step: *const fn (*anyopaque) anyerror!void,
+    end: *const fn (*anyopaque, Input, Result) anyerror!void,
+    amend_create: *const fn (*anyopaque, Result) void,
 };
 pub const Fault = enum { out_of_gas, stack_underflow, stack_overflow, invalid_opcode, invalid_jump, depth, write_protection, memory_overflow, missing_context, unsupported_precompile, unsupported_opcode };
 pub const Status = union(enum) { success, revert, fault: Fault };
@@ -173,6 +184,7 @@ pub const Machine = struct {
     destroyed: std.ArrayList(state.Address) = .empty,
     environment: ?Environment = null,
     refund: i128 = 0,
+    hook: ?Hook = null,
 
     /// Borrows execution state and retains transaction-local data until deinit.
     pub fn init(allocator: std.mem.Allocator, world: *state.State) Machine {
@@ -223,6 +235,11 @@ pub const Machine = struct {
     }
     /// Executes one frame, returning owned bytes; only allocator failures escape.
     pub fn run(self: *Machine, input: Input) anyerror!Result {
+        if (self.hook) |hook| {
+            var observed = input;
+            if (input.kind == .create or input.kind == .create2) observed.data = input.code;
+            try hook.begin(hook.context, observed);
+        }
         if (input.depth >= 1024) return .{ .status = .{ .fault = .depth }, .gas_remaining = 0, .output = try self.allocator.dupe(u8, "") };
         const saved_transient = try self.allocator.dupe(Slot, self.transient.items);
         defer self.allocator.free(saved_transient);
@@ -242,8 +259,8 @@ pub const Machine = struct {
             try self.restore(saved_transient, saved_warm, saved_accounts, saved_logs, saved_refund);
             self.created.shrinkRetainingCapacity(saved_created);
             self.destroyed.shrinkRetainingCapacity(saved_destroyed);
-            if (err == error.OutOfMemory) return err;
-            return .{ .status = .{ .fault = switch (err) {
+            if (err == error.OutOfMemory or err == error.TraceLimitExceeded) return err;
+            const fault_result: Result = .{ .status = .{ .fault = switch (err) {
                 error.OutOfGas => .out_of_gas,
                 error.StackUnderflow => .stack_underflow,
                 error.StackOverflow => .stack_overflow,
@@ -255,7 +272,11 @@ pub const Machine = struct {
                 error.UnsupportedOpcode => .unsupported_opcode,
                 else => .invalid_opcode,
             } }, .gas_remaining = 0, .output = try self.allocator.dupe(u8, "") };
+            errdefer self.allocator.free(fault_result.output);
+            if (self.hook) |hook| try hook.end(hook.context, input, fault_result);
+            return fault_result;
         };
+        errdefer self.allocator.free(outcome.output);
         switch (outcome.status) {
             .success => try self.world.commit(snap),
             else => {
@@ -265,10 +286,16 @@ pub const Machine = struct {
                 self.destroyed.shrinkRetainingCapacity(saved_destroyed);
             },
         }
+        if (self.hook) |hook| try hook.end(hook.context, input, outcome);
         return outcome;
     }
     /// Runs initcode and installs its returned code, rolling back failed creation.
     pub fn create(self: *Machine, creator: state.Address, address: state.Address, value: u256, initcode: []const u8, gas: u64, depth: u16) !Result {
+        return self.createKind(creator, address, value, initcode, gas, depth, .create);
+    }
+
+    /// Runs CREATE or CREATE2 initcode and records the final code-deposit gas.
+    fn createKind(self: *Machine, creator: state.Address, address: state.Address, value: u256, initcode: []const u8, gas: u64, depth: u16, kind: Kind) !Result {
         const snap = try self.world.snapshot();
         var open = true;
         errdefer if (open) self.world.revert(snap) catch |err| std.log.err("creation rollback failed: {s}", .{@errorName(err)});
@@ -288,7 +315,7 @@ pub const Machine = struct {
             try self.world.setBalance(creator, self.world.getBalance(creator) - value);
             try self.world.setBalance(address, std.math.add(u256, self.world.getBalance(address), value) catch return error.BalanceOverflow);
         }
-        var result = try self.run(.{ .code = initcode, .gas = gas, .caller = creator, .callee = address, .value = value, .depth = depth });
+        var result = try self.run(.{ .code = initcode, .gas = gas, .caller = creator, .callee = address, .value = value, .depth = depth, .kind = kind });
         if (result.status == .success) {
             const fork = if (self.environment) |env| env.fork else Fork.fulu;
             const invalid_code = result.output.len > 24_576 or (result.output.len != 0 and result.output[0] == 0xef and @intFromEnum(fork) >= @intFromEnum(Fork.london));
@@ -310,6 +337,7 @@ pub const Machine = struct {
             self.clearLogs(logs_len);
             self.refund = saved_refund;
         }
+        if (self.hook) |hook| hook.amend_create(hook.context, result);
         open = false;
         return result;
     }
@@ -661,7 +689,7 @@ const Frame = struct {
         _ = try self.machine.touchAccount(address);
         const child_gas = self.gas - self.gas / 64;
         try self.charge(child_gas);
-        var result = try self.machine.create(self.input.callee, address, value, initcode, child_gas, self.input.depth + 1);
+        var result = try self.machine.createKind(self.input.callee, address, value, initcode, child_gas, self.input.depth + 1, if (op == Op.CREATE2) .create2 else .create);
         defer result.deinit(self.machine.allocator);
         if (result.status == .fault) {
             if (result.status.fault == .unsupported_precompile) return error.UnsupportedPrecompile;
@@ -754,6 +782,13 @@ const Frame = struct {
             .data = self.memory.items[input_start..][0..@intCast(in_len)],
             .depth = self.input.depth + 1,
             .is_static = self.input.is_static or op == Op.STATICCALL,
+            .kind = switch (op) {
+                Op.CALL => .call,
+                Op.CALLCODE => .callcode,
+                Op.DELEGATECALL => .delegatecall,
+                else => .staticcall,
+            },
+            .target = target,
         });
         defer result.deinit(self.machine.allocator);
         if (result.status == .fault) {
@@ -781,6 +816,7 @@ const Frame = struct {
     /// Executes opcodes until STOP, RETURN, REVERT, or a deterministic fault.
     fn execute(self: *Frame) !Result {
         while (self.pc < self.input.code.len) {
+            if (self.machine.hook) |hook| try hook.step(hook.context);
             const op = self.input.code[self.pc];
             if (builtin.is_test) {
                 if (coverage.opcodes) |seen| seen[op] = true;

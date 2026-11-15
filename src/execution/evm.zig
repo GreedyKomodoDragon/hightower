@@ -12,6 +12,8 @@ pub const Fault = core.Fault;
 pub const Status = core.Status;
 pub const Result = core.Result;
 pub const Machine = core.Machine;
+pub const Hook = core.Hook;
+pub const Kind = core.Kind;
 pub const coverage = core.coverage;
 
 test {
