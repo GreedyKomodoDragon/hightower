@@ -7,9 +7,11 @@ import hashlib
 import hmac
 import json
 import pathlib
+import resource
 import secrets
 import socket
 import subprocess
+import signal
 import tempfile
 import threading
 import time
@@ -171,14 +173,22 @@ def run(geth_bin=None):
         (temporary / "config.json").write_text(json.dumps(config))
         events = (temporary / "events.jsonl").open("ab")
 
-        def start():
+        def start(ignore_file_size_signal=False):
             """Start one service process against the retained database."""
-            process = subprocess.Popen(
-                [str(ROOT / "zig-out/bin/hightower-execution"), "--config", str(temporary / "config.json")],
-                cwd=ROOT,
-                stdout=events,
-                stderr=subprocess.PIPE,
-            )
+            previous_handler = None
+            if ignore_file_size_signal and hasattr(signal, "SIGXFSZ"):
+                previous_handler = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+            try:
+                process = subprocess.Popen(
+                    [str(ROOT / "zig-out/bin/hightower-execution"), "--config", str(temporary / "config.json")],
+                    cwd=ROOT,
+                    stdout=events,
+                    stderr=subprocess.PIPE,
+                    restore_signals=not ignore_file_size_signal,
+                )
+            finally:
+                if previous_handler is not None:
+                    signal.signal(signal.SIGXFSZ, previous_handler)
             wait_ready(process, rpc_port)
             return process
 
@@ -368,6 +378,33 @@ def run(geth_bin=None):
             )
             assert failed.returncode != 0 and b"NotDir" in failed.stderr, failed.stderr
             assert secret.hex().encode() not in failed.stderr
+            if hasattr(resource, "prlimit") and hasattr(signal, "SIGXFSZ"):
+                process = start(ignore_file_size_signal=True)
+                latest = request(rpc_port, "eth_getBlockByNumber", ["latest", False])
+                parent_hash = latest["hash"]
+                bearer = token(secret)
+                choice = {"headBlockHash": parent_hash, "safeBlockHash": parent_hash, "finalizedBlockHash": parent_hash}
+                attributes = {"timestamp": hex(int(latest["timestamp"], 16) + 1), "prevRandao": ZERO, "suggestedFeeRecipient": "0x" + "00" * 20, "withdrawals": [], "parentBeaconBlockRoot": ZERO}
+                update = request(engine_port, "engine_forkchoiceUpdatedV3", [choice, attributes], bearer)
+                built = request(engine_port, "engine_getPayloadV5", [update["payloadId"]], bearer)
+                payload = built["executionPayload"]
+                assert request(engine_port, "engine_newPayloadV4", [payload, [], ZERO, built["executionRequests"]], bearer)["status"] == "VALID"
+                wal = next((temporary / "data").glob("wal_*.bin"))
+                wal_limit = wal.stat().st_size
+                resource.prlimit(process.pid, resource.RLIMIT_FSIZE, (wal_limit, wal_limit))
+                choice = {"headBlockHash": payload["blockHash"], "safeBlockHash": payload["blockHash"], "finalizedBlockHash": payload["blockHash"]}
+                try:
+                    request(engine_port, "engine_forkchoiceUpdatedV3", [choice, None], bearer)
+                    raise AssertionError("fork choice succeeded despite the forced WAL write failure")
+                except urllib.error.HTTPError as error:
+                    assert error.code == 400
+                try:
+                    get(rpc_port, "/health")
+                    raise AssertionError("health remained ready after the durable write failed")
+                except urllib.error.HTTPError as error:
+                    assert error.code == 503 and error.read() == b"storage unavailable\n"
+                status, metrics = get(rpc_port, "/metrics")
+                assert status == 200 and "hightower_execution_storage_healthy 0\n" in metrics
         finally:
             if process and not process.stderr.closed:
                 stop(process, secret)
