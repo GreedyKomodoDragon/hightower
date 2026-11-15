@@ -287,7 +287,7 @@ def run(geth_bin=None, peer_bin=None):
                 """Check public reads while Engine changes the canonical head."""
                 while not stop_reads.is_set():
                     try:
-                        assert request(rpc_port, "eth_blockNumber", []) in ("0x0", "0x1", "0x2")
+                        assert int(request(rpc_port, "eth_blockNumber", []), 16) <= (18 if peer_bin else 2)
                         request(rpc_port, "eth_getBalance", [SENDER, "latest"])
                     except Exception as error:
                         read_errors.append(error)
@@ -295,7 +295,7 @@ def run(geth_bin=None, peer_bin=None):
 
             reader = threading.Thread(target=read_during_import)
             reader.start()
-            for number in (1, 2):
+            for number in (range(1, 19) if peer_bin else (1, 2)):
                 bearer = token(secret)
                 raws = signed[:2] if number == 1 else [] if peer_bin else signed[2:]
                 hashes = [request(rpc_port, "eth_sendRawTransaction", [raw]) for raw in raws]
@@ -332,7 +332,7 @@ def run(geth_bin=None, peer_bin=None):
             reader.join(timeout=5)
             assert not read_errors, read_errors
             if peer_bin:
-                test_peer_catchup(temporary, config, secret, geth_rpc_port, peer_bin, head, 2, payload, built["executionRequests"])
+                test_peer_catchup(temporary, config, secret, geth_rpc_port, peer_bin, head, 18, payload, built["executionRequests"])
                 return
             assert request(rpc_port, "eth_getBalance", [SENDER, "latest"]) != "0x3b9aca00"
             logs = request(rpc_port, "eth_getLogs", [{"fromBlock": "0x1"}])
