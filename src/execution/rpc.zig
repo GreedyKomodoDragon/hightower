@@ -80,6 +80,7 @@ pub const Server = struct {
             }
             break :blk try self.handle(a, root);
         };
+        self.errors +|= responseErrorCount(result);
         const encoded = try std.json.Stringify.valueAlloc(a, result, .{});
         return allocator.dupe(u8, encoded);
     }
@@ -139,8 +140,22 @@ pub const Server = struct {
         const response = try self.dispatch(allocator, body);
         defer allocator.free(response);
         self.requests +|= 1;
-        if (std.mem.indexOf(u8, response, "\"error\"") != null) self.errors +|= 1;
         try request.respond(response, .{ .status = .ok, .keep_alive = false, .extra_headers = headers });
+    }
+
+    /// Counts JSON-RPC error members while ignoring nested result fields.
+    fn responseErrorCount(response: Value) u64 {
+        return switch (response) {
+            .object => @intFromBool(response.object.contains("error")),
+            .array => |items| blk: {
+                var count: u64 = 0;
+                for (items.items) |item| if (item == .object and item.object.contains("error")) {
+                    count +|= 1;
+                };
+                break :blk count;
+            },
+            else => 0,
+        };
     }
 
     /// Checks storage usability by reading its durable identity marker.

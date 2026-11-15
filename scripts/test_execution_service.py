@@ -287,6 +287,8 @@ def run(geth_bin=None):
             assert transfer_trace["output"].endswith("01") and "error" not in transfer_trace
             reverted_trace = request(rpc_port, "debug_traceTransaction", [hashes[2], {"tracer": "callTracer"}])
             assert reverted_trace["error"] == "execution reverted" and reverted_trace["output"].startswith("0x08c379a0")
+            metrics = get(rpc_port, "/metrics")[1]
+            assert "hightower_execution_rpc_errors_total 0\n" in metrics, metrics
             stop(process, secret)
             lines = (temporary / "events.jsonl").read_text().splitlines()
             if not geth_process:
@@ -393,11 +395,16 @@ def run(geth_bin=None):
                 wal_limit = wal.stat().st_size
                 resource.prlimit(process.pid, resource.RLIMIT_FSIZE, (wal_limit, wal_limit))
                 choice = {"headBlockHash": payload["blockHash"], "safeBlockHash": payload["blockHash"], "finalizedBlockHash": payload["blockHash"]}
+                failed_request = urllib.request.Request(
+                    f"http://127.0.0.1:{engine_port}/",
+                    json.dumps({"jsonrpc": "2.0", "id": 1, "method": "engine_forkchoiceUpdatedV3", "params": [choice, None]}).encode(),
+                    {"Content-Type": "application/json", "Authorization": bearer},
+                )
                 try:
-                    request(engine_port, "engine_forkchoiceUpdatedV3", [choice, None], bearer)
+                    urllib.request.urlopen(failed_request, timeout=5)
                     raise AssertionError("fork choice succeeded despite the forced WAL write failure")
                 except urllib.error.HTTPError as error:
-                    assert error.code == 400
+                    assert error.code == 400 and error.read() == b"bad request"
                 try:
                     get(rpc_port, "/health")
                     raise AssertionError("health remained ready after the durable write failed")
