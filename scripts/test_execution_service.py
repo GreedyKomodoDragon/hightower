@@ -156,6 +156,11 @@ def test_peer_catchup(temporary, config, secret, geth_rpc_port, peer_bin, head, 
         service = subprocess.Popen([str(ROOT / "zig-out/bin/hightower-execution"), "--config", str(fresh_path)], cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         wait_ready(service, fresh_rpc)
         assert request(fresh_rpc, "eth_getBlockByNumber", ["latest", False])["hash"] == head
+        assert request(fresh_engine, "hightower_executionSyncCursor", [], token(secret)) == hex(number)
+        worker = subprocess.Popen([peer_bin, "--config", str(fresh_path), "--peer", enode], cwd=ROOT, stdout=peer_log, stderr=peer_log)
+        time.sleep(2)
+        assert worker.poll() is None, f"execution peer failed after restart: {(temporary / 'execution-peer.log').read_text()}"
+        assert request(fresh_rpc, "eth_syncing", []) is False
     finally:
         if worker and worker.poll() is None:
             worker.terminate()

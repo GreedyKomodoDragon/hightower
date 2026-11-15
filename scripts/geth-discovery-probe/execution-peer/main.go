@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"time"
 
@@ -130,6 +131,9 @@ func run(configPath, peerURI string) error {
 	if !anchor.Number.IsUint64() {
 		return errors.New("checkpoint number exceeds supported range")
 	}
+	if anchor.Number.Uint64() == ^uint64(0) {
+		return errors.New("checkpoint has no supported successor")
+	}
 	secretHex, err := os.ReadFile(cfg.JWTSecret)
 	if err != nil {
 		return err
@@ -169,11 +173,26 @@ func run(configPath, peerURI string) error {
 }
 
 // serve checks the peer's chain identity, then imports bounded ascending ranges.
-func (w *worker) serve(peer *p2p.Peer, rw p2p.MsgReadWriter) error {
+func (w *worker) serve(peer *p2p.Peer, rw p2p.MsgReadWriter) (runErr error) {
+	defer func() {
+		if runErr != nil {
+			log.Printf("eth peer %s disconnected: %v", peer.ID(), runErr)
+		}
+	}()
 	s := &session{worker: w, peer: peer, rw: rw, next: w.anchor.Number.Uint64() + 1}
 	if err := s.handshake(); err != nil {
 		return err
 	}
+	log.Printf("eth/69 peer %s connected at block %d", peer.ID(), s.remote.LatestBlock)
+	var cursor string
+	if err := w.api.call("hightower_executionSyncCursor", []any{}, &cursor); err != nil {
+		return err
+	}
+	number, err := strconv.ParseUint(strings.TrimPrefix(cursor, "0x"), 16, 64)
+	if err != nil || number == ^uint64(0) {
+		return errors.New("invalid local execution sync cursor")
+	}
+	s.next = max(s.next, number+1)
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -243,6 +262,19 @@ func (s *session) reply(code uint64, id uint64, result any) error {
 			return err
 		}
 		if msg.Code != code {
+			if msg.Code == eth.BlockRangeUpdateMsg {
+				var update eth.BlockRangeUpdatePacket
+				if err := msg.Decode(&update); err != nil {
+					return err
+				}
+				if update.LatestBlock < update.EarliestBlock {
+					return errors.New("invalid peer block range")
+				}
+				s.remote.EarliestBlock = update.EarliestBlock
+				s.remote.LatestBlock = update.LatestBlock
+				s.remote.LatestBlockHash = update.LatestBlockHash
+				continue
+			}
 			if err := msg.Discard(); err != nil {
 				return err
 			}
@@ -354,13 +386,18 @@ func (s *session) syncRound() error {
 			return err
 		}
 		if !known {
-			block, err := s.body(header)
+			status, err := s.importHeader(header)
 			if err != nil {
 				return err
 			}
-			var status string
-			if err := s.worker.api.call("hightower_importExecutionBlock", []any{header.Hash(), "0x" + hex.EncodeToString(block)}, &status); err != nil {
-				return err
+			if status == "SYNCING" {
+				if err := s.fetchAncestors(header.ParentHash); err != nil {
+					return err
+				}
+				status, err = s.importHeader(header)
+				if err != nil {
+					return err
+				}
 			}
 			if status != "VALID" {
 				return errors.New("peer range has an unknown parent")
@@ -383,12 +420,8 @@ func (s *session) fetchAncestors(target common.Hash) error {
 		}
 		if known {
 			for i := len(pending) - 1; i >= 0; i-- {
-				block, err := s.body(pending[i])
+				status, err := s.importHeader(pending[i])
 				if err != nil {
-					return err
-				}
-				var status string
-				if err := s.worker.api.call("hightower_importExecutionBlock", []any{pending[i].Hash(), "0x" + hex.EncodeToString(block)}, &status); err != nil {
 					return err
 				}
 				if status != "VALID" {
@@ -412,6 +445,17 @@ func (s *session) fetchAncestors(target common.Hash) error {
 }
 
 var errDeepAncestry = errors.New("peer ancestry exceeds 16-block round")
+
+// importHeader fetches one body and asks Hightower to execute it durably.
+func (s *session) importHeader(header *types.Header) (string, error) {
+	block, err := s.body(header)
+	if err != nil {
+		return "", err
+	}
+	var status string
+	err = s.worker.api.call("hightower_importExecutionBlock", []any{header.Hash(), "0x" + hex.EncodeToString(block)}, &status)
+	return status, err
+}
 
 // call signs one structured Engine request and parses its result or error.
 func (a *api) call(method string, params []any, out any) error {

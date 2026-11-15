@@ -293,6 +293,10 @@ pub const Server = struct {
             const hash = try wire.fixed(32, params[0]);
             return .{ .bool = self.chain.byHash(hash) != null };
         }
+        if (std.mem.eql(u8, name, "hightower_executionSyncCursor")) {
+            if (params.len != 0) return error.InvalidParams;
+            return wire.number(a, self.chain.latest().header.number);
+        }
         if (std.mem.eql(u8, name, "hightower_importExecutionBlock")) {
             if (params.len != 2) return error.InvalidParams;
             const store = self.store orelse return error.MissingExecutionStore;
@@ -1081,6 +1085,8 @@ fn checkBuiltFork(fork: execution.transition.Fork) !void {
     try std.testing.expect(has_anchor.bool);
     const has_orphan = try server.method(temp, "hightower_hasExecutionBlock", &.{try wire.hex(temp, &orphan_hash)});
     try std.testing.expect(!has_orphan.bool);
+    const cursor = try server.method(temp, "hightower_executionSyncCursor", &.{});
+    try std.testing.expectEqualStrings(try wire.string(try wire.number(temp, chain.latest().header.number)), try wire.string(cursor));
 }
 
 test "every Engine fork builds, validates, and commits a payload" {

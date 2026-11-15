@@ -54,12 +54,18 @@ func TestHeaderRequest(t *testing.T) {
 			if err := list.Append(header); err != nil {
 				return
 			}
+			if err := p2p.Send(remote, eth.BlockRangeUpdateMsg, &eth.BlockRangeUpdatePacket{EarliestBlock: 0, LatestBlock: 9, LatestBlockHash: header.Hash()}); err != nil {
+				return
+			}
 			_ = p2p.Send(remote, eth.BlockHeadersMsg, &eth.BlockHeadersPacket{RequestId: request.RequestId, List: list})
 		}()
 		s := &session{rw: local}
 		got, err := s.header(origin)
 		if wrong && err == nil || !wrong && (err != nil || got.Hash() != header.Hash()) {
 			t.Fatalf("wrong=%v: header=%v error=%v", wrong, got, err)
+		}
+		if s.remote.LatestBlock != 9 {
+			t.Fatalf("announced latest block %d, want 9", s.remote.LatestBlock)
 		}
 		local.Close()
 		remote.Close()
