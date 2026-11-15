@@ -50,11 +50,14 @@ test "trusted execution checkpoint verifies its header and complete fixture stat
 
 test "peer block verifies requested hash and requests before retention" {
     const a = std.testing.allocator;
+    const checkpoint_number: u64 = 128;
+    const first_peer_number = checkpoint_number + 1;
     var world = execution.state.State.init(a);
     defer world.deinit();
     var parent = std.mem.zeroes(execution.Header);
     parent.gas_limit = 30_000_000;
     parent.base_fee_per_gas = 1;
+    parent.number = checkpoint_number;
     parent.state_root = try world.stateRoot();
     var chain = try execution.chain.Chain.init(a, 1, .osaka, parent, &world);
     defer chain.deinit();
@@ -63,7 +66,7 @@ test "peer block verifies requested hash and requests before retention" {
     try std.testing.expectError(error.PeerBlockTooLarge, execution.peer_sync.importBlock(a, &chain, null, .{0} ** 32, oversized));
     var header = parent;
     header.parent_hash = chain.latest().hash;
-    header.number = 1;
+    header.number = first_peer_number;
     header.timestamp = 12;
     header.transactions_root = try execution.trie.orderedRoot(a, &.{});
     header.receipts_root = try execution.receiptsRoot(a, &.{});
@@ -71,7 +74,7 @@ test "peer block verifies requested hash and requests before retention" {
     header.requests_hash = try execution.transition.requestsHash(a, &.{});
     var trial = try world.clone(a);
     defer trial.deinit();
-    try execution.transition.applySystemTransitions(a, &trial, .{ .fork = .osaka, .chain_id = 1, .coinbase = header.fee_recipient, .number = 1, .timestamp = 12, .gas_limit = header.gas_limit, .base_fee = header.base_fee_per_gas, .blob_base_fee = 1 }, header.parent_hash, header.parent_beacon_block_root);
+    try execution.transition.applySystemTransitions(a, &trial, .{ .fork = .osaka, .chain_id = 1, .coinbase = header.fee_recipient, .number = first_peer_number, .timestamp = 12, .gas_limit = header.gas_limit, .base_fee = header.base_fee_per_gas, .blob_base_fee = 1 }, header.parent_hash, header.parent_beacon_block_root);
     header.state_root = try trial.stateRoot();
     const raw = try execution.encode(a, execution.Block{ .header = header, .transactions = &.{}, .withdrawals = &.{} });
     defer a.free(raw);
@@ -108,6 +111,7 @@ test "peer block verifies requested hash and requests before retention" {
     defer recovered.deinit();
     try reopened.recover(&recovered, &recovered_world);
     try std.testing.expectEqualSlices(u8, &hash, &recovered.latest().hash);
+    try std.testing.expectEqual(first_peer_number, recovered.latest().header.number);
     try std.testing.expect(recovered.byHash(bad_hash) == null);
     try std.testing.expect(recovered.byHash(corrupt_hash) == null);
 }
