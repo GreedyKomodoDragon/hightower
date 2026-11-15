@@ -38,6 +38,7 @@ pub const BlockContext = struct {
     max_blobs_per_block: u64 = 21,
     expected_blob_hashes: []const execution.Hash = &.{},
     expected_requests: ?[]const []const u8 = null,
+    verify_requests_hash: bool = false,
 };
 
 /// Owns a receipt's logs and return bytes until deinit.
@@ -585,6 +586,8 @@ pub fn applyBlock(allocator: std.mem.Allocator, world: *state.State, block: Bloc
     if (block.expected_requests) |expected| {
         if (requests.len != expected.len) return error.InvalidExecutionRequests;
         for (requests, expected) |actual, claimed| if (!std.mem.eql(u8, actual, claimed)) return error.InvalidExecutionRequests;
+    }
+    if (block.expected_requests != null or block.verify_requests_hash) {
         const requests_hash = try requestsHash(arena.allocator(), requests);
         if (!std.mem.eql(u8, &requests_hash, &header.requests_hash)) return error.InvalidExecutionRequests;
     }

@@ -48,6 +48,45 @@ test "trusted execution checkpoint verifies its header and complete fixture stat
     try std.testing.expectEqual(header.state_root, try world.stateRoot());
 }
 
+test "peer block verifies requested hash and requests before retention" {
+    const a = std.testing.allocator;
+    var world = execution.state.State.init(a);
+    defer world.deinit();
+    var parent = std.mem.zeroes(execution.Header);
+    parent.gas_limit = 30_000_000;
+    parent.base_fee_per_gas = 1;
+    parent.state_root = try world.stateRoot();
+    var chain = try execution.chain.Chain.init(a, 1, .osaka, parent, &world);
+    defer chain.deinit();
+    var header = parent;
+    header.parent_hash = chain.latest().hash;
+    header.number = 1;
+    header.timestamp = 12;
+    header.transactions_root = try execution.trie.orderedRoot(a, &.{});
+    header.receipts_root = try execution.receiptsRoot(a, &.{});
+    header.withdrawals_root = try execution.trie.orderedRoot(a, &.{});
+    header.requests_hash = try execution.transition.requestsHash(a, &.{});
+    var trial = try world.clone(a);
+    defer trial.deinit();
+    try execution.transition.applySystemTransitions(a, &trial, .{ .fork = .osaka, .chain_id = 1, .coinbase = header.fee_recipient, .number = 1, .timestamp = 12, .gas_limit = header.gas_limit, .base_fee = header.base_fee_per_gas, .blob_base_fee = 1 }, header.parent_hash, header.parent_beacon_block_root);
+    header.state_root = try trial.stateRoot();
+    const raw = try execution.encode(a, execution.Block{ .header = header, .transactions = &.{}, .withdrawals = &.{} });
+    defer a.free(raw);
+    const hash = try execution.transition.headerHash(a, .osaka, header);
+    try std.testing.expectError(error.UnrequestedPeerBlock, execution.peer_sync.importBlock(a, &chain, null, .{0} ** 32, raw));
+    try std.testing.expectEqual(@as(usize, 1), chain.records.items.len);
+    try execution.peer_sync.importBlock(a, &chain, null, hash, raw);
+    try std.testing.expectEqual(@as(usize, 2), chain.records.items.len);
+    try std.testing.expectEqualSlices(u8, &chain.latest().hash, &header.parent_hash);
+    var bad = header;
+    bad.requests_hash = .{0} ** 32;
+    const bad_raw = try execution.encode(a, execution.Block{ .header = bad, .transactions = &.{}, .withdrawals = &.{} });
+    defer a.free(bad_raw);
+    const bad_hash = try execution.transition.headerHash(a, .osaka, bad);
+    try std.testing.expectError(error.InvalidExecutionRequests, execution.peer_sync.importBlock(a, &chain, null, bad_hash, bad_raw));
+    try std.testing.expectEqual(@as(usize, 2), chain.records.items.len);
+}
+
 /// Serializes one valid JSON-RPC test request from structured parameters.
 fn rpcRequest(a: std.mem.Allocator, id: usize, method: []const u8, params: []const std.json.Value) ![]u8 {
     return std.json.Stringify.valueAlloc(a, .{ .jsonrpc = "2.0", .id = id, .method = method, .params = params }, .{});
