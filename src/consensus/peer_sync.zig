@@ -313,6 +313,9 @@ test "two peers catch up from an anchor and resume after restart" {
     const second = try fixtures.decodeBlock(allocator, fixtures.fork_choice_heavier_blocks[1]);
     defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, second);
     try std.testing.expectEqual(@as(usize, 2), try source_sync.importBlocks(null, &.{ first, second }, 1, 2));
+    const third = try fixtures.decodeBlock(allocator, fixtures.fork_choice_heavier_blocks[2]);
+    defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, third);
+    try std.testing.expectEqual(@as(usize, 1), try source_sync.importBlocks(null, &.{third}, 3, 1));
     const ingress_config = ingress.Config{ .genesis_validators_root = state.genesis_validators_root, .fulu_version = state.fork.current_version, .fulu_epoch = 0, .blob_schedule = &@import("helpers.zig").BLOB_SCHEDULE };
     const digest = try ingress_config.digestAtSlot(0);
     const Gates = struct {
@@ -329,19 +332,28 @@ test "two peers catch up from an anchor and resume after restart" {
     const aggregate_gate = ingress.AggregateValidation{ .context = &marker, .validate = Gates.aggregate };
     var source_gossip = try gossip.Service.init(allocator, ingress_config, digest, &.{}, 1, 3, block_gate, attestation_gate, aggregate_gate, null);
     defer source_gossip.deinit();
-    var target_gossip = try gossip.Service.init(allocator, ingress_config, digest, &.{}, 1, 3, block_gate, attestation_gate, aggregate_gate, null);
+    var target_gossip = try gossip.Service.init(allocator, ingress_config, digest, &.{}, 2, 3, block_gate, attestation_gate, aggregate_gate, null);
     defer target_gossip.deinit();
     var fork_id = [_]u8{0} ** 16;
     @memcpy(fork_id[0..4], &digest);
     const local = enr.Local{ .sequence = 1, .ip = .{ 127, 0, 0, 1 }, .udp_port = 0, .tcp_port = 0, .fork_id = fork_id, .next_fork_digest = .{0} ** 4, .custody_group_count = 128 };
     const metadata = control.MetaData{ .seq_number = 1, .attnets = .{ .data = [_]bool{false} ** 64 }, .syncnets = .{ .data = [_]bool{false} ** 4 }, .custody_group_count = 128 };
-    const source_status = control.Status{ .fork_digest = digest, .finalized_root = anchor_root, .finalized_epoch = 0, .head_root = source_sync.head, .head_slot = 2, .earliest_available_slot = 1 };
+    const source_status = control.Status{ .fork_digest = digest, .finalized_root = anchor_root, .finalized_epoch = 0, .head_root = source_sync.head, .head_slot = 3, .earliest_available_slot = 1 };
     const target_status = control.Status{ .fork_digest = digest, .finalized_root = anchor_root, .finalized_epoch = 0, .head_root = anchor_root, .head_slot = 0, .earliest_available_slot = 0 };
     var source_service = try service.Service.init(allocator, io, try Ecdsa.KeyPair.generateDeterministic([_]u8{131} ** 32), local, 2, &source_gossip, source_status, metadata);
     defer source_service.deinit();
     var target_service = try service.Service.init(allocator, io, try Ecdsa.KeyPair.generateDeterministic([_]u8{132} ** 32), local, 2, &target_gossip, target_status, metadata);
     defer target_service.deinit();
-    source_service.setRoutes(.{ .blocks = .{ .context = &source_sync, .by_root = Coordinator.byRoot, .root_at_slot = Coordinator.atSlot }, .columns = &source_columns, .canonical = .{ .context = &source_sync, .root_at_slot = Coordinator.atSlot } });
+    const BadBlock = struct {
+        /// Serve a block with a bad signature while preserving its requested message root.
+        fn byRoot(context: *anyopaque, root: fulu.Root) ?fulu.SignedBeaconBlock {
+            var signed = Coordinator.byRoot(context, root) orelse return null;
+            const sync: *Coordinator = @ptrCast(@alignCast(context));
+            if (signed.message.slot == 3 and !std.mem.eql(u8, &root, &sync.head)) signed.signature[0] ^= 1;
+            return signed;
+        }
+    };
+    source_service.setRoutes(.{ .blocks = .{ .context = &source_sync, .by_root = BadBlock.byRoot, .root_at_slot = Coordinator.atSlot }, .columns = &source_columns, .canonical = .{ .context = &source_sync, .root_at_slot = Coordinator.atSlot } });
     const uri = try source_service.localUri();
     defer allocator.free(uri);
     try target_service.addBootstrap(uri);
@@ -373,23 +385,71 @@ test "two peers catch up from an anchor and resume after restart" {
     defer restored.deinit();
     var resumed = Coordinator{ .allocator = allocator, .io = io, .dir = target_dir.dir, .store = &restored, .columns = &target_columns, .settings = &setup, .engine = target_engine.interface(), .head = try fork_choice.getHeadCached(&restored), .next_slot = 2 };
     try std.testing.expectEqual(@as(usize, 1), try resumed.step(try target_service.activePeer(), 1));
+    try std.testing.expectEqual(@as(usize, 1), try resumed.step(try target_service.activePeer(), 1));
     try std.testing.expectEqual(source_sync.head, resumed.head);
-    try std.testing.expectEqual(second.message.body.execution_payload.block_hash, target_engine.head.?);
+    try std.testing.expectEqual(third.message.body.execution_payload.block_hash, target_engine.head.?);
     try std.testing.expectEqual(try merkle.HashTreeRoot(allocator, source_chain.block_states.get(source_sync.head).?), try merkle.HashTreeRoot(allocator, restored.block_states.get(resumed.head).?));
     resumed.next_slot = 1;
     try std.testing.expectEqual(@as(usize, 0), try resumed.step(try target_service.activePeer(), 1));
-    try std.testing.expectEqual(@as(u64, 3), resumed.next_slot);
+    try std.testing.expectEqual(@as(u64, 4), resumed.next_slot);
     try std.testing.expectError(error.InvalidRequest, resumed.step(try target_service.activePeer(), 17));
     try std.testing.expectEqual(@as(usize, 0), try resumed.step(try target_service.activePeer(), 16));
-    try std.testing.expectEqual(@as(u64, 19), resumed.next_slot);
+    try std.testing.expectEqual(@as(u64, 20), resumed.next_slot);
     try std.testing.expectEqual(@as(usize, 0), try resumed.step(try target_service.activePeer(), 16));
-    try std.testing.expectEqual(@as(u64, 35), resumed.next_slot);
+    try std.testing.expectEqual(@as(u64, 36), resumed.next_slot);
     const competing = try fixtures.decodeBlock(allocator, fixtures.fork_choice_heavier_blocks[3]);
     defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, competing);
     try std.testing.expectEqual(@as(usize, 1), try source_sync.importBlocks(null, &.{competing}, competing.message.slot, 1));
     const competing_root = try merkle.HashTreeRoot(allocator, competing.message);
+    var backup_gossip = try gossip.Service.init(allocator, ingress_config, digest, &.{}, 1, 3, block_gate, attestation_gate, aggregate_gate, null);
+    defer backup_gossip.deinit();
+    var backup_status = source_status;
+    backup_status.head_root = competing_root;
+    backup_status.head_slot = competing.message.slot;
+    var backup_service = try service.Service.init(allocator, io, try Ecdsa.KeyPair.generateDeterministic([_]u8{133} ** 32), local, 2, &backup_gossip, backup_status, metadata);
+    defer backup_service.deinit();
+    const Backup = struct {
+        sync: *Coordinator,
+        competing_root: fulu.Root,
+        /// Serve retained blocks from the competing branch.
+        fn byRoot(context: *anyopaque, root: fulu.Root) ?fulu.SignedBeaconBlock {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return Coordinator.byRoot(self.sync, root);
+        }
+        /// Advertise the competing root at its slot.
+        fn atSlot(context: *anyopaque, slot: u64) ?fulu.Root {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (slot == 3) return self.competing_root;
+            return Coordinator.atSlot(self.sync, slot);
+        }
+    };
+    var backup = Backup{ .sync = &source_sync, .competing_root = competing_root };
+    backup_service.setRoutes(.{ .blocks = .{ .context = &backup, .by_root = Backup.byRoot, .root_at_slot = Backup.atSlot }, .columns = &source_columns, .canonical = .{ .context = &source_sync, .root_at_slot = Coordinator.atSlot } });
+    const backup_uri = try backup_service.localUri();
+    defer allocator.free(backup_uri);
+    try target_service.addBootstrap(backup_uri);
+    var backup_worker = Worker{ .source = &backup_service };
+    const backup_thread = try std.Thread.spawn(.{}, Worker.run, .{&backup_worker});
+    defer {
+        backup_worker.stop.store(true, .release);
+        backup_thread.join();
+    }
+    const backup_deadline = std.Io.Clock.awake.now(io).nanoseconds + 20 * std.time.ns_per_s;
+    while (target_service.peerAt(1) == null and std.Io.Clock.awake.now(io).nanoseconds < backup_deadline) try target_service.step(10);
+    try std.testing.expect(target_service.peerAt(1) != null);
+    try std.testing.expectError(error.InvalidSignature, resumed.importHead(try target_service.activePeer(), competing_root));
+    try std.testing.expectEqual(third.message.body.execution_payload.block_hash, target_engine.head.?);
+    try std.testing.expectEqual(third.message.body.execution_payload.block_hash, restored.block_states.get(resumed.head).?.latest_execution_payload_header.block_hash);
+    target_service.dropPeer(0);
+    try std.testing.expectEqual(backup_service.discovery_service.local_record.node_id, (try target_service.activePeer()).connection.peer_id);
     try std.testing.expectEqual(@as(usize, 1), try resumed.importHead(try target_service.activePeer(), competing_root));
     try std.testing.expect(restored.block_states.contains(competing_root));
     try std.testing.expectEqual(source_sync.head, resumed.head);
+    try std.testing.expectEqual(third.message.body.execution_payload.block_hash, target_engine.head.?);
+    var restarted = try snapshot.loadForkChoiceStore(allocator, io, target_dir.dir, "fork-choice.bin");
+    defer restarted.deinit();
+    try std.testing.expect(restarted.block_states.contains(competing_root));
+    try std.testing.expectEqual(resumed.head, try fork_choice.getHeadCached(&restarted));
     if (worker.err) |err| return err;
+    if (backup_worker.err) |err| return err;
 }
