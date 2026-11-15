@@ -63,6 +63,16 @@ def get(port_number, path):
         return response.status, response.read().decode()
 
 
+def stop(process, secret):
+    """Stop a child and reject any stderr disclosure of its JWT secret."""
+    if process.poll() is None:
+        process.terminate()
+        process.wait(timeout=5)
+    logs = process.stderr.read()
+    process.stderr.close()
+    assert secret.hex().encode() not in logs, logs
+
+
 def wait_ready(process, port_number):
     """Wait until the public listener accepts TCP connections."""
     for _ in range(100):
@@ -267,9 +277,7 @@ def run(geth_bin=None):
             assert transfer_trace["output"].endswith("01") and "error" not in transfer_trace
             reverted_trace = request(rpc_port, "debug_traceTransaction", [hashes[2], {"tracer": "callTracer"}])
             assert reverted_trace["error"] == "execution reverted" and reverted_trace["output"].startswith("0x08c379a0")
-            process.terminate()
-            process.wait(timeout=5)
-            process.stderr.close()
+            stop(process, secret)
             lines = (temporary / "events.jsonl").read_text().splitlines()
             if not geth_process:
                 assert len(lines) == 2
@@ -331,9 +339,7 @@ def run(geth_bin=None):
                 assert len(lines) == 2
                 assert json.loads(lines[1])["transaction_hash"] == hashes[1]
             assert request(rpc_port, "eth_blockNumber", []) == "0x3"
-            process.terminate()
-            process.wait(timeout=5)
-            process.stderr.close()
+            stop(process, secret)
             for changed, expected in (("chainId", "ExecutionIdentityMismatch"), ("gasLimit", "GenesisMismatch"), ("slotNumber", "UnsupportedGenesisHeaderField")):
                 wrong = json.loads((temporary / "genesis.json").read_text())
                 if changed == "chainId":
@@ -363,11 +369,8 @@ def run(geth_bin=None):
             assert failed.returncode != 0 and b"NotDir" in failed.stderr, failed.stderr
             assert secret.hex().encode() not in failed.stderr
         finally:
-            if process and process.poll() is None:
-                process.terminate()
-                process.wait(timeout=5)
-            if process:
-                process.stderr.close()
+            if process and not process.stderr.closed:
+                stop(process, secret)
             if geth_process and geth_process.poll() is None:
                 geth_process.terminate()
                 geth_process.wait(timeout=5)
