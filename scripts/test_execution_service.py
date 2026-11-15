@@ -2,6 +2,7 @@
 """Exercise the production Engine and public RPC listeners across recovery."""
 
 import base64
+import argparse
 import hashlib
 import hmac
 import json
@@ -74,7 +75,36 @@ def wait_ready(process, port_number):
     raise AssertionError("execution service did not start")
 
 
-def run():
+def compare_block(hightower_port, geth_port, number):
+    """Compare canonical block, receipts, and logs with mismatch coordinates."""
+    tag = hex(number)
+    left = request(hightower_port, "eth_getBlockByNumber", [tag, False])
+    right = request(geth_port, "eth_getBlockByNumber", [tag, False])
+    for field in ("hash", "stateRoot", "receiptsRoot", "gasUsed", "transactions"):
+        if left[field] != right[field]:
+            raise AssertionError(f"block {number} {field} mismatch: Hightower={left[field]!r}; Geth={right[field]!r}")
+    for index, tx_hash in enumerate(left["transactions"]):
+        lreceipt = request(hightower_port, "eth_getTransactionReceipt", [tx_hash])
+        rreceipt = request(geth_port, "eth_getTransactionReceipt", [tx_hash])
+        for field in ("status", "gasUsed", "cumulativeGasUsed"):
+            if lreceipt[field] != rreceipt[field]:
+                raise AssertionError(f"block {number} transaction {index} {tx_hash} {field} mismatch: Hightower={lreceipt!r}; Geth={rreceipt!r}")
+        for log_index, (llog, rlog) in enumerate(zip(lreceipt["logs"], rreceipt["logs"])):
+            for field in ("address", "topics", "data"):
+                left_value, right_value = llog[field], rlog[field]
+                equal = left_value.lower() == right_value.lower() if isinstance(left_value, str) else left_value == right_value
+                if not equal:
+                    raise AssertionError(f"block {number} transaction {index} log {log_index} {field} mismatch: Hightower={llog!r}; Geth={rlog!r}")
+        if len(lreceipt["logs"]) != len(rreceipt["logs"]):
+            raise AssertionError(f"block {number} transaction {index} log count mismatch: Hightower={lreceipt!r}; Geth={rreceipt!r}")
+    for method, params in (("eth_getBalance", [SENDER, tag]), ("eth_getStorageAt", [COUNTER, "0x0", tag])):
+        lresult = request(hightower_port, method, params)
+        rresult = request(geth_port, method, params)
+        if lresult.lower() != rresult.lower():
+            raise AssertionError(f"block {number} {method} mismatch: Hightower={lresult!r}; Geth={rresult!r}")
+
+
+def run(geth_bin=None):
     """Import two blocks, query canonical RPC, restart, and query again."""
     with tempfile.TemporaryDirectory() as directory:
         temporary = pathlib.Path(directory)
@@ -92,6 +122,33 @@ def run():
         signed = json.loads((ROOT / "src/execution/fixtures/solidity/reference.json").read_text())["signedTransactions"]
         engine_port, rpc_port = port(), port()
         assert engine_port != rpc_port
+        geth_process = None
+        geth_log = None
+        geth_rpc_port = None
+        geth_engine_port = None
+        if geth_bin:
+            version = subprocess.check_output([geth_bin, "version"], text=True)
+            if "1.17.10" not in version:
+                raise AssertionError(f"expected pinned Geth v1.17.10, got {version.splitlines()[0]}")
+            geth_rpc_port, geth_engine_port = port(), port()
+            geth_data = temporary / "geth-data"
+            subprocess.run([geth_bin, "--datadir", str(geth_data), "init", str(temporary / "genesis.json")], check=True, capture_output=True, timeout=30)
+            geth_log = (temporary / "geth.log").open("wb")
+            geth_process = subprocess.Popen(
+                [geth_bin, "--datadir", str(geth_data), "--networkid", "1", "--authrpc.addr", "127.0.0.1", "--authrpc.port", str(geth_engine_port), "--authrpc.vhosts", "*", "--authrpc.jwtsecret", str(temporary / "jwt.hex"), "--http", "--http.addr", "127.0.0.1", "--http.port", str(geth_rpc_port), "--http.api", "eth,net,web3", "--nodiscover", "--maxpeers", "0"],
+                cwd=ROOT,
+                stdout=subprocess.DEVNULL,
+                stderr=geth_log,
+            )
+            for _ in range(100):
+                assert geth_process.poll() is None, "Geth exited during startup"
+                try:
+                    request(geth_rpc_port, "eth_blockNumber", [])
+                    break
+                except (OSError, urllib.error.URLError, AssertionError):
+                    time.sleep(0.1)
+            else:
+                raise AssertionError("Geth RPC did not start")
         config = {
             "genesis": str(temporary / "genesis.json"),
             "data_dir": str(temporary / "data"),
@@ -115,8 +172,9 @@ def run():
             wait_ready(process, rpc_port)
             return process
 
-        process = start()
+        process = None
         try:
+            process = start()
             status, health = get(rpc_port, "/health")
             assert status == 200 and health == "ok\n", (status, health)
             assert request(rpc_port, "eth_syncing", []) is False
@@ -146,6 +204,7 @@ def run():
             assert anchor["mixHash"] == genesis["mixHash"] and anchor["miner"] == genesis["coinbase"]
             assert request(rpc_port, "eth_getStorageAt", ["0x" + "aa" * 20, "0x1", "latest"]) == "0x" + "00" * 31 + "02"
             head = anchor["hash"]
+            safe_hash = anchor["hash"]
             stop_reads = threading.Event()
             read_errors = []
 
@@ -165,7 +224,7 @@ def run():
                 bearer = token(secret)
                 raws = signed[:2] if number == 1 else signed[2:]
                 hashes = [request(rpc_port, "eth_sendRawTransaction", [raw]) for raw in raws]
-                choice = {"headBlockHash": head, "safeBlockHash": head, "finalizedBlockHash": head}
+                choice = {"headBlockHash": head, "safeBlockHash": safe_hash if geth_process else head, "finalizedBlockHash": safe_hash if geth_process else head}
                 attributes = {
                     "timestamp": hex(number),
                     "prevRandao": ZERO,
@@ -179,11 +238,19 @@ def run():
                 payload = built["executionPayload"]
                 verdict = request(engine_port, "engine_newPayloadV4", [payload, [], ZERO, built["executionRequests"]], bearer)
                 assert verdict["status"] == "VALID"
+                if geth_process:
+                    geth_verdict = request(geth_engine_port, "engine_newPayloadV4", [payload, [], ZERO, built["executionRequests"]], bearer)
+                    assert geth_verdict["status"] == "VALID", f"Geth rejected block {number}: {geth_verdict!r}; Hightower payload={payload!r}"
+                    geth_choice = {"headBlockHash": payload["blockHash"], "safeBlockHash": safe_hash if geth_process else payload["blockHash"], "finalizedBlockHash": safe_hash if geth_process else payload["blockHash"]}
+                    selected = request(geth_engine_port, "engine_forkchoiceUpdatedV3", [geth_choice, None], bearer)
+                    assert selected["payloadStatus"]["status"] == "VALID", f"Geth did not select block {number}: {selected!r}"
                 head = payload["blockHash"]
-                choice = {"headBlockHash": head, "safeBlockHash": head, "finalizedBlockHash": head}
+                choice = {"headBlockHash": head, "safeBlockHash": safe_hash if geth_process else head, "finalizedBlockHash": safe_hash if geth_process else head}
                 assert request(engine_port, "engine_forkchoiceUpdatedV3", [choice, None], bearer)["payloadStatus"]["status"] == "VALID"
                 assert request(rpc_port, "eth_blockNumber", []) == hex(number)
                 assert request(rpc_port, "eth_getBlockByNumber", [hex(number), False])["hash"] == head
+                if geth_process:
+                    compare_block(rpc_port, geth_rpc_port, number)
                 for tx_hash in hashes:
                     assert request(rpc_port, "eth_getTransactionReceipt", [tx_hash])["blockHash"] == head
             stop_reads.set()
@@ -204,15 +271,18 @@ def run():
             process.wait(timeout=5)
             process.stderr.close()
             lines = (temporary / "events.jsonl").read_text().splitlines()
-            assert len(lines) == 2
-            minted = json.loads(lines[0])
-            assert minted["contract"] == CONTRACT and minted["amount"].endswith("03e8")
-            event = json.loads(lines[1])
-            assert event["id"] == f"{head}:0"
-            assert event["contract"] == CONTRACT and event["from"] == SENDER
-            assert event["to"] == "0x" + "44" * 20 and event["amount"].endswith("4b")
-            assert event["transaction_hash"] == hashes[1]
-            assert event["block_number"] == 2 and event["log_index"] == 0
+            if not geth_process:
+                assert len(lines) == 2
+                minted = json.loads(lines[0])
+                assert minted["contract"] == CONTRACT and minted["amount"].endswith("03e8")
+                event = json.loads(lines[1])
+                assert event["id"] == f"{head}:0"
+                assert event["contract"] == CONTRACT and event["from"] == SENDER
+                assert event["to"] == "0x" + "44" * 20 and event["amount"].endswith("4b")
+                assert event["transaction_hash"] == hashes[1]
+                assert event["block_number"] == 2 and event["log_index"] == 0
+            else:
+                assert lines == []
             process = start()
             status, health = get(rpc_port, "/health")
             assert status == 200 and health == "ok\n", (status, health)
@@ -222,17 +292,44 @@ def run():
             assert request(rpc_port, "eth_getLogs", [{"fromBlock": "0x1"}]) == logs
             assert request(rpc_port, "eth_getTransactionReceipt", [hashes[1]])["status"] == "0x1"
             assert request(rpc_port, "debug_traceTransaction", [hashes[1], {"tracer": "callTracer"}])["output"] == transfer_trace["output"]
-            assert len((temporary / "events.jsonl").read_text().splitlines()) == 2
+            assert len((temporary / "events.jsonl").read_text().splitlines()) == (0 if geth_process else 2)
             bearer = token(secret)
-            choice = {"headBlockHash": head, "safeBlockHash": head, "finalizedBlockHash": head}
+            parent_head = head
+            choice = {"headBlockHash": head, "safeBlockHash": safe_hash if geth_process else head, "finalizedBlockHash": safe_hash if geth_process else head}
             attributes = {"timestamp": "0x3", "prevRandao": ZERO, "suggestedFeeRecipient": "0x" + "00" * 20, "withdrawals": [], "parentBeaconBlockRoot": ZERO}
             update = request(engine_port, "engine_forkchoiceUpdatedV3", [choice, attributes], bearer)
             built = request(engine_port, "engine_getPayloadV5", [update["payloadId"]], bearer)
             payload = built["executionPayload"]
             assert request(engine_port, "engine_newPayloadV4", [payload, [], ZERO, built["executionRequests"]], bearer)["status"] == "VALID"
+            if geth_process:
+                assert request(geth_engine_port, "engine_newPayloadV4", [payload, [], ZERO, built["executionRequests"]], bearer)["status"] == "VALID"
             head = payload["blockHash"]
-            choice = {"headBlockHash": head, "safeBlockHash": head, "finalizedBlockHash": head}
+            choice = {"headBlockHash": head, "safeBlockHash": safe_hash if geth_process else head, "finalizedBlockHash": safe_hash if geth_process else head}
             assert request(engine_port, "engine_forkchoiceUpdatedV3", [choice, None], bearer)["payloadStatus"]["status"] == "VALID"
+            if geth_process:
+                assert request(geth_engine_port, "engine_forkchoiceUpdatedV3", [choice, None], bearer)["payloadStatus"]["status"] == "VALID"
+                compare_block(rpc_port, geth_rpc_port, 3)
+                orphaned_head = head
+                choice = {"headBlockHash": parent_head, "safeBlockHash": safe_hash, "finalizedBlockHash": safe_hash}
+                update = request(engine_port, "engine_forkchoiceUpdatedV3", [choice, {"timestamp": "0x4", "prevRandao": ZERO, "suggestedFeeRecipient": "0x" + "00" * 20, "withdrawals": [], "parentBeaconBlockRoot": ZERO}], bearer)
+                alternate = request(engine_port, "engine_getPayloadV5", [update["payloadId"]], bearer)
+                alternate_payload = alternate["executionPayload"]
+                assert request(engine_port, "engine_newPayloadV4", [alternate_payload, [], ZERO, alternate["executionRequests"]], bearer)["status"] == "VALID"
+                assert request(geth_engine_port, "engine_newPayloadV4", [alternate_payload, [], ZERO, alternate["executionRequests"]], bearer)["status"] == "VALID"
+                alternate_head = alternate_payload["blockHash"]
+                choice = {"headBlockHash": alternate_head, "safeBlockHash": safe_hash, "finalizedBlockHash": safe_hash}
+                assert request(engine_port, "engine_forkchoiceUpdatedV3", [choice, None], bearer)["payloadStatus"]["status"] == "VALID"
+                assert request(geth_engine_port, "engine_forkchoiceUpdatedV3", [choice, None], bearer)["payloadStatus"]["status"] == "VALID"
+                choice = {"headBlockHash": alternate_head, "safeBlockHash": alternate_head, "finalizedBlockHash": alternate_head}
+                assert request(engine_port, "engine_forkchoiceUpdatedV3", [choice, None], bearer)["payloadStatus"]["status"] == "VALID"
+                assert request(geth_engine_port, "engine_forkchoiceUpdatedV3", [choice, None], bearer)["payloadStatus"]["status"] == "VALID"
+                assert orphaned_head != alternate_head
+                assert request(rpc_port, "eth_getBlockByNumber", ["0x3", False])["hash"] == alternate_head
+                assert request(geth_rpc_port, "eth_getBlockByNumber", ["0x3", False])["hash"] == alternate_head
+                compare_block(rpc_port, geth_rpc_port, 3)
+                lines = (temporary / "events.jsonl").read_text().splitlines()
+                assert len(lines) == 2
+                assert json.loads(lines[1])["transaction_hash"] == hashes[1]
             assert request(rpc_port, "eth_blockNumber", []) == "0x3"
             process.terminate()
             process.wait(timeout=5)
@@ -255,12 +352,32 @@ def run():
                     timeout=5,
                 )
                 assert failed.returncode != 0 and expected.encode() in failed.stderr, failed.stderr
+            invalid_storage = dict(config, data_dir=str(temporary / "genesis.json"))
+            (temporary / "invalid-storage-config.json").write_text(json.dumps(invalid_storage))
+            failed = subprocess.run(
+                [str(ROOT / "zig-out/bin/hightower-execution"), "--config", str(temporary / "invalid-storage-config.json")],
+                cwd=ROOT,
+                capture_output=True,
+                timeout=5,
+            )
+            assert failed.returncode != 0 and b"NotDir" in failed.stderr, failed.stderr
+            assert secret.hex().encode() not in failed.stderr
         finally:
-            process.terminate()
-            process.wait(timeout=5)
-            process.stderr.close()
+            if process and process.poll() is None:
+                process.terminate()
+                process.wait(timeout=5)
+            if process:
+                process.stderr.close()
+            if geth_process and geth_process.poll() is None:
+                geth_process.terminate()
+                geth_process.wait(timeout=5)
+            if geth_log:
+                geth_log.close()
             events.close()
 
 
 if __name__ == "__main__":
-    run()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--geth-bin", help="run the differential checks against pinned Geth v1.17.10")
+    arguments = parser.parse_args()
+    run(arguments.geth_bin)

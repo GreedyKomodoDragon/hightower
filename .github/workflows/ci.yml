@@ -4,6 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      execution_differential:
+        description: Run the Hightower/Geth execution RPC differential harness
+        type: boolean
+        required: true
+        default: false
 
 permissions:
   contents: read
@@ -88,6 +95,26 @@ jobs:
           echo "GETH_BIN=$RUNNER_TEMP/geth-bin" >> "$GITHUB_ENV"
       - name: Geth ${{ matrix.version }} Engine API interoperability
         run: bash scripts/test_engine_interop.sh ${{ matrix.version }}
+
+  execution-differential:
+    if: github.event_name == 'workflow_dispatch' && inputs.execution_differential
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: vercel-labs/setup-zig@v1
+        with:
+          version: 0.16.0
+      - name: Install verified Geth v1.17.10
+        run: |
+          archive=geth-linux-amd64-1.17.10-1df30b18.tar.gz
+          curl --fail --location --silent --show-error "https://gethstore.blob.core.windows.net/builds/$archive" --output "$RUNNER_TEMP/$archive"
+          echo "e016aca8cc391c8d5d14dc17c9af589488d99c37ed71d892213c80757935ba64  $RUNNER_TEMP/$archive" | sha256sum --check
+          mkdir "$RUNNER_TEMP/geth"
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/geth"
+          find "$RUNNER_TEMP/geth" -type f -name geth -exec cp {} "$RUNNER_TEMP/geth-bin" \;
+          chmod +x "$RUNNER_TEMP/geth-bin"
+      - run: zig build
+      - run: python3 scripts/test_execution_service.py --geth-bin "$RUNNER_TEMP/geth-bin"
 
   discv5-interop:
     name: Geth discv5 interoperability

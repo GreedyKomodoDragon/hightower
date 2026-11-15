@@ -54,6 +54,7 @@ pub const Server = struct {
     chain: *chain_mod.Chain,
     pool: *pool_mod.Pool,
     world: *execution.state.State,
+    store: ?*execution.durable.Store = null,
     settings: ?*const ckzg.Settings = null,
     mutex: ?*std.Io.Mutex = null,
     revert_data: ?[]const u8 = null,
@@ -97,7 +98,7 @@ pub const Server = struct {
         if (request.head.method == .GET and std.mem.eql(u8, request.head.target, "/health")) {
             if (self.mutex) |mutex| try mutex.lock(io);
             defer if (self.mutex) |mutex| mutex.unlock(io);
-            const healthy = !self.chain.durability_uncertain;
+            const healthy = self.storageHealthy(allocator);
             return request.respond(if (healthy) "ok\n" else "storage unavailable\n", .{ .status = if (healthy) .ok else .service_unavailable, .keep_alive = false, .extra_headers = metrics_headers });
         }
         if (request.head.method == .GET and std.mem.eql(u8, request.head.target, "/metrics")) {
@@ -109,7 +110,7 @@ pub const Server = struct {
             const body = try std.fmt.allocPrint(
                 allocator,
                 "hightower_execution_head_number {d}\nhightower_execution_safe_number {d}\nhightower_execution_finalized_number {d}\nhightower_execution_syncing 0\nhightower_execution_pool_entries {d}\nhightower_execution_pool_bytes {d}\nhightower_execution_rpc_requests_total {d}\nhightower_execution_rpc_errors_total {d}\nhightower_execution_payload_build_failures_total {d}\nhightower_execution_payload_build_nanoseconds_total {d}\nhightower_execution_storage_healthy {d}\n",
-                .{ head.header.number, safe.header.number, finalized.header.number, self.pool.entries.items.len, self.pool.byte_count, self.requests, self.errors, self.pool.build_failures, if (self.payload_build_ns) |elapsed| elapsed.* else 0, @intFromBool(!self.chain.durability_uncertain) },
+                .{ head.header.number, safe.header.number, finalized.header.number, self.pool.entries.items.len, self.pool.byte_count, self.requests, self.errors, self.pool.build_failures, if (self.payload_build_ns) |elapsed| elapsed.* else 0, @intFromBool(self.storageHealthy(allocator)) },
             );
             defer allocator.free(body);
             return request.respond(body, .{ .status = .ok, .keep_alive = false, .extra_headers = metrics_headers });
@@ -140,6 +141,15 @@ pub const Server = struct {
         self.requests +|= 1;
         if (std.mem.indexOf(u8, response, "\"error\"") != null) self.errors +|= 1;
         try request.respond(response, .{ .status = .ok, .keep_alive = false, .extra_headers = headers });
+    }
+
+    /// Checks storage usability by reading its durable identity marker.
+    fn storageHealthy(self: *const Server, allocator: std.mem.Allocator) bool {
+        if (self.chain.durability_uncertain) return false;
+        const store = self.store orelse return true;
+        const identity = store.db.get(allocator, "identity") catch return false;
+        defer if (identity) |bytes| allocator.free(bytes);
+        return identity != null;
     }
 
     /// Accepts HTTP connections until the listener closes.
