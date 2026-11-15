@@ -28,4 +28,5 @@
 
 - Name Fulu work branches `fulu-<issue-number(s)>-<short-description>` (for example, `fulu-028-043-runtime`).
 - The CI workflow runs on pushes to `main` and on pull requests; feature branch pushes alone do not start it. Open a pull request to run CI for branch work.
-- When monitoring a CI run, wait until it completes before opening or reading its logs; checking logs while it is running wastes context.
+- Do not use `gh run watch` or continuously poll CI runs; this fills the context. Check run status once and continue other work if it is still running.
+- Read CI logs only after the run has completed; checking logs while it is running wastes context.

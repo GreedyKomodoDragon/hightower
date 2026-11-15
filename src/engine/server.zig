@@ -156,6 +156,8 @@ pub const Server = struct {
     staged: std.ArrayList(Candidate) = .empty,
     build: ?Build = null,
     next_id: u64 = 1,
+    io: ?std.Io = null,
+    payload_build_ns: u64 = 0,
 
     /// Releases staged payloads without changing canonical state.
     pub fn deinit(self: *Server) void {
@@ -203,6 +205,7 @@ pub const Server = struct {
     /// Serves one authenticated POST request on a dedicated Engine API port.
     pub fn serveConnection(self: *Server, allocator: std.mem.Allocator, io: std.Io, stream: std.Io.net.Stream) !void {
         defer stream.close(io);
+        self.io = io;
         var read_buffer: [8192]u8 = undefined;
         var write_buffer: [8192]u8 = undefined;
         var body_buffer: [8192]u8 = undefined;
@@ -387,7 +390,7 @@ pub const Server = struct {
         var next_world = try parent_world.clone(self.allocator);
         var world_owned = true;
         errdefer if (world_owned) next_world.deinit();
-        var pending: ?Build = if (params[1] == .null) null else self.startBuild(a, params[1], parent_header, head, parent_world) catch |err| {
+        var pending: ?Build = if (params[1] == .null) null else self.startBuildMeasured(a, params[1], parent_header, head, parent_world) catch |err| {
             self.pool.build_failures += 1;
             if (err == error.InvalidParams) return error.InvalidPayloadAttributes;
             return err;
@@ -468,6 +471,14 @@ pub const Server = struct {
             pending = null;
         }
         return choiceResult(a, "VALID", head, id);
+    }
+
+    /// Builds a payload while accumulating elapsed awake-clock nanoseconds.
+    fn startBuildMeasured(self: *Server, a: std.mem.Allocator, value: Value, parent_header: execution.Header, parent_hash: execution.Hash, parent_world: *const execution.state.State) !Build {
+        const io = self.io orelse return self.startBuild(a, value, parent_header, parent_hash, parent_world);
+        const started = std.Io.Clock.awake.now(io).nanoseconds;
+        defer self.payload_build_ns +|= @intCast(@max(0, std.Io.Clock.awake.now(io).nanoseconds - started));
+        return self.startBuild(a, value, parent_header, parent_hash, parent_world);
     }
 
     /// Checks ancestry through retained and staged validated blocks.

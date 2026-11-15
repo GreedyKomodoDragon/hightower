@@ -150,12 +150,14 @@ test "execution JSON-RPC dispatches chain and block methods with bounded input" 
     var parsed_response = try std.json.parseFromSlice(std.json.Value, a, response, .{});
     defer parsed_response.deinit();
     try std.testing.expectEqualStrings("0x1", parsed_response.value.object.get("result").?.string);
+    try std.testing.expectEqual(@as(u64, 0), server.errors);
     const invalid = try server.dispatch(a, try std.json.Stringify.valueAlloc(temp, &[_]struct {}{ .{}, .{} }, .{}));
     defer a.free(invalid);
     var parsed_invalid = try std.json.parseFromSlice(std.json.Value, a, invalid, .{});
     defer parsed_invalid.deinit();
     try std.testing.expectEqual(@as(usize, 2), parsed_invalid.value.array.items.len);
     for (parsed_invalid.value.array.items) |item| try std.testing.expectEqual(@as(i64, -32600), item.object.get("error").?.object.get("code").?.integer);
+    try std.testing.expectEqual(@as(u64, 2), server.errors);
     const zero_address = "0x0000000000000000000000000000000000000000";
     var call = std.json.Value{ .object = .empty };
     try call.object.put(temp, "to", .{ .string = zero_address });
@@ -1549,6 +1551,7 @@ test "signed local token deployment, transfer, and revert commit through block a
         break :blk options;
     } } });
     try testing.expectEqual(@as(i64, -32602), (try std.json.parseFromSlice(std.json.Value, a, try server.dispatch(a, bad_tracer), .{})).value.object.get("error").?.object.get("code").?.integer);
+    try testing.expectEqual(@as(u64, 1), server.errors);
     const receipt_logs = transfer_receipt.object.get("logs").?.array.items;
     try testing.expectEqual(@as(usize, 1), receipt_logs.len);
     std.crypto.hash.sha3.Keccak256.hash(raw[2], &tx_hash, .{});
@@ -1558,6 +1561,7 @@ test "signed local token deployment, transfer, and revert commit through block a
     try testing.expectEqualStrings("0x0", reverted_receipt.object.get("status").?.string);
     const revert_trace = (try std.json.parseFromSlice(std.json.Value, a, try server.dispatch(a, try rpcRequest(a, 7, "debug_traceTransaction", &.{.{ .string = try std.fmt.allocPrint(a, "0x{s}", .{std.fmt.bytesToHex(tx_hash, .lower)}) }})), .{})).value.object.get("result").?;
     try testing.expectEqualStrings("execution reverted", revert_trace.object.get("error").?.string);
+    try testing.expectEqual(@as(u64, 1), server.errors);
     try testing.expectEqualStrings("0x", revert_trace.object.get("output").?.string);
     try testing.expectEqual(@as(usize, 0), reverted_receipt.object.get("logs").?.array.items.len);
     const logs_req = try rpcRequest(a, 2, "eth_getLogs", &.{.{ .object = .empty }});

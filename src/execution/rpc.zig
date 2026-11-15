@@ -54,10 +54,14 @@ pub const Server = struct {
     chain: *chain_mod.Chain,
     pool: *pool_mod.Pool,
     world: *execution.state.State,
+    store: ?*execution.durable.Store = null,
     settings: ?*const ckzg.Settings = null,
     mutex: ?*std.Io.Mutex = null,
     revert_data: ?[]const u8 = null,
     io: ?std.Io = null,
+    payload_build_ns: ?*const u64 = null,
+    requests: u64 = 0,
+    errors: u64 = 0,
 
     /// Parses one bounded JSON-RPC body and returns an owned response body.
     pub fn dispatch(self: *Server, allocator: std.mem.Allocator, body: []const u8) ![]u8 {
@@ -76,6 +80,7 @@ pub const Server = struct {
             }
             break :blk try self.handle(a, root);
         };
+        self.errors +|= responseErrorCount(result);
         const encoded = try std.json.Stringify.valueAlloc(a, result, .{});
         return allocator.dupe(u8, encoded);
     }
@@ -90,6 +95,27 @@ pub const Server = struct {
         var writer = stream.writer(io, &write_buffer);
         var http = std.http.Server.init(&reader.interface, &writer.interface);
         var request = http.receiveHead() catch return;
+        const metrics_headers: []const std.http.Header = &.{.{ .name = "content-type", .value = "text/plain; version=0.0.4" }};
+        if (request.head.method == .GET and std.mem.eql(u8, request.head.target, "/health")) {
+            if (self.mutex) |mutex| try mutex.lock(io);
+            defer if (self.mutex) |mutex| mutex.unlock(io);
+            const healthy = self.storageHealthy(allocator);
+            return request.respond(if (healthy) "ok\n" else "storage unavailable\n", .{ .status = if (healthy) .ok else .service_unavailable, .keep_alive = false, .extra_headers = metrics_headers });
+        }
+        if (request.head.method == .GET and std.mem.eql(u8, request.head.target, "/metrics")) {
+            if (self.mutex) |mutex| try mutex.lock(io);
+            defer if (self.mutex) |mutex| mutex.unlock(io);
+            const head = self.chain.latest();
+            const safe = self.chain.byHash(self.chain.safe_hash) orelse head;
+            const finalized = self.chain.byHash(self.chain.finalized_hash) orelse head;
+            const body = try std.fmt.allocPrint(
+                allocator,
+                "hightower_execution_head_number {d}\nhightower_execution_safe_number {d}\nhightower_execution_finalized_number {d}\nhightower_execution_syncing 0\nhightower_execution_pool_entries {d}\nhightower_execution_pool_bytes {d}\nhightower_execution_rpc_requests_total {d}\nhightower_execution_rpc_errors_total {d}\nhightower_execution_payload_build_failures_total {d}\nhightower_execution_payload_build_nanoseconds_total {d}\nhightower_execution_storage_healthy {d}\n",
+                .{ head.header.number, safe.header.number, finalized.header.number, self.pool.entries.items.len, self.pool.byte_count, self.requests, self.errors, self.pool.build_failures, if (self.payload_build_ns) |elapsed| elapsed.* else 0, @intFromBool(self.storageHealthy(allocator)) },
+            );
+            defer allocator.free(body);
+            return request.respond(body, .{ .status = .ok, .keep_alive = false, .extra_headers = metrics_headers });
+        }
         const headers: []const std.http.Header = &.{.{ .name = "content-type", .value = "application/json" }};
         if (request.head.method != .POST) return request.respond("POST required", .{ .status = .method_not_allowed, .keep_alive = false, .extra_headers = headers });
         if (!std.mem.eql(u8, request.head.target, "/")) return request.respond("not found", .{ .status = .not_found, .keep_alive = false, .extra_headers = headers });
@@ -113,7 +139,32 @@ pub const Server = struct {
         self.io = io;
         const response = try self.dispatch(allocator, body);
         defer allocator.free(response);
+        self.requests +|= 1;
         try request.respond(response, .{ .status = .ok, .keep_alive = false, .extra_headers = headers });
+    }
+
+    /// Counts JSON-RPC error members while ignoring nested result fields.
+    fn responseErrorCount(response: Value) u64 {
+        return switch (response) {
+            .object => @intFromBool(response.object.contains("error")),
+            .array => |items| blk: {
+                var count: u64 = 0;
+                for (items.items) |item| if (item == .object and item.object.contains("error")) {
+                    count +|= 1;
+                };
+                break :blk count;
+            },
+            else => 0,
+        };
+    }
+
+    /// Checks storage usability by reading its durable identity marker.
+    fn storageHealthy(self: *const Server, allocator: std.mem.Allocator) bool {
+        if (self.chain.durability_uncertain) return false;
+        const store = self.store orelse return true;
+        const identity = store.db.get(allocator, "identity") catch return false;
+        defer if (identity) |bytes| allocator.free(bytes);
+        return identity != null;
     }
 
     /// Accepts HTTP connections until the listener closes.
