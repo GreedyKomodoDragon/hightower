@@ -29,7 +29,7 @@ Build the optional worker with `cd scripts/geth-discovery-probe && go build -o .
 
 Unknown-parent Engine payloads return `SYNCING` and enter a queue of at most 32 payloads and 32 MiB. The worker asks for distinct missing parent hashes; after validated ancestors arrive, the Engine retries queued payloads in order. The queue is volatile, so an incomplete download may be fetched again after restart. The worker resumes from the durable canonical head when it is ahead of the anchor, avoiding pruned history. `eth_syncing` returns the worker's starting, current, and highest block while a recent report is behind its target; a stopped worker's report expires after ten seconds. The checkpoint state must already be complete. SNAP state acquisition is not implemented.
 
-After `zig build` and building the Go worker, run `python3 scripts/test_execution_service.py --geth-bin /path/to/geth --peer-bin zig-out/bin/hightower-execution-peer` to build 18 local Geth blocks, submit the last to a fresh Hightower database before its parent, acquire the ancestry over multiple bounded `eth/69` rounds, compare canonical block data, and check restart. The Go message-pipe tests run with `cd scripts/geth-discovery-probe && go test ./...`.
+After `zig build` and building the Go worker, run `python3 scripts/test_execution_service.py --geth-bin /path/to/geth --peer-bin zig-out/bin/hightower-execution-peer` to build 18 local Geth blocks, submit the last to a fresh Hightower database before its parent, acquire the ancestry over multiple bounded `eth/69` rounds, compare canonical block data, and restart both before and after fork-choice selection. The Go message-pipe tests run with `cd scripts/geth-discovery-probe && go test ./...`.
 
 ## Finalized Transfer output
 

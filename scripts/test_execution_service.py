@@ -142,11 +142,22 @@ def test_peer_catchup(temporary, config, secret, geth_rpc_port, peer_bin, head, 
         else:
             raise AssertionError(f"execution peer did not import Geth head: {(temporary / 'execution-peer.log').read_text()}")
         assert request(fresh_engine, "hightower_missingExecutionParents", [], token(secret)) == []
+        worker.terminate()
+        worker.wait(timeout=5)
+        worker = None
+        stop(service, secret)
+        service = subprocess.Popen([str(ROOT / "zig-out/bin/hightower-execution"), "--config", str(fresh_path)], cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        fresh_rpc = int(fresh["rpc_bind"].split(":")[-1])
+        wait_ready(service, fresh_rpc)
+        assert request(fresh_engine, "hightower_hasExecutionBlock", [head], token(secret)) is True
+        assert request(fresh_rpc, "eth_blockNumber", []) == "0x0"
+        worker = subprocess.Popen([peer_bin, "--config", str(fresh_path), "--peer", enode], cwd=ROOT, stdout=peer_log, stderr=peer_log)
+        time.sleep(2)
+        assert worker.poll() is None, f"execution peer failed after staged restart: {(temporary / 'execution-peer.log').read_text()}"
         anchor = request(int(fresh["rpc_bind"].split(":")[-1]), "eth_getBlockByNumber", ["0x0", False])["hash"]
         choice = {"headBlockHash": head, "safeBlockHash": anchor, "finalizedBlockHash": anchor}
         selected = request(int(fresh["engine_bind"].split(":")[-1]), "engine_forkchoiceUpdatedV3", [choice, None], token(secret))
         assert selected["payloadStatus"]["status"] == "VALID", selected
-        fresh_rpc = int(fresh["rpc_bind"].split(":")[-1])
         assert request(fresh_rpc, "eth_blockNumber", []) == hex(number)
         compare_block(fresh_rpc, geth_rpc_port, number)
         worker.terminate()
