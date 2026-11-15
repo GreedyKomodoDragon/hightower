@@ -399,11 +399,9 @@ def run(geth_bin=None):
                     json.dumps({"jsonrpc": "2.0", "id": 1, "method": "engine_forkchoiceUpdatedV3", "params": [choice, None]}).encode(),
                     {"Content-Type": "application/json", "Authorization": bearer},
                 )
-                try:
-                    urllib.request.urlopen(failed_request, timeout=5)
-                    raise AssertionError("fork choice succeeded despite the forced WAL write failure")
-                except urllib.error.HTTPError as error:
-                    assert error.code == 400 and error.read() == b"bad request"
+                with urllib.request.urlopen(failed_request, timeout=5) as response:
+                    failed_choice = json.load(response)
+                assert failed_choice.get("error", {}).get("code") == -32000, failed_choice
                 try:
                     get(rpc_port, "/health")
                     raise AssertionError("health remained ready after the durable write failed")
