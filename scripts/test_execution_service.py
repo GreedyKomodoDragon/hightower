@@ -391,9 +391,8 @@ def run(geth_bin=None):
                 built = request(engine_port, "engine_getPayloadV5", [update["payloadId"]], bearer)
                 payload = built["executionPayload"]
                 assert request(engine_port, "engine_newPayloadV4", [payload, [], ZERO, built["executionRequests"]], bearer)["status"] == "VALID"
-                wal = next((temporary / "data").glob("wal_*.bin"))
-                wal_limit = wal.stat().st_size
-                resource.prlimit(process.pid, resource.RLIMIT_FSIZE, (wal_limit, wal_limit))
+                resource.prlimit(process.pid, resource.RLIMIT_FSIZE, (0, 0))
+                assert resource.prlimit(process.pid, resource.RLIMIT_FSIZE) == (0, 0)
                 choice = {"headBlockHash": payload["blockHash"], "safeBlockHash": payload["blockHash"], "finalizedBlockHash": payload["blockHash"]}
                 failed_request = urllib.request.Request(
                     f"http://127.0.0.1:{engine_port}/",
