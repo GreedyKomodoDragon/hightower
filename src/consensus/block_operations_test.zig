@@ -12,6 +12,7 @@ const helpers = @import("helpers.zig");
 const bls = @import("bls.zig");
 const domains = @import("domains.zig");
 const blst = @import("blst");
+const preset = @import("consensus_preset");
 
 fn decodeValue(comptime T: type, allocator: std.mem.Allocator, compressed: []const u8) !T {
     const bytes = try fixtures.decode(allocator, compressed);
@@ -162,6 +163,90 @@ test "attestation accepts an older justified source checkpoint" {
     vote.signature = bls.sign(&key, domains.computeSigningRoot(root, domains.getDomain(state, helpers.DOMAIN_BEACON_ATTESTER, vote.data.target.epoch)));
     try operations.processAttestation(allocator, &state, vote);
     try std.testing.expectEqual(@as(u8, 0b111), state.current_epoch_participation.data[indices[0]]);
+}
+
+test "previous epoch attestation stays timely at and beyond one epoch delay" {
+    if (preset.name != .minimal) return;
+    const allocator = std.testing.allocator;
+    for (0..2) |extra_delay| {
+        var state = try fixtures.decodeState(allocator, @embedFile("fixtures/fulu_block_operations/attestation_valid/pre.ssz_snappy"));
+        defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
+        var vote = try decodeValue(fulu.Attestation, allocator, @embedFile("fixtures/fulu_block_operations/attestation_valid/attestation.ssz_snappy"));
+        defer ssz.freeDecoded(allocator, fulu.Attestation, vote);
+        vote.data.target.epoch = 2;
+        vote.data.slot = try helpers.computeStartSlotAtEpoch(vote.data.target.epoch);
+        state.slot = vote.data.slot + helpers.SLOTS_PER_EPOCH + extra_delay;
+        state.previous_justified_checkpoint = vote.data.source;
+        vote.data.target.root = state.block_roots[vote.data.slot % state.block_roots.len];
+        vote.data.beacon_block_root = vote.data.target.root;
+        @memset(@constCast(vote.aggregation_bits.data), false);
+        @constCast(vote.aggregation_bits.data)[0] = true;
+        const indices = try operations.getAttestingIndices(allocator, &state, vote);
+        defer allocator.free(indices);
+        try std.testing.expectEqual(@as(usize, 1), indices.len);
+        var key = blst.SecretKey{};
+        defer key.deinit();
+        key.keygen(&([_]u8{0x52} ** 32), null);
+        @constCast(state.validators.data)[indices[0]].pubkey = try bls.publicKey(&key);
+        const root = try merkle.HashTreeRoot(allocator, vote.data);
+        vote.signature = bls.sign(&key, domains.computeSigningRoot(root, domains.getDomain(state, helpers.DOMAIN_BEACON_ATTESTER, vote.data.target.epoch)));
+        try operations.processAttestation(allocator, &state, vote);
+        try std.testing.expectEqual(@as(u8, 0b010), state.previous_epoch_participation.data[indices[0]]);
+
+        var invalid = vote;
+        invalid.data.slot = state.slot + 1;
+        try std.testing.expectError(error.InvalidAttestation, operations.processAttestation(allocator, &state, invalid));
+        invalid.data.slot = state.slot;
+        invalid.data.target.epoch = helpers.getCurrentEpoch(&state);
+        try std.testing.expectError(error.InvalidAttestation, operations.processAttestation(allocator, &state, invalid));
+        invalid.data.slot = vote.data.slot;
+        try std.testing.expectError(error.InvalidAttestation, operations.processAttestation(allocator, &state, invalid));
+    }
+}
+
+test "pinned mainnet delayed attestations match reference post states" {
+    if (preset.name != .mainnet) return;
+    var failure: ?anyerror = null;
+    const worker = try std.Thread.spawn(.{ .stack_size = 1024 * 1024 * 1024 }, struct {
+        /// Run the mainnet state check on a stack sized for its fixed SSZ arrays.
+        fn run(result: *?anyerror) void {
+            checkMainnetAttestations() catch |err| {
+                std.debug.print("mainnet attestation fixture: {s}\n", .{@errorName(err)});
+                result.* = err;
+            };
+        }
+    }.run, .{&failure});
+    worker.join();
+    if (failure) |err| return err;
+}
+
+/// Compare pinned mainnet attestations with their upstream post states.
+fn checkMainnetAttestations() !void {
+    const allocator = std.testing.allocator;
+    const directory = "fixtures/fulu_block_operations_mainnet/correct_attestation_included_at_one_epoch_delay/";
+    const vote = try decodeValue(fulu.Attestation, allocator, @embedFile(directory ++ "attestation.ssz_snappy"));
+    defer ssz.freeDecoded(allocator, fulu.Attestation, vote);
+    for (0..2) |extra_delay| {
+        var state = try fixtures.decodeState(allocator, @embedFile(directory ++ "pre.ssz_snappy"));
+        defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
+        var expected = try fixtures.decodeState(allocator, @embedFile(directory ++ "post.ssz_snappy"));
+        defer ssz.freeDecoded(allocator, fulu.BeaconState, expected);
+        if (extra_delay == 1) {
+            // The next slot stays in the same epoch and pays the same pinned proposer.
+            state.slot += 1;
+            expected.slot += 1;
+            const proposer = state.proposer_lookahead[(state.slot - 1) % helpers.SLOTS_PER_EPOCH];
+            state.proposer_lookahead[state.slot % helpers.SLOTS_PER_EPOCH] = proposer;
+            expected.proposer_lookahead[expected.slot % helpers.SLOTS_PER_EPOCH] = proposer;
+        }
+        try std.testing.expectEqual(helpers.computePreviousEpoch(helpers.getCurrentEpoch(&state)), vote.data.target.epoch);
+        try std.testing.expectEqual(helpers.SLOTS_PER_EPOCH + extra_delay, state.slot - vote.data.slot);
+        const indices = try operations.getAttestingIndices(allocator, &state, vote);
+        defer allocator.free(indices);
+        try operations.processAttestation(allocator, &state, vote);
+        try expectStateRoot(allocator, state, expected);
+        for (indices) |index| try std.testing.expectEqual(@as(u8, 0b010), state.previous_epoch_participation.data[index]);
+    }
 }
 
 test "pinned voluntary exit fixtures enforce eligibility and signature" {

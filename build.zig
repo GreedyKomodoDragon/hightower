@@ -585,6 +585,29 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    const attestation_tests = b.addTest(.{
+        .filters = if (std.mem.eql(u8, preset_name, "mainnet")) &.{"pinned mainnet delayed attestations"} else &.{"attestation"},
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/consensus/block_operations_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "fulu", .module = fulu_mod },
+                .{ .name = "blst", .module = blst },
+                .{ .name = "ssz", .module = ssz_mod },
+                .{ .name = "merkle", .module = merkle_mod },
+                .{ .name = "consensus_preset", .module = consensus_preset_mod },
+                .{ .name = "types", .module = types_mod },
+                .{ .name = "blob", .module = blob_mod },
+                .{ .name = "execution", .module = execution_mod },
+                .{ .name = "ckzg", .module = ckzg_mod },
+                .{ .name = "storage", .module = storage_mod },
+                .{ .name = "rlp", .module = rlp_mod },
+            },
+        }),
+    });
+    const attestation_test_step = b.step("test-attestation", "Run attestation operation tests for the selected preset");
+    attestation_test_step.dependOn(&b.addRunArtifact(attestation_tests).step);
     const api_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/api/tests.zig"),
