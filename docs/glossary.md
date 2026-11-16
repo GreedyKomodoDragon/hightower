@@ -210,6 +210,8 @@ Chain:      [Block 0] ───────────────────�
 | secp256k1 | The elliptic curve Ethereum execution transactions use for ECDSA signatures. |
 | Fork version | Four bytes identifying a network's consensus rules at a particular upgrade. |
 | Genesis validators root | The SSZ root of the initial validator registry, used to distinguish chains in signing domains. |
+| Operation pool | Pending, validated consensus votes and other operations held for possible inclusion in a beacon block. |
+| Reorg | A change in the selected canonical chain when fork choice selects a different branch. |
 | ForkData | The SSZ container pairing a fork version with the genesis validators root. |
 | SigningData | The SSZ container pairing an object root with a signing domain. |
 | BLS12-381 | The elliptic-curve signature system Ethereum validators use, allowing signatures from multiple validators to be combined. |
