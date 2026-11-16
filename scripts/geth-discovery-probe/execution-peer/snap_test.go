@@ -157,3 +157,35 @@ func TestVerifyStorageRange(t *testing.T) {
 		t.Fatal("accepted modified storage value")
 	}
 }
+
+// TestDownloadSnapshotRejectsCorruptRange leaves no checkpoint after a bad peer response.
+func TestDownloadSnapshotRejectsCorruptRange(t *testing.T) {
+	local, remote := p2p.MsgPipe()
+	defer local.Close()
+	defer remote.Close()
+	peerErrors := make(chan error, 1)
+	go func() {
+		msg, err := remote.ReadMsg()
+		if err != nil {
+			peerErrors <- err
+			return
+		}
+		var req snap.GetAccountRangePacket
+		if err := msg.Decode(&req); err != nil {
+			peerErrors <- err
+			return
+		}
+		peerErrors <- p2p.Send(remote, snap.AccountRangeMsg, &snap.AccountRangePacket{ID: req.ID})
+	}()
+	path := filepath.Join(t.TempDir(), "state.bin")
+	s := &snapSession{rw: local, root: common.HexToHash("0x01")}
+	if err := s.downloadSnapshot(path); err == nil {
+		t.Fatal("accepted state range unrelated to trusted root")
+	}
+	if err := <-peerErrors; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("corrupt checkpoint was published: %v", err)
+	}
+}
