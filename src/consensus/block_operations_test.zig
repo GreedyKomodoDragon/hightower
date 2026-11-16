@@ -8,6 +8,10 @@ const ssz = @import("ssz");
 const fixtures = @import("fixture_runner.zig");
 const operations = @import("block_operations.zig");
 const block = @import("block.zig");
+const helpers = @import("helpers.zig");
+const bls = @import("bls.zig");
+const domains = @import("domains.zig");
+const blst = @import("blst");
 
 fn decodeValue(comptime T: type, allocator: std.mem.Allocator, compressed: []const u8) !T {
     const bytes = try fixtures.decode(allocator, compressed);
@@ -77,6 +81,87 @@ test "pinned attester slashing fixtures validate indices and aggregate signature
 test "pinned attestation fixtures update participation and reject empty participants" {
     try runValid(fulu.Attestation, operations.processAttestation, "attestation_valid", "attestation");
     try runInvalid(fulu.Attestation, operations.processAttestation, "attestation_invalid", "attestation", error.InvalidAttestation);
+}
+
+test "attestation source checkpoint mismatch leaves state unchanged" {
+    const allocator = std.testing.allocator;
+    const input = try decodeValue(fulu.Attestation, allocator, @embedFile("fixtures/fulu_block_operations/attestation_valid/attestation.ssz_snappy"));
+    defer ssz.freeDecoded(allocator, fulu.Attestation, input);
+    for (0..2) |mismatch| {
+        var state = try fixtures.decodeState(allocator, @embedFile("fixtures/fulu_block_operations/attestation_valid/pre.ssz_snappy"));
+        defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
+        const checkpoint = if (input.data.target.epoch == helpers.getCurrentEpoch(&state)) &state.current_justified_checkpoint else &state.previous_justified_checkpoint;
+        try std.testing.expectEqualDeep(input.data.source, checkpoint.*);
+        if (mismatch == 0) checkpoint.epoch += 1 else checkpoint.root[0] ^= 1;
+        const before = try merkle.HashTreeRoot(allocator, state);
+        try std.testing.expectError(error.InvalidAttestation, operations.processAttestation(allocator, &state, input));
+        try std.testing.expectEqual(before, try merkle.HashTreeRoot(allocator, state));
+    }
+}
+
+test "attestation flags require matching target before head" {
+    const allocator = std.testing.allocator;
+    const input = try decodeValue(fulu.Attestation, allocator, @embedFile("fixtures/fulu_block_operations/attestation_valid/attestation.ssz_snappy"));
+    defer ssz.freeDecoded(allocator, fulu.Attestation, input);
+    for (0..4) |mismatch| {
+        var state = try fixtures.decodeState(allocator, @embedFile("fixtures/fulu_block_operations/attestation_valid/pre.ssz_snappy"));
+        defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
+        if (mismatch == 3) state.slot = input.data.slot + std.math.sqrt(helpers.SLOTS_PER_EPOCH) + 1;
+        var vote = input;
+        const bits = try allocator.dupe(bool, input.aggregation_bits.data);
+        defer allocator.free(bits);
+        @memset(bits, false);
+        bits[0] = true;
+        vote.aggregation_bits.data = bits;
+        const indices = try operations.getAttestingIndices(allocator, &state, vote);
+        defer allocator.free(indices);
+        try std.testing.expectEqual(@as(usize, 1), indices.len);
+        var key = blst.SecretKey{};
+        defer key.deinit();
+        key.keygen(&([_]u8{0x50} ** 32), null);
+        @constCast(state.validators.data)[indices[0]].pubkey = try bls.publicKey(&key);
+        if (mismatch == 1) vote.data.target.root[0] ^= 1;
+        if (mismatch == 2) vote.data.beacon_block_root[0] ^= 1;
+        const root = try merkle.HashTreeRoot(allocator, vote.data);
+        vote.signature = bls.sign(&key, domains.computeSigningRoot(root, domains.getDomain(state, helpers.DOMAIN_BEACON_ATTESTER, vote.data.target.epoch)));
+        try operations.processAttestation(allocator, &state, vote);
+        const participation = if (input.data.target.epoch == helpers.getCurrentEpoch(&state)) state.current_epoch_participation.data else state.previous_epoch_participation.data;
+        const expected: u8 = switch (mismatch) {
+            0 => 0b111,
+            1 => 0b001,
+            2 => 0b011,
+            else => 0b010,
+        };
+        try std.testing.expectEqual(expected, participation[indices[0]]);
+    }
+}
+
+test "attestation accepts an older justified source checkpoint" {
+    const allocator = std.testing.allocator;
+    var state = try fixtures.decodeState(allocator, @embedFile("fixtures/fulu_block_operations/attestation_valid/pre.ssz_snappy"));
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
+    var vote = try decodeValue(fulu.Attestation, allocator, @embedFile("fixtures/fulu_block_operations/attestation_valid/attestation.ssz_snappy"));
+    defer ssz.freeDecoded(allocator, fulu.Attestation, vote);
+    vote.data.target.epoch = 2;
+    vote.data.slot = try helpers.computeStartSlotAtEpoch(vote.data.target.epoch);
+    state.slot = vote.data.slot + 1;
+    vote.data.target.root = state.block_roots[vote.data.slot % state.block_roots.len];
+    vote.data.beacon_block_root = vote.data.target.root;
+    state.current_justified_checkpoint = vote.data.source;
+    try std.testing.expect(vote.data.source.epoch < vote.data.target.epoch - 1);
+    @memset(@constCast(vote.aggregation_bits.data), false);
+    @constCast(vote.aggregation_bits.data)[0] = true;
+    const indices = try operations.getAttestingIndices(allocator, &state, vote);
+    defer allocator.free(indices);
+    try std.testing.expectEqual(@as(usize, 1), indices.len);
+    var key = blst.SecretKey{};
+    defer key.deinit();
+    key.keygen(&([_]u8{0x51} ** 32), null);
+    @constCast(state.validators.data)[indices[0]].pubkey = try bls.publicKey(&key);
+    const root = try merkle.HashTreeRoot(allocator, vote.data);
+    vote.signature = bls.sign(&key, domains.computeSigningRoot(root, domains.getDomain(state, helpers.DOMAIN_BEACON_ATTESTER, vote.data.target.epoch)));
+    try operations.processAttestation(allocator, &state, vote);
+    try std.testing.expectEqual(@as(u8, 0b111), state.current_epoch_participation.data[indices[0]]);
 }
 
 test "pinned voluntary exit fixtures enforce eligibility and signature" {
