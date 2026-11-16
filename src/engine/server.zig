@@ -3,7 +3,8 @@
 // the canonical chain changes only after a valid forkchoice update. A local
 // builder derives a fork-appropriate payload from the selected parent, pool,
 // and supplied withdrawals. Volatile staging keeps at most 32 executed
-// candidates; Prague deposit logs and queue outputs are checked against requests.
+// candidates. Up to 32 unknown-parent payloads, capped at 32 MiB total, wait
+// for validated ancestors; Prague request outputs are checked against claims.
 //
 // parent snapshot -> execute branch -> validated hash -> forkchoice -> canonical
 const std = @import("std");
@@ -18,6 +19,8 @@ const client = @import("engine_client");
 const Value = wire.Value;
 const max_body = 32 * 1024 * 1024;
 const max_staged_payloads = 32;
+const max_pending_payloads = 32;
+const max_pending_bytes = 32 * 1024 * 1024;
 
 /// Maps the configured execution fork to its Engine API method generations.
 fn methodVersions(fork: execution.transition.Fork) !@TypeOf(client.versions(.osaka)) {
@@ -140,6 +143,13 @@ const Build = struct {
     }
 };
 
+const Pending = struct {
+    hash: execution.Hash,
+    parent: execution.Hash,
+    version: u8,
+    params: []u8,
+};
+
 /// Owns staged payloads while borrowing a canonical chain, world, and pool.
 pub const Server = struct {
     allocator: std.mem.Allocator,
@@ -154,15 +164,21 @@ pub const Server = struct {
     // shortcut: pinned fixture hashes stand in for EVM execution; use compatible payloads for full execution validation.
     fixture_payload_hashes: ?[]const execution.Hash = null,
     staged: std.ArrayList(Candidate) = .empty,
+    pending: std.ArrayList(Pending) = .empty,
+    pending_bytes: usize = 0,
+    retrying_pending: bool = false,
     build: ?Build = null,
     next_id: u64 = 1,
     io: ?std.Io = null,
     payload_build_ns: u64 = 0,
+    sync_progress: ?*execution.rpc.SyncProgress = null,
 
     /// Releases staged payloads without changing canonical state.
     pub fn deinit(self: *Server) void {
         for (self.staged.items) |*candidate| candidate.deinit();
         self.staged.deinit(self.allocator);
+        for (self.pending.items) |item| self.allocator.free(item.params);
+        self.pending.deinit(self.allocator);
         if (self.build) |*pending| pending.deinit();
     }
 
@@ -255,6 +271,44 @@ pub const Server = struct {
             for ([_][]const u8{ "engine_newPayloadV1", "engine_newPayloadV2", "engine_newPayloadV3", "engine_newPayloadV4", "engine_forkchoiceUpdatedV1", "engine_forkchoiceUpdatedV2", "engine_forkchoiceUpdatedV3", "engine_getPayloadV1", "engine_getPayloadV2", "engine_getPayloadV3", "engine_getPayloadV4", "engine_getPayloadV5" }) |capability| try capabilities.array.append(.{ .string = capability });
             return capabilities;
         }
+        if (std.mem.eql(u8, name, "hightower_missingExecutionParents")) {
+            if (params.len != 0) return error.InvalidParams;
+            const hashes = try self.missingParents(a);
+            var result = wire.array(a);
+            for (hashes) |hash| try result.array.append(try wire.hex(a, &hash));
+            return result;
+        }
+        if (std.mem.eql(u8, name, "hightower_executionSyncProgress")) {
+            if (params.len != 2) return error.InvalidParams;
+            const progress = self.sync_progress orelse return error.MissingSyncProgress;
+            const current = try wire.quantity(u64, params[0]);
+            const target = try wire.quantity(u64, params[1]);
+            if (target < current) return error.InvalidParams;
+            const io = self.io orelse return error.MissingIo;
+            progress.* = .{ .current = current, .target = target, .updated_at = std.Io.Timestamp.toSeconds(std.Io.Clock.real.now(io)) };
+            return .{ .bool = true };
+        }
+        if (std.mem.eql(u8, name, "hightower_hasExecutionBlock")) {
+            if (params.len != 1) return error.InvalidParams;
+            const hash = try wire.fixed(32, params[0]);
+            return .{ .bool = self.chain.byHash(hash) != null };
+        }
+        if (std.mem.eql(u8, name, "hightower_executionSyncCursor")) {
+            if (params.len != 0) return error.InvalidParams;
+            return wire.number(a, self.chain.latest().header.number);
+        }
+        if (std.mem.eql(u8, name, "hightower_importExecutionBlock")) {
+            if (params.len != 2) return error.InvalidParams;
+            const store = self.store orelse return error.MissingExecutionStore;
+            const hash = try wire.fixed(32, params[0]);
+            const raw = try wire.bytes(a, params[1], 11 * 1024 * 1024);
+            execution.peer_sync.importBlock(self.allocator, self.chain, store, hash, raw) catch |err| {
+                if (err == error.UnknownParent) return .{ .string = "SYNCING" };
+                return err;
+            };
+            try self.retryPending();
+            return .{ .string = "VALID" };
+        }
         const versions = try methodVersions(self.chain.fork);
         if (std.mem.eql(u8, name, try std.fmt.allocPrint(a, "engine_newPayloadV{d}", .{versions.new_payload}))) return self.newPayload(a, params, versions.new_payload);
         if (std.mem.eql(u8, name, try std.fmt.allocPrint(a, "engine_forkchoiceUpdatedV{d}", .{versions.forkchoice}))) return self.forkchoiceUpdated(a, params);
@@ -308,7 +362,10 @@ pub const Server = struct {
             decoded.deinit();
         }
         if (self.chain.byHash(payload.block_hash) != null) return status(a, "VALID", payload.block_hash);
-        const parent_header = known_parent orelse return status(a, "SYNCING", null);
+        const parent_header = known_parent orelse {
+            try self.queuePending(payload.block_hash, payload.parent_hash, version, params);
+            return status(a, "SYNCING", null);
+        };
         var loaded_parent: ?execution.state.State = null;
         defer if (loaded_parent) |*state| state.deinit();
         const parent_world: *const execution.state.State = if (self.chain.byHash(payload.parent_hash)) |record| blk: {
@@ -342,6 +399,7 @@ pub const Server = struct {
             try store.stage(self.chain.fork, header, txs, withdrawals, result.receipts, parent_world, &trial);
             try self.chain.retain(header, txs, withdrawals, result, &trial);
             retained_result = true;
+            if (!self.retrying_pending) self.retryPending() catch |err| std.log.err("pending payload retry failed: {s}", .{@errorName(err)});
             return status(a, "VALID", payload.block_hash);
         }
         if (self.staged.items.len == max_staged_payloads) {
@@ -352,7 +410,85 @@ pub const Server = struct {
         retained = true;
         retained_trial = true;
         retained_result = true;
+        if (!self.retrying_pending) self.retryPending() catch |err| std.log.err("pending payload retry failed: {s}", .{@errorName(err)});
         return status(a, "VALID", payload.block_hash);
+    }
+
+    /// Returns distinct unknown parent hashes for a bounded acquisition round.
+    pub fn missingParents(self: *const Server, allocator: std.mem.Allocator) ![]execution.Hash {
+        var missing: std.ArrayList(execution.Hash) = .empty;
+        errdefer missing.deinit(allocator);
+        for (self.pending.items) |item| {
+            if (self.chain.byHash(item.parent) != null) continue;
+            var staged_parent = false;
+            for (self.staged.items) |candidate| if (std.mem.eql(u8, &candidate.payload.block_hash, &item.parent)) {
+                staged_parent = true;
+                break;
+            };
+            if (staged_parent) continue;
+            var known = false;
+            for (missing.items) |hash| if (std.mem.eql(u8, &hash, &item.parent)) {
+                known = true;
+                break;
+            };
+            if (!known) try missing.append(allocator, item.parent);
+        }
+        return missing.toOwnedSlice(allocator);
+    }
+
+    /// Retains a bounded copy of an Engine payload until its parent is validated.
+    fn queuePending(self: *Server, hash: execution.Hash, parent: execution.Hash, version: u8, params: []const Value) !void {
+        for (self.pending.items) |item| if (std.mem.eql(u8, &item.hash, &hash)) return;
+        const encoded = try std.json.Stringify.valueAlloc(self.allocator, params, .{});
+        errdefer self.allocator.free(encoded);
+        if (encoded.len > max_pending_bytes) return;
+        while (self.pending.items.len >= max_pending_payloads or self.pending_bytes > max_pending_bytes - encoded.len) {
+            const oldest = self.pending.orderedRemove(0);
+            self.pending_bytes -= oldest.params.len;
+            self.allocator.free(oldest.params);
+        }
+        try self.pending.append(self.allocator, .{ .hash = hash, .parent = parent, .version = version, .params = encoded });
+        self.pending_bytes += encoded.len;
+    }
+
+    /// Retries ready payloads in ancestry order after a parent is validated.
+    pub fn retryPending(self: *Server) anyerror!void {
+        if (self.retrying_pending) return;
+        self.retrying_pending = true;
+        defer self.retrying_pending = false;
+        var progressed = true;
+        while (progressed) {
+            progressed = false;
+            var index: usize = 0;
+            while (index < self.pending.items.len) {
+                const item = self.pending.items[index];
+                if (self.chain.byHash(item.parent) == null) {
+                    var staged_parent = false;
+                    for (self.staged.items) |candidate| if (std.mem.eql(u8, &candidate.payload.block_hash, &item.parent)) {
+                        staged_parent = true;
+                        break;
+                    };
+                    if (!staged_parent) {
+                        index += 1;
+                        continue;
+                    }
+                }
+                var arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena.deinit();
+                const a = arena.allocator();
+                const parsed = try std.json.parseFromSlice(Value, a, item.params, .{ .allocate = .alloc_always });
+                const result = try self.newPayload(a, parsed.value.array.items, item.version);
+                const verdict = try wire.string(try wire.field(result, "status"));
+                if (std.mem.eql(u8, verdict, "SYNCING")) {
+                    index += 1;
+                    continue;
+                }
+                _ = self.pending.orderedRemove(index);
+                self.pending_bytes -= item.params.len;
+                self.allocator.free(item.params);
+                if (std.mem.eql(u8, verdict, "VALID")) progressed = true;
+            }
+        }
     }
 
     /// Selects a validated ancestry path after checking markers and build attributes.
@@ -932,6 +1068,25 @@ fn checkBuiltFork(fork: execution.transition.Fork) !void {
     const unknown = try server.newPayload(temp, params.array.items, versions.new_payload);
     try std.testing.expectEqualStrings("SYNCING", try wire.string(try wire.field(unknown, "status")));
     try std.testing.expectEqual(@as(usize, 2), chain.records.items.len);
+    for (0..max_pending_payloads + 2) |index| {
+        payload_value.object.getPtr("extraData").?.* = try wire.hex(temp, &.{@intCast(index + 2)});
+        const variant = try wire.parsePayload(temp, payload_value.*, @min(versions.new_payload, 3));
+        const variant_hash = try execution.transition.headerHash(temp, fork, try payloadHeader(temp, variant, beacon_root, request_hash));
+        payload_value.object.getPtr("blockHash").?.* = try wire.hex(temp, &variant_hash);
+        try std.testing.expectEqualStrings("SYNCING", try wire.string(try wire.field(try server.newPayload(temp, params.array.items, versions.new_payload), "status")));
+    }
+    try std.testing.expectEqual(max_pending_payloads, server.pending.items.len);
+    const missing = try server.missingParents(temp);
+    try std.testing.expectEqualSlices(execution.Hash, &.{.{0x77} ** 32}, missing);
+    const reported = try server.method(temp, "hightower_missingExecutionParents", &.{});
+    try std.testing.expectEqual(@as(usize, 1), reported.array.items.len);
+    try std.testing.expectEqualStrings(try wire.string(try wire.hex(temp, &missing[0])), try wire.string(reported.array.items[0]));
+    const has_anchor = try server.method(temp, "hightower_hasExecutionBlock", &.{try wire.hex(temp, &genesis)});
+    try std.testing.expect(has_anchor.bool);
+    const has_orphan = try server.method(temp, "hightower_hasExecutionBlock", &.{try wire.hex(temp, &orphan_hash)});
+    try std.testing.expect(!has_orphan.bool);
+    const cursor = try server.method(temp, "hightower_executionSyncCursor", &.{});
+    try std.testing.expectEqualStrings(try wire.string(try wire.number(temp, chain.latest().header.number)), try wire.string(cursor));
 }
 
 test "every Engine fork builds, validates, and commits a payload" {
@@ -987,6 +1142,17 @@ test "Engine selects fully executed competing branches and rejects conflicting f
     defer child_a.deinit();
     var child_b = try server.startBuild(temp, attrs2, server.staged.items[1].header, hash_b, &server.staged.items[1].world);
     defer child_b.deinit();
+    var removed_parent = server.staged.orderedRemove(0);
+    removed_parent.deinit();
+    const child_before_parent = try wire.payloadJson(temp, child_a.payload, 1);
+    try std.testing.expectEqualStrings("SYNCING", try wire.string(try wire.field(try server.newPayload(temp, &.{child_before_parent}, 1), "status")));
+    try std.testing.expectEqualStrings("SYNCING", try wire.string(try wire.field(try server.newPayload(temp, &.{child_before_parent}, 1), "status")));
+    const missing = try server.missingParents(temp);
+    try std.testing.expectEqualSlices(execution.Hash, &.{hash_a}, missing);
+    try std.testing.expectEqual(@as(usize, 1), server.pending.items.len);
+    try std.testing.expectEqualStrings("VALID", try wire.string(try wire.field(try server.newPayload(temp, &.{first}, 1), "status")));
+    try std.testing.expectEqual(@as(usize, 0), server.pending.items.len);
+    try std.testing.expectEqualSlices(u8, &genesis, &chain.latest().hash);
     try std.testing.expectEqualStrings("VALID", try wire.string(try wire.field(try server.newPayload(temp, &.{try wire.payloadJson(temp, child_a.payload, 1)}, 1), "status")));
     try std.testing.expectEqualStrings("VALID", try wire.string(try wire.field(try server.newPayload(temp, &.{try wire.payloadJson(temp, child_b.payload, 1)}, 1), "status")));
     var choice = wire.object();

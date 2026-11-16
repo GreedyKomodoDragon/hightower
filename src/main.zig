@@ -16,6 +16,7 @@ comptime {
 }
 
 const version = "0.0.0";
+const max_sync_range_slots: u64 = 16;
 const Config = struct {
     listen_address: []const u8,
     anchor_state: []const u8 = "",
@@ -137,6 +138,8 @@ fn runRuntime(init: std.process.Init) !void {
     var engine = try hightower.engine_client.Client.init(allocator, init.io, settings.engine_url, jwt, .osaka);
     defer engine.deinit();
     try hightower.consensus.PeerSync.confirmExecutionHead(&store, engine.interface());
+    // Recovery needs a durable anchor before the first peer can mutate fork choice.
+    try hightower.consensus.saveForkChoiceStore(allocator, init.io, dir, "fork-choice.bin", &store);
     const identity = try nodeId(allocator, key);
     var columns = try hightower.consensus.DataColumns.Store.open(allocator, init.io, dir, "columns", state.genesis_validators_root, identity, 128);
     defer columns.deinit();
@@ -163,6 +166,8 @@ fn runRuntime(init: std.process.Init) !void {
     var api = Api{ .allocator = allocator, .io = init.io, .listener = &listener, .store = &store, .mutex = &mutex, .version = state.fork.current_version, .head = &coordinator.head };
     const thread = try std.Thread.spawn(.{}, Api.run, .{&api});
     thread.detach();
+    const PeerScan = struct { id: [32]u8, next_slot: u64 };
+    var scans: [hightower.consensus.P2PService.max_active_peers]?PeerScan = .{null} ** hightower.consensus.P2PService.max_active_peers;
     while (true) {
         try p2p.step(100);
         p2p.status.head_root = coordinator.head;
@@ -170,13 +175,25 @@ fn runRuntime(init: std.process.Init) !void {
         for (0..hightower.consensus.P2PService.max_active_peers) |index| {
             const active = p2p.peerAt(index) orelse continue;
             const remote_id = active.connection.peer_id;
+            if (scans[index] == null or !std.mem.eql(u8, &scans[index].?.id, &remote_id)) scans[index] = .{ .id = remote_id, .next_slot = coordinator.next_slot };
+            const scan = &scans[index].?;
             const remote_head = active.remote_status.head_root;
             const advertised = @max(active.remote_status.head_slot, announcements.slot);
-            if (advertised < coordinator.next_slot and store.blocks.contains(remote_head)) continue;
+            if (store.blocks.get(remote_head)) |known| {
+                if (known.slot != active.remote_status.head_slot) {
+                    gossip.peers.noteInvalid(remote_id);
+                    p2p.dropPeer(index);
+                    scans[index] = null;
+                    continue;
+                }
+            }
+            if (advertised < scan.next_slot and store.blocks.contains(remote_head)) continue;
             try mutex.lock(init.io);
             announcements.importing = true;
-            const result = if (advertised >= coordinator.next_slot)
-                coordinator.step(active, @min(advertised - coordinator.next_slot + 1, 16)) catch |err| switch (err) {
+            const start = scan.next_slot;
+            const count: u64 = if (advertised >= start) @min(advertised - start, max_sync_range_slots - 1) + 1 else 0;
+            const result = if (count != 0)
+                coordinator.stepFrom(active, start, count) catch |err| switch (err) {
                     error.UnknownParent => coordinator.importHead(active, remote_head),
                     else => err,
                 }
@@ -192,8 +209,10 @@ fn runRuntime(init: std.process.Init) !void {
                     else => {},
                 }
                 p2p.dropPeer(index);
+                scans[index] = null;
                 continue;
             };
+            if (count != 0) scan.next_slot = start +| count;
             p2p.status.head_root = coordinator.head;
             p2p.status.head_slot = store.blocks.get(coordinator.head).?.slot;
         }
@@ -247,6 +266,7 @@ const Announcements = struct {
         const self: *Announcements = @ptrCast(@alignCast(context));
         if (!self.importing) try self.mutex.lock(self.coordinator.io);
         defer if (!self.importing) self.mutex.unlock(self.coordinator.io);
+        errdefer self.coordinator.restoreSnapshot() catch @panic("cannot restore durable fork-choice snapshot");
         try hightower.consensus.onForkChoiceAttestation(self.coordinator.store, value.*, false);
         const selected = try hightower.consensus.getForkChoiceHeadCached(self.coordinator.store);
         hightower.consensus.PeerSync.confirmExecutionHeadAt(self.coordinator.store, self.coordinator.engine, selected) catch return error.ForkchoiceUpdateFailed;

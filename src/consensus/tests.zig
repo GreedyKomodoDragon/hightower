@@ -62,6 +62,7 @@ test {
     _ = @import("fork_choice.zig");
     _ = @import("data_columns.zig");
     _ = @import("fork_choice_snapshot.zig");
+    _ = @import("peer_sync.zig");
 }
 
 test "selected Fulu transition fixtures run through one conformance path" {
