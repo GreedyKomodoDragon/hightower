@@ -9,6 +9,9 @@ const engine = @import("engine_server");
 
 const Config = struct {
     genesis: []const u8,
+    checkpoint_header: ?[]const u8 = null,
+    checkpoint_state: ?[]const u8 = null,
+    checkpoint_hash: ?[]const u8 = null,
     data_dir: []const u8,
     jwt_secret: []const u8,
     trusted_setup: []const u8,
@@ -31,6 +34,12 @@ fn parseConfig(a: std.mem.Allocator, bytes: []const u8) !struct { value: Config,
     const parsed = try std.json.parseFromSlice(Config, a, bytes, .{ .allocate = .alloc_always });
     const config = parsed.value;
     if (config.genesis.len == 0 or config.data_dir.len == 0 or config.jwt_secret.len == 0 or config.trusted_setup.len == 0) return error.MissingConfig;
+    if (config.checkpoint_header != null or config.checkpoint_state != null or config.checkpoint_hash != null) {
+        if (config.checkpoint_header == null or config.checkpoint_state == null or config.checkpoint_hash == null) return error.MissingCheckpoint;
+        if (config.checkpoint_header.?.len == 0 or config.checkpoint_state.?.len == 0 or config.checkpoint_hash.?.len != 66 or !std.mem.startsWith(u8, config.checkpoint_hash.?, "0x")) return error.InvalidCheckpoint;
+        var hash: execution.Hash = .{0} ** 32;
+        _ = std.fmt.hexToBytes(&hash, config.checkpoint_hash.?[2..]) catch return error.InvalidCheckpoint;
+    }
     const engine_address = try bindAddress(config.engine_bind);
     const rpc_address = try bindAddress(config.rpc_bind);
     if (std.mem.eql(u8, config.engine_bind, config.rpc_bind)) return error.DuplicateBindAddress;
@@ -70,10 +79,16 @@ pub fn main(init: std.process.Init) !void {
     var world = execution.state.State.init(a);
     defer world.deinit();
     const genesis = try execution.genesis.load(a, init.io, config.genesis, &world);
-    var store = try execution.durable.Store.open(a, init.io, std.Io.Dir.cwd(), config.data_dir, .osaka, genesis.header, &world);
+    var anchor = genesis.header;
+    if (config.checkpoint_header) |path| {
+        var trusted_hash: execution.Hash = .{0} ** 32;
+        _ = std.fmt.hexToBytes(&trusted_hash, config.checkpoint_hash.?[2..]) catch return error.InvalidCheckpoint;
+        anchor = try execution.checkpoint.load(a, init.io, path, config.checkpoint_state.?, trusted_hash, &world);
+    }
+    var store = try execution.durable.Store.open(a, init.io, std.Io.Dir.cwd(), config.data_dir, .osaka, anchor, &world);
     defer store.close();
     try store.checkIdentity(genesis.chain_id, .osaka);
-    var chain = try execution.chain.Chain.init(a, genesis.chain_id, .osaka, genesis.header, &world);
+    var chain = try execution.chain.Chain.init(a, genesis.chain_id, .osaka, anchor, &world);
     defer chain.deinit();
     try store.recover(&chain, &world);
     var pool = execution.pool.Pool.init(a, .{});
@@ -96,7 +111,9 @@ pub fn main(init: std.process.Init) !void {
     }
     var engine_server: engine.Server = .{ .allocator = a, .chain = &chain, .world = &world, .pool = &pool, .settings = &settings, .store = &store, .transfers = transfers, .mutex = &mutex, .secret = secret };
     defer engine_server.deinit();
-    var rpc_server: execution.rpc.Server = .{ .chain = &chain, .pool = &pool, .world = &world, .store = &store, .settings = &settings, .mutex = &mutex, .payload_build_ns = &engine_server.payload_build_ns };
+    var sync_progress: execution.rpc.SyncProgress = .{};
+    engine_server.sync_progress = &sync_progress;
+    var rpc_server: execution.rpc.Server = .{ .chain = &chain, .pool = &pool, .world = &world, .store = &store, .settings = &settings, .mutex = &mutex, .payload_build_ns = &engine_server.payload_build_ns, .sync_progress = &sync_progress };
     var engine_listener = try parsed.engine_address.listen(init.io, .{ .reuse_address = true });
     defer engine_listener.deinit(init.io);
     var rpc_listener = try parsed.rpc_address.listen(init.io, .{ .reuse_address = true });
@@ -114,4 +131,8 @@ test "service config validates separate IPv4 listeners" {
     const valid = try std.json.Stringify.valueAlloc(a, Config{ .genesis = "g", .data_dir = "d", .jwt_secret = "j", .trusted_setup = "k", .engine_bind = "127.0.0.1:18551", .rpc_bind = "127.0.0.1:18545" }, .{});
     defer a.free(valid);
     _ = try parseConfig(a, valid);
+    const partial = try std.json.Stringify.valueAlloc(a, Config{ .genesis = "g", .checkpoint_header = "header.rlp", .data_dir = "d", .jwt_secret = "j", .trusted_setup = "k", .engine_bind = "127.0.0.1:18551", .rpc_bind = "127.0.0.1:18545" }, .{});
+    try std.testing.expectError(error.MissingCheckpoint, parseConfig(a, partial));
+    const invalid = try std.json.Stringify.valueAlloc(a, Config{ .genesis = "g", .checkpoint_header = "header.rlp", .checkpoint_state = "state.bin", .checkpoint_hash = "0xnot-a-hash", .data_dir = "d", .jwt_secret = "j", .trusted_setup = "k", .engine_bind = "127.0.0.1:18551", .rpc_bind = "127.0.0.1:18545" }, .{});
+    try std.testing.expectError(error.InvalidCheckpoint, parseConfig(a, invalid));
 }

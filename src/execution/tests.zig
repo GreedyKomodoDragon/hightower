@@ -10,6 +10,147 @@ test {
     _ = execution.durable;
 }
 
+test "trusted execution checkpoint verifies its header and complete fixture state" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = execution.state.State.init(a);
+    defer fixture.deinit();
+    const genesis = try execution.genesis.load(a, io, "docs/engine/osaka-genesis.json", &fixture);
+    var header = genesis.header;
+    header.number = 128;
+    header.parent_hash = .{0x42} ** 32;
+    const header_bytes = try execution.encode(a, header);
+    const state_bytes = try fixture.checkpointBytes(a);
+    try tmp.dir.writeFile(io, .{ .sub_path = "header.rlp", .data = header_bytes });
+    try tmp.dir.writeFile(io, .{ .sub_path = "state.bin", .data = state_bytes });
+    const header_path = try tmp.dir.realPathFileAlloc(io, "header.rlp", a);
+    const state_path = try tmp.dir.realPathFileAlloc(io, "state.bin", a);
+    const hash = try execution.transition.headerHash(a, .osaka, header);
+    var world = execution.state.State.init(a);
+    defer world.deinit();
+    try std.testing.expectError(error.UntrustedCheckpoint, execution.checkpoint.load(a, io, header_path, state_path, .{0} ** 32, &world));
+    try std.testing.expectEqual(@as(usize, 0), world.accounts.items.len);
+    const loaded = try execution.checkpoint.load(a, io, header_path, state_path, hash, &world);
+    try std.testing.expectEqual(@as(u64, 128), loaded.number);
+    try std.testing.expectEqual(header.state_root, try world.stateRoot());
+    var other = execution.state.State.init(a);
+    defer other.deinit();
+    try other.setBalance(.{0x22} ** 20, 1);
+    try tmp.dir.writeFile(io, .{ .sub_path = "state.bin", .data = try other.checkpointBytes(a) });
+    try std.testing.expectError(error.InvalidCheckpointState, execution.checkpoint.load(a, io, header_path, state_path, hash, &world));
+    try std.testing.expectEqual(header.state_root, try world.stateRoot());
+    try tmp.dir.writeFile(io, .{ .sub_path = "state.bin", .data = state_bytes[0 .. state_bytes.len - 1] });
+    try std.testing.expectError(error.InvalidStateData, execution.checkpoint.load(a, io, header_path, state_path, hash, &world));
+    try std.testing.expectEqual(header.state_root, try world.stateRoot());
+}
+
+test "peer block verifies requested hash and requests before retention" {
+    const a = std.testing.allocator;
+    const checkpoint_number: u64 = 128;
+    const first_peer_number = checkpoint_number + 1;
+    var world = execution.state.State.init(a);
+    defer world.deinit();
+    var parent = std.mem.zeroes(execution.Header);
+    parent.gas_limit = 30_000_000;
+    parent.base_fee_per_gas = 1;
+    parent.number = checkpoint_number;
+    parent.state_root = try world.stateRoot();
+    var chain = try execution.chain.Chain.init(a, 1, .osaka, parent, &world);
+    defer chain.deinit();
+    const oversized = try a.alloc(u8, 11 * 1024 * 1024 + 1);
+    defer a.free(oversized);
+    try std.testing.expectError(error.PeerBlockTooLarge, execution.peer_sync.importBlock(a, &chain, null, .{0} ** 32, oversized));
+    var header = parent;
+    header.parent_hash = chain.latest().hash;
+    header.number = first_peer_number;
+    header.timestamp = 12;
+    header.transactions_root = try execution.trie.orderedRoot(a, &.{});
+    header.receipts_root = try execution.receiptsRoot(a, &.{});
+    header.withdrawals_root = try execution.trie.orderedRoot(a, &.{});
+    header.requests_hash = try execution.transition.requestsHash(a, &.{});
+    var trial = try world.clone(a);
+    defer trial.deinit();
+    try execution.transition.applySystemTransitions(a, &trial, .{ .fork = .osaka, .chain_id = 1, .coinbase = header.fee_recipient, .number = first_peer_number, .timestamp = 12, .gas_limit = header.gas_limit, .base_fee = header.base_fee_per_gas, .blob_base_fee = 1 }, header.parent_hash, header.parent_beacon_block_root);
+    header.state_root = try trial.stateRoot();
+    const raw = try execution.encode(a, execution.Block{ .header = header, .transactions = &.{}, .withdrawals = &.{} });
+    defer a.free(raw);
+    const hash = try execution.transition.headerHash(a, .osaka, header);
+    try std.testing.expectError(error.UnrequestedPeerBlock, execution.peer_sync.importBlock(a, &chain, null, .{0} ** 32, raw));
+    try std.testing.expectEqual(@as(usize, 1), chain.records.items.len);
+    var durable_dir = std.testing.tmpDir(.{});
+    defer durable_dir.cleanup();
+    var store = try execution.durable.Store.open(a, std.testing.io, durable_dir.dir, "execution", .osaka, parent, &world);
+    try execution.peer_sync.importBlock(a, &chain, &store, hash, raw);
+    try std.testing.expectEqual(@as(usize, 2), chain.records.items.len);
+    try std.testing.expectEqualSlices(u8, &chain.latest().hash, &header.parent_hash);
+    var bad = header;
+    bad.requests_hash = .{0} ** 32;
+    const bad_raw = try execution.encode(a, execution.Block{ .header = bad, .transactions = &.{}, .withdrawals = &.{} });
+    defer a.free(bad_raw);
+    const bad_hash = try execution.transition.headerHash(a, .osaka, bad);
+    try std.testing.expectError(error.InvalidExecutionRequests, execution.peer_sync.importBlock(a, &chain, &store, bad_hash, bad_raw));
+    try std.testing.expectEqual(@as(usize, 2), chain.records.items.len);
+    bad = header;
+    bad.transactions_root = .{0x33} ** 32;
+    const corrupt_body = try execution.encode(a, execution.Block{ .header = bad, .transactions = &.{}, .withdrawals = &.{} });
+    defer a.free(corrupt_body);
+    const corrupt_hash = try execution.transition.headerHash(a, .osaka, bad);
+    try std.testing.expectError(error.InvalidCommitment, execution.peer_sync.importBlock(a, &chain, &store, corrupt_hash, corrupt_body));
+    try std.testing.expectEqual(@as(usize, 2), chain.records.items.len);
+    try store.commit(hash, chain.records.items[0].hash, chain.records.items[0].hash);
+    store.close();
+    var recovered_world = execution.state.State.init(a);
+    defer recovered_world.deinit();
+    var reopened = try execution.durable.Store.open(a, std.testing.io, durable_dir.dir, "execution", .osaka, parent, &recovered_world);
+    defer reopened.close();
+    var recovered = try execution.chain.Chain.init(a, 1, .osaka, parent, &recovered_world);
+    defer recovered.deinit();
+    try reopened.recover(&recovered, &recovered_world);
+    try std.testing.expectEqualSlices(u8, &hash, &recovered.latest().hash);
+    try std.testing.expectEqual(first_peer_number, recovered.latest().header.number);
+    try std.testing.expect(recovered.byHash(bad_hash) == null);
+    try std.testing.expect(recovered.byHash(corrupt_hash) == null);
+}
+
+test "execution sync progress expires when the peer worker stops" {
+    var progress: execution.rpc.SyncProgress = .{ .current = 12, .target = 20, .updated_at = 100 };
+    try std.testing.expect(progress.active(100));
+    try std.testing.expect(progress.active(110));
+    try std.testing.expect(!progress.active(111));
+    progress.current = 20;
+    try std.testing.expect(!progress.active(100));
+    var world = execution.state.State.init(std.testing.allocator);
+    defer world.deinit();
+    var anchor = std.mem.zeroes(execution.Header);
+    anchor.state_root = try world.stateRoot();
+    var chain = try execution.chain.Chain.init(std.testing.allocator, 1, .osaka, anchor, &world);
+    defer chain.deinit();
+    var pool = execution.pool.Pool.init(std.testing.allocator, .{});
+    defer pool.deinit();
+    const io = std.testing.io;
+    progress = .{ .current = 12, .target = 20, .updated_at = std.Io.Timestamp.toSeconds(std.Io.Clock.real.now(io)) };
+    var server: execution.rpc.Server = .{ .chain = &chain, .pool = &pool, .world = &world, .io = io, .sync_progress = &progress };
+    const request_body = try rpcRequest(std.testing.allocator, 1, "eth_syncing", &.{});
+    defer std.testing.allocator.free(request_body);
+    const active_response = try server.dispatch(std.testing.allocator, request_body);
+    defer std.testing.allocator.free(active_response);
+    var active = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, active_response, .{});
+    defer active.deinit();
+    const result = active.value.object.get("result").?.object;
+    try std.testing.expectEqualStrings("0xc", result.get("currentBlock").?.string);
+    try std.testing.expectEqualStrings("0x14", result.get("highestBlock").?.string);
+    progress.updated_at -= 11;
+    const stale_response = try server.dispatch(std.testing.allocator, request_body);
+    defer std.testing.allocator.free(stale_response);
+    var stale = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, stale_response, .{});
+    defer stale.deinit();
+    try std.testing.expect(!stale.value.object.get("result").?.bool);
+}
+
 /// Serializes one valid JSON-RPC test request from structured parameters.
 fn rpcRequest(a: std.mem.Allocator, id: usize, method: []const u8, params: []const std.json.Value) ![]u8 {
     return std.json.Stringify.valueAlloc(a, .{ .jsonrpc = "2.0", .id = id, .method = method, .params = params }, .{});
@@ -1067,6 +1208,101 @@ test "execution state checkpoints and deltas restore roots" {
     try testing.expectError(error.InvalidStateData, restored.applyStateBytes(delta[0 .. delta.len - 1]));
 }
 
+test "hashed checkpoint keys remain executable after mutation and recovery" {
+    const a = testing.allocator;
+    const address: execution.Address = .{0x42} ** 20;
+    const slot: u256 = 7;
+    const value: u256 = 9;
+    var original = execution.state.State.init(a);
+    defer original.deinit();
+    try original.setNonce(address, 2);
+    try original.setBalance(address, 100);
+    try original.setStorage(address, slot, value);
+    _ = try original.setCode(address, "code");
+
+    var account_key: [32]u8 = undefined;
+    std.crypto.hash.sha3.Keccak256.hash(&address, &account_key, .{});
+    var slot_bytes: [32]u8 = undefined;
+    std.mem.writeInt(u256, &slot_bytes, slot, .big);
+    var slot_key: [32]u8 = undefined;
+    std.crypto.hash.sha3.Keccak256.hash(&slot_bytes, &slot_key, .{});
+    var raw: std.ArrayList(u8) = .empty;
+    defer raw.deinit(a);
+    var count: [4]u8 = undefined;
+    std.mem.writeInt(u32, &count, 1, .little);
+    try raw.appendSlice(a, &count);
+    try raw.append(a, 2);
+    try raw.appendSlice(a, &account_key);
+    var nonce: [8]u8 = undefined;
+    std.mem.writeInt(u64, &nonce, 2, .little);
+    try raw.appendSlice(a, &nonce);
+    var number: [32]u8 = undefined;
+    std.mem.writeInt(u256, &number, 100, .little);
+    try raw.appendSlice(a, &number);
+    std.mem.writeInt(u32, &count, 4, .little);
+    try raw.appendSlice(a, &count);
+    try raw.appendSlice(a, "code");
+    std.mem.writeInt(u32, &count, 1, .little);
+    try raw.appendSlice(a, &count);
+    try raw.appendSlice(a, &slot_key);
+    std.mem.writeInt(u256, &number, value, .little);
+    try raw.appendSlice(a, &number);
+
+    var imported = execution.state.State.init(a);
+    defer imported.deinit();
+    try imported.applyStateBytes(raw.items);
+    try testing.expectEqualSlices(u8, &(try original.stateRoot()), &(try imported.stateRoot()));
+    try testing.expectEqual(@as(u256, 100), imported.getBalance(address));
+    try testing.expectEqual(value, imported.getStorage(address, slot));
+    try testing.expectEqualStrings("code", imported.getCode(address));
+    var parent = try imported.clone(a);
+    defer parent.deinit();
+    try imported.setStorage(address, slot, 11);
+    try imported.setBalance(address, 101);
+    const delta = try imported.deltaBytes(a, &parent);
+    defer a.free(delta);
+    try parent.applyStateBytes(delta);
+    try testing.expectEqualSlices(u8, &(try imported.stateRoot()), &(try parent.stateRoot()));
+    const checkpoint = try parent.checkpointBytes(a);
+    defer a.free(checkpoint);
+    var reopened = execution.state.State.init(a);
+    defer reopened.deinit();
+    try reopened.applyStateBytes(checkpoint);
+    try testing.expectEqualSlices(u8, &(try imported.stateRoot()), &(try reopened.stateRoot()));
+}
+
+test "legacy checkpoint account preimages remain readable" {
+    const a = testing.allocator;
+    const address: execution.Address = .{0x17} ** 20;
+    var raw: std.ArrayList(u8) = .empty;
+    defer raw.deinit(a);
+    var count: [4]u8 = undefined;
+    std.mem.writeInt(u32, &count, 1, .little);
+    try raw.appendSlice(a, &count);
+    try raw.append(a, 1);
+    try raw.appendSlice(a, &address);
+    var nonce: [8]u8 = undefined;
+    std.mem.writeInt(u64, &nonce, 3, .little);
+    try raw.appendSlice(a, &nonce);
+    var balance: [32]u8 = undefined;
+    std.mem.writeInt(u256, &balance, 42, .little);
+    try raw.appendSlice(a, &balance);
+    std.mem.writeInt(u32, &count, 0, .little);
+    try raw.appendSlice(a, &count);
+    try raw.appendSlice(a, &count);
+
+    var imported = execution.state.State.init(a);
+    defer imported.deinit();
+    try imported.applyStateBytes(raw.items);
+    try testing.expectEqual(@as(u64, 3), imported.getNonce(address));
+    try testing.expectEqual(@as(u256, 42), imported.getBalance(address));
+    var expected = execution.state.State.init(a);
+    defer expected.deinit();
+    try expected.setNonce(address, 3);
+    try expected.setBalance(address, 42);
+    try testing.expectEqualSlices(u8, &(try expected.stateRoot()), &(try imported.stateRoot()));
+}
+
 // Confirms blooms use only log addresses and topics, and combine receipt logs.
 test "receipt blooms include addresses and topics but not data" {
     const logs = [_]execution.Log{.{ .address = .{0x11} ** 20, .topics = &.{.{0x22} ** 32}, .data = "ignored" }};
@@ -1489,7 +1725,7 @@ test "signed local token deployment, transfer, and revert commit through block a
             inline else => |p| .{ .dynamic_fee = .{ .status = p.status, .cumulative_gas_used = p.cumulative_gas_used, .logs = copied_logs, .logs_bloom = p.logs_bloom } },
         };
     }
-    try testing.expectEqual(@as(u64, 184_995), gas_used);
+    try testing.expectEqual(@as(u64, 183_261), gas_used);
     try testing.expectEqual(@as(u256, 925), simulated.getStorage(contract, std.mem.readInt(u160, &sender, .big)));
     try testing.expectEqual(@as(u256, 75), simulated.getStorage(contract, std.mem.readInt(u160, &recipient, .big)));
     try testing.expectEqual(@as(usize, 0), receipts[2].dynamic_fee.logs.len);

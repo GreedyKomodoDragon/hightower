@@ -7,6 +7,9 @@ The configuration is a JSON object with these fields:
 | Field | Meaning |
 | --- | --- |
 | `genesis` | Path to the Osaka genesis JSON file |
+| `checkpoint_header` | Optional path to an RLP-encoded Osaka execution header |
+| `checkpoint_state` | Optional path to a complete Hightower state checkpoint created by `State.checkpointBytes` |
+| `checkpoint_hash` | Required with the two checkpoint paths: trusted `0x`-prefixed 32-byte hash of the header |
 | `data_dir` | Exclusive execution database directory |
 | `jwt_secret` | Path to a file containing 32 bytes as 64 hexadecimal characters |
 | `trusted_setup` | Path to the KZG trusted setup file |
@@ -14,9 +17,21 @@ The configuration is a JSON object with these fields:
 | `rpc_bind` | Separate IPv4 host and port for public execution JSON-RPC, such as `127.0.0.1:8545` |
 | `transfer_contract` | Optional `0x`-prefixed 20-byte ERC-20 contract address |
 
-The Engine listener requires the existing short-lived HS256 JWT on every request. Bind both listeners to loopback unless the deployment provides its own network access controls. Both HTTP handlers share one chain, state, transaction pool, and KZG setup. Startup verifies the genesis hash, persisted chain ID and fork, recovered canonical ancestry, and state and receipt roots before either listener opens. A changed genesis or chain ID requires a new data directory.
+The Engine listener requires the existing short-lived HS256 JWT on every request. Bind both listeners to loopback unless the deployment provides its own network access controls. Both HTTP handlers share one chain, state, transaction pool, and KZG setup. Startup verifies the starting header hash, persisted chain ID and fork, recovered canonical ancestry, and state and receipt roots before either listener opens. A changed starting header or chain ID requires a new data directory.
 
-The public RPC listener also serves unauthenticated `GET /health` (`200` when the durable identity record can be read, `503` after a durable choice write becomes uncertain or the storage read fails) and `GET /metrics` in Prometheus text format. Metrics report head, safe, and finalized block numbers, syncing state, pool entries and bytes, RPC requests and JSON-RPC errors, cumulative payload-build nanoseconds and failures, and the storage health flag. Credentials and hashes are not returned. `eth_syncing` remains `false`: this Engine-driven service has no execution sync worker. Storage health performs a durable marker read; it does not perform a write probe.
+The three checkpoint fields must be supplied together. The operator must trust the checkpoint hash and its history; Hightower checks the RLP header against that hash and the complete state against the header's state root before opening the database. The genesis file still supplies the chain ID. The checkpoint reader accepts legacy address and slot preimages or hashed trie keys; both formats require complete code and storage. Input is limited to a 16 KiB header and 512 MiB state file. Use a new data directory when changing the checkpoint. The database retains 4,096 finalized canonical blocks, aligned to 128-block state checkpoints, and cannot serve older pruned bodies or state. `zig build test` exercises the pinned Osaka genesis fixture through checkpoint loading, corrupt-state rejection, and the existing execution recovery tests.
+
+The public RPC listener also serves unauthenticated `GET /health` (`200` when the durable identity record can be read, `503` after a durable choice write becomes uncertain or the storage read fails) and `GET /metrics` in Prometheus text format. Metrics report head, safe, and finalized block numbers, syncing state, pool entries and bytes, RPC requests and JSON-RPC errors, cumulative payload-build nanoseconds and failures, and the storage health flag. Credentials and hashes are not returned. Storage health performs a durable marker read; it does not perform a write probe.
+
+## Execution peer catch-up
+
+Build the optional worker with `cd scripts/geth-discovery-probe && go build -o ../../zig-out/bin/hightower-execution-peer ./execution-peer`. For a peer supplied checkpoint, first put a trusted recent RLP header at `checkpoint_header`, its hash at `checkpoint_hash`, and the desired new file path at `checkpoint_state` in the service config. Run `zig-out/bin/hightower-execution-peer --snapshot --config path/to/config.json --peer enode://...` from the repository root before starting Hightower. This uses one peer's `eth/69` status to check chain identity, then downloads SNAP account and storage ranges and contract code for the trusted state root. It verifies range proofs and code hashes, writes at most 512 MiB to a private temporary file, and atomically publishes the checkpoint only if the target does not exist. The peer must still serve that recent state root. Hightower checks the complete downloaded state against the trusted header when it starts.
+
+After the checkpoint is available, start the execution service and run `zig-out/bin/hightower-execution-peer --config path/to/config.json --peer enode://...`; repeat `--peer` for a second configured block peer. The worker reads the same genesis, checkpoint header, and JWT secret, and requires a loopback Engine listener. A peer with a discovery UDP endpoint is also used as a discovery bootstrap; a TCP-only record is used as a static peer. The worker speaks `eth/69`, admits at most two peers, requests one header or body per message, imports at most 16 sequential blocks per round, and rejects messages over 10 MiB. Hightower re-executes each block, checks its header and state commitments, and stores it durably before allowing Engine fork choice to select it. Peer import alone does not change the canonical head.
+
+Unknown-parent Engine payloads return `SYNCING` and enter a queue of at most 32 payloads and 32 MiB. The worker asks for distinct missing parent hashes; after validated ancestors arrive, the Engine retries queued payloads in order. The queue is volatile, so an incomplete download may be fetched again after restart. The worker resumes from the durable canonical head when it is ahead of the anchor, avoiding pruned history. `eth_syncing` returns the worker's starting, current, and highest block while a recent report is behind its target; a stopped worker's report expires after ten seconds. The checkpoint state must already be complete before starting the execution service.
+
+After `zig build` and building the Go worker, run `python3 scripts/test_execution_service.py --geth-bin /path/to/geth --peer-bin zig-out/bin/hightower-execution-peer` to build 18 local Geth blocks, submit the last to a fresh Hightower database before its parent, acquire the ancestry over multiple bounded `eth/69` rounds, restart both before and after fork-choice selection, then download a SNAP checkpoint from Geth and reopen it in another fresh Hightower database. The test compares canonical block data and state roots. The Go message-pipe tests run with `cd scripts/geth-discovery-probe && go test ./...`.
 
 ## Finalized Transfer output
 
@@ -38,7 +53,7 @@ Run `python3 scripts/test_execution_service.py` after `zig build` for a local tw
 | Tracing | `debug_traceTransaction` with `callTracer` | Supported for canonical transactions with an available parent pre-state |
 | Other methods, including filters, subscriptions, other tracers, and personal account management | All unlisted methods | `-32601` method not found |
 
-`eth_syncing` is `false` because this Engine-driven service has no active execution sync process. Fee estimates use a fixed 1 gwei priority fee; fee-history rewards use the same estimate rather than a transaction-tip percentile.
+`eth_syncing` is `false` when no execution peer worker is actively catching up. Fee estimates use a fixed 1 gwei priority fee; fee-history rewards use the same estimate rather than a transaction-tip percentile.
 
 Reads use only the selected canonical chain. `latest` and `pending` read the latest committed state; `safe` and `finalized` use their Engine fork-choice checkpoints, falling back to latest before a checkpoint is supplied; `earliest` uses genesis. Hexadecimal numbers select canonical blocks. `pending` transaction count advances only across contiguous sender nonces in the pool. Orphaned block hashes, transactions, receipts, and logs disappear from public reads. `eth_getBlockReceipts` returns `null` for an unknown block. Malformed parameters return `-32602`; a valid but unavailable state block returns `-32001`.
 

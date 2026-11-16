@@ -39,6 +39,11 @@ Chain:      [Block 0] ───────────────────�
 | Term | Plain-language definition |
 | --- | --- |
 | Recursive Length Prefix (RLP) | The byte format used to encode ordered execution-layer values and lists. |
+| devp2p | Ethereum's peer connection and discovery protocols used to exchange execution-chain data. |
+| eth/69 | A version of Ethereum's execution peer protocol that exchanges block headers, bodies, and related messages. |
+| SNAP | An execution peer protocol for downloading authenticated state ranges around a recent block. |
+| SNAP range proof | Trie nodes sent with an account or storage range to show that the returned entries belong to a stated root and that no entries were skipped. |
+| Hashed trie key | The Keccak hash of an account address or storage slot; SNAP sends this key without the original address or slot. |
 | Contract creation transaction | A transaction with no recipient address; its input runs as initcode at an address derived from the sender and nonce. |
 | CREATE | The EVM instruction that runs initcode at an address derived from the creating account and its current nonce. |
 | CREATE2 | The EVM instruction that derives a new contract address from a creator, salt, and initcode hash. |
@@ -103,6 +108,7 @@ Chain:      [Block 0] ───────────────────�
 | Side branch | A valid-looking sequence of blocks that diverges from the currently selected execution chain. |
 | Canonical path | The ancestry selected by fork choice for block-number, transaction, receipt, and log reads. |
 | Safe block | A fork-choice checkpoint expected to remain on the chosen execution chain. |
+| Execution checkpoint | A trusted execution block header and complete post-state used as the starting point for validating later blocks. |
 | Finalized block | A fork-choice checkpoint whose consensus history has been finalized. |
 | Payload ID | An eight-byte identifier for a block-building job started by a forkchoice update. |
 | Paris | The execution upgrade associated with Ethereum's switch from mining to proof of stake. |
