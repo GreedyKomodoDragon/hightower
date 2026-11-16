@@ -1,13 +1,14 @@
-// Execution state maps addresses to accounts; each account commits to its own
-// storage trie and code hash, and the secure state trie commits to all account
-// values. Storage keys are 32-byte words and zero values are absent. Mutations
-// are journaled while snapshots are open so reverting them restores the prior
-// state root. Durable checkpoints encode account values and code up to 24 KiB;
-// trie nodes are recomputed rather than persisted.
+// Execution state indexes accounts and storage by Keccak-hashed trie keys so a
+// SNAP checkpoint needs no address or slot preimages. EVM lookups hash their
+// original addresses and slots before accessing the same entries. Each account
+// commits to its storage trie and code hash; the global state trie commits to
+// all accounts. Zero storage values are absent. Snapshot journals restore prior
+// roots, and durable checkpoints include code up to 24 KiB. Legacy checkpoints
+// with preimages remain readable; new checkpoints store hashed keys.
 //
-// storage slot → secure storage trie ─┐
-// code bytes → Keccak code hash ──────┼→ RLP account → secure state trie → root
-//                                      └── snapshot journal → revert/commit
+// address / slot → Keccak key → raw trie ─┐
+// code bytes → Keccak code hash ──────────┼→ RLP account → state root
+//                                         └── snapshot journal → revert/commit
 // shortcut: account lookups scan arrays and journal records copy account slots; use indexed maps and slot-level undo if profiling shows this in-memory path is costly.
 const std = @import("std");
 const rlp = @import("rlp");
@@ -83,10 +84,11 @@ pub const Account = struct {
     code_hash: Hash,
 };
 
-const StorageEntry = struct { slot: u256, value: u256 };
-const StorageKey = struct { address: Address, slot: u256 };
+const StorageEntry = struct { key: Hash, value: u256 };
+const StorageKey = struct { address: Hash, slot: Hash };
 const AccountEntry = struct {
-    address: Address,
+    address: Address = .{0} ** 20,
+    key: Hash,
     nonce: u64 = 0,
     balance: u256 = 0,
     code_hash: Hash = EMPTY_CODE_HASH,
@@ -97,7 +99,7 @@ const AccountFields = struct { nonce: u64, balance: u256, code_hash: Hash };
 const Undo = union(enum) {
     fields: struct { address: Address, previous: AccountFields },
     storage: struct { address: Address, slot: u256, previous: ?u256 },
-    create: Address,
+    create: Hash,
     delete: AccountEntry,
 };
 const SnapshotMarker = struct { id: u64, journal_len: usize };
@@ -109,7 +111,7 @@ pub const Snapshot = struct { id: u64 };
 pub const State = struct {
     allocator: std.mem.Allocator,
     accounts: std.ArrayList(AccountEntry) = .empty,
-    account_index: std.AutoHashMap(Address, usize),
+    account_index: std.AutoHashMap(Hash, usize),
     codes: std.ArrayList(CodeEntry) = .empty,
     code_index: std.AutoHashMap(Hash, usize),
     storage_index: std.AutoHashMap(StorageKey, usize),
@@ -147,11 +149,14 @@ pub const State = struct {
         var copy = State.init(allocator);
         errdefer copy.deinit();
         for (self.accounts.items) |entry| {
-            try copy.createAccount(entry.address);
-            try copy.setNonce(entry.address, entry.nonce);
-            try copy.setBalance(entry.address, entry.balance);
-            _ = try copy.setCode(entry.address, self.getCode(entry.address));
-            for (entry.storage.items) |slot| try copy.setStorage(entry.address, slot.slot, slot.value);
+            var cloned = try copy.cloneAccount(entry);
+            _ = copy.appendNewAccount(cloned) catch |err| {
+                copy.deinitAccount(&cloned);
+                return err;
+            };
+        }
+        for (self.codes.items) |code| {
+            try copy.storeCode(code.hash, code.bytes);
         }
         return copy;
     }
@@ -171,13 +176,13 @@ pub const State = struct {
         errdefer out.deinit(allocator);
         try out.appendNTimes(allocator, 0, 4);
         var count: u32 = 0;
-        for (parent.accounts.items) |entry| if (self.findAccountConst(entry.address) == null) {
-            try out.append(allocator, 0);
-            try out.appendSlice(allocator, &entry.address);
+        for (parent.accounts.items) |entry| if (self.account_index.get(entry.key) == null) {
+            try out.append(allocator, 3);
+            try out.appendSlice(allocator, &entry.key);
             count = try std.math.add(u32, count, 1);
         };
         for (self.accounts.items) |*entry| {
-            const old = parent.findAccountConst(entry.address);
+            const old = if (parent.account_index.get(entry.key)) |i| &parent.accounts.items[i] else null;
             if (old != null and self.sameAccount(parent, entry, old.?)) continue;
             try self.writeAccount(&out, allocator, entry);
             count = try std.math.add(u32, count, 1);
@@ -191,18 +196,20 @@ pub const State = struct {
         var offset: usize = 0;
         const count = try takeStateInt(u32, bytes, &offset);
         if (count > (bytes.len - offset) / 21) return error.InvalidStateData;
-        var seen: std.AutoHashMap(Address, void) = .init(self.allocator);
+        var seen: std.AutoHashMap(Hash, void) = .init(self.allocator);
         defer seen.deinit();
         for (0..count) |_| {
             const tag = (try takeStateBytes(bytes, &offset, 1))[0];
-            const address = (try takeStateBytes(bytes, &offset, 20))[0..20].*;
-            if (seen.contains(address)) return error.InvalidStateData;
-            try seen.put(address, {});
-            if (tag == 0) {
-                try self.deleteAccount(address);
+            if (tag > 3) return error.InvalidStateData;
+            const has_preimage = tag <= 1;
+            const address: Address = if (has_preimage) (try takeStateBytes(bytes, &offset, 20))[0..20].* else .{0} ** 20;
+            const key: Hash = if (has_preimage) keccak(&address) else (try takeStateBytes(bytes, &offset, 32))[0..32].*;
+            if (seen.contains(key)) return error.InvalidStateData;
+            try seen.put(key, {});
+            if (tag == 0 or tag == 3) {
+                try self.deleteAccountByKey(key);
                 continue;
             }
-            if (tag != 1) return error.InvalidStateData;
             const nonce = try takeStateInt(u64, bytes, &offset);
             const balance = try takeStateInt(u256, bytes, &offset);
             const code_len = try takeStateInt(u32, bytes, &offset);
@@ -210,42 +217,50 @@ pub const State = struct {
             const code = try takeStateBytes(bytes, &offset, code_len);
             const slots = try takeStateInt(u32, bytes, &offset);
             if (slots > (bytes.len - offset) / 64) return error.InvalidStateData;
-            try self.deleteAccount(address);
-            try self.createAccount(address);
-            try self.setNonce(address, nonce);
-            try self.setBalance(address, balance);
-            _ = try self.setCode(address, code);
+            try self.deleteAccountByKey(key);
+            if (code.len != 0) try self.storeCode(keccak(code), code);
+            var entry = AccountEntry{ .address = address, .key = key, .nonce = nonce, .balance = balance, .code_hash = keccak(code) };
+            var owned = true;
+            errdefer if (owned) entry.storage.deinit(self.allocator);
             for (0..slots) |_| {
-                const slot = try takeStateInt(u256, bytes, &offset);
+                const slot = if (has_preimage) try takeStateInt(u256, bytes, &offset) else 0;
+                const slot_key: Hash = if (has_preimage) slotHash(slot) else (try takeStateBytes(bytes, &offset, 32))[0..32].*;
                 const value = try takeStateInt(u256, bytes, &offset);
-                if (value == 0 or self.getStorage(address, slot) != 0) return error.InvalidStateData;
-                try self.setStorage(address, slot, value);
+                if (value == 0) return error.InvalidStateData;
+                for (entry.storage.items) |stored| if (std.mem.eql(u8, &stored.key, &slot_key)) return error.InvalidStateData;
+                try entry.storage.append(self.allocator, .{ .key = slot_key, .value = value });
             }
+            _ = try self.appendNewAccount(entry);
+            owned = false;
         }
         if (offset != bytes.len) return error.InvalidStateData;
     }
 
     /// Compares consensus account values and storage without depending on slot order.
     fn sameAccount(self: *const State, parent: *const State, current: *const AccountEntry, old: *const AccountEntry) bool {
+        _ = self;
         if (current.nonce != old.nonce or current.balance != old.balance or current.storage.items.len != old.storage.items.len) return false;
-        if (!std.mem.eql(u8, self.getCode(current.address), parent.getCode(old.address))) return false;
-        for (current.storage.items) |slot| if (parent.getStorage(current.address, slot.slot) != slot.value) return false;
+        if (!std.mem.eql(u8, &current.code_hash, &old.code_hash)) return false;
+        for (current.storage.items) |slot| {
+            const index = parent.storage_index.get(.{ .address = old.key, .slot = slot.key }) orelse return false;
+            if (old.storage.items[index].value != slot.value) return false;
+        }
         return true;
     }
 
     /// Writes one full account replacement with code and storage.
     fn writeAccount(self: *const State, out: *std.ArrayList(u8), allocator: std.mem.Allocator, entry: *const AccountEntry) !void {
-        try out.append(allocator, 1);
-        try out.appendSlice(allocator, &entry.address);
+        try out.append(allocator, 2);
+        try out.appendSlice(allocator, &entry.key);
         try appendStateInt(out, allocator, u64, entry.nonce);
         try appendStateInt(out, allocator, u256, entry.balance);
-        const code = self.getCode(entry.address);
+        const code = if (self.code_index.get(entry.code_hash)) |i| self.codes.items[i].bytes else &.{};
         if (code.len > max_checkpoint_code_size) return error.ExecutionCodeTooLarge;
         try appendStateInt(out, allocator, u32, @intCast(code.len));
         try out.appendSlice(allocator, code);
         try appendStateInt(out, allocator, u32, @intCast(entry.storage.items.len));
         for (entry.storage.items) |slot| {
-            try appendStateInt(out, allocator, u256, slot.slot);
+            try out.appendSlice(allocator, &slot.key);
             try appendStateInt(out, allocator, u256, slot.value);
         }
     }
@@ -253,19 +268,24 @@ pub const State = struct {
     /// Creates an explicit empty account; creating an existing account is a no-op.
     pub fn createAccount(self: *State, address: Address) !void {
         if (self.findAccount(address) != null) return;
-        _ = try self.appendNewAccount(.{ .address = address });
+        _ = try self.appendNewAccount(.{ .address = address, .key = keccak(&address) });
     }
 
     /// Removes an account and its storage; absent account deletion is a no-op.
     pub fn deleteAccount(self: *State, address: Address) !void {
-        const index = self.findAccount(address) orelse return;
-        try self.recordDelete(address);
+        try self.deleteAccountByKey(keccak(&address));
+    }
+
+    /// Removes an account by its hashed trie key, preserving snapshot undo.
+    fn deleteAccountByKey(self: *State, key: Hash) !void {
+        const index = self.account_index.get(key) orelse return;
+        try self.recordDeleteByKey(key);
         var removed = self.accounts.swapRemove(index);
         self.removeStorageIndex(&removed);
-        _ = self.account_index.remove(address);
+        _ = self.account_index.remove(key);
         if (index < self.accounts.items.len) {
             const moved = &self.accounts.items[index];
-            self.account_index.getPtr(moved.address).?.* = index;
+            self.account_index.getPtr(moved.key).?.* = index;
         }
         self.deinitAccount(&removed);
     }
@@ -331,13 +351,15 @@ pub const State = struct {
     /// Returns a storage word, or zero when its account or slot is absent.
     pub fn getStorage(self: *const State, address: Address, slot: u256) u256 {
         const entry = self.findAccountConst(address) orelse return 0;
-        const index = self.storage_index.get(.{ .address = address, .slot = slot }) orelse return 0;
+        const index = self.storage_index.get(.{ .address = entry.key, .slot = slotHash(slot) }) orelse return 0;
         return entry.storage.items[index].value;
     }
 
     /// Sets a storage word; writing zero deletes the slot and never creates an absent account.
     pub fn setStorage(self: *State, address: Address, slot: u256, value: u256) !void {
-        const key = StorageKey{ .address = address, .slot = slot };
+        const account_key = keccak(&address);
+        const slot_key = slotHash(slot);
+        const key = StorageKey{ .address = account_key, .slot = slot_key };
         const index = self.findAccount(address);
         if (index) |account_index| {
             const entry = &self.accounts.items[account_index];
@@ -348,7 +370,7 @@ pub const State = struct {
                     _ = self.storage_index.remove(key);
                     if (slot_index < entry.storage.items.len) {
                         const moved = entry.storage.items[slot_index];
-                        self.storage_index.getPtr(.{ .address = address, .slot = moved.slot }).?.* = slot_index;
+                        self.storage_index.getPtr(.{ .address = account_key, .slot = moved.key }).?.* = slot_index;
                     }
                 } else {
                     try self.recordStorage(address, slot, entry.storage.items[slot_index].value);
@@ -359,20 +381,20 @@ pub const State = struct {
             if (value == 0) return;
             try self.recordStorage(address, slot, null);
             try self.storage_index.ensureUnusedCapacity(1);
-            try entry.storage.append(self.allocator, .{ .slot = slot, .value = value });
+            try entry.storage.append(self.allocator, .{ .key = slot_key, .value = value });
             self.storage_index.putAssumeCapacity(key, entry.storage.items.len - 1);
             return;
         }
         if (value == 0) return;
-        var entry = AccountEntry{ .address = address };
+        var entry = AccountEntry{ .address = address, .key = account_key };
         errdefer self.deinitAccount(&entry);
-        try entry.storage.append(self.allocator, .{ .slot = slot, .value = value });
+        try entry.storage.append(self.allocator, .{ .key = slot_key, .value = value });
         _ = try self.appendNewAccount(entry);
     }
 
     /// Computes the secure global state trie root from current account values.
     pub fn stateRoot(self: *const State) !Hash {
-        var state_trie = trie.Trie.init(self.allocator, true);
+        var state_trie = trie.Trie.init(self.allocator, false);
         defer state_trie.deinit();
         for (self.accounts.items) |entry| {
             const storage_root = try self.storageRoot(&entry);
@@ -383,7 +405,7 @@ pub const State = struct {
                 .code_hash = entry.code_hash,
             });
             defer self.allocator.free(account_bytes);
-            try state_trie.put(&entry.address, account_bytes);
+            try state_trie.put(&entry.key, account_bytes);
         }
         return state_trie.root();
     }
@@ -416,7 +438,7 @@ pub const State = struct {
 
     /// Returns the account entry index when the address exists.
     fn findAccount(self: *const State, address: Address) ?usize {
-        return self.account_index.get(address);
+        return self.account_index.get(keccak(&address));
     }
 
     /// Returns an account entry when the address exists.
@@ -430,13 +452,13 @@ pub const State = struct {
         try self.account_index.ensureUnusedCapacity(1);
         try self.storage_index.ensureUnusedCapacity(@intCast(entry.storage.items.len));
         const journal_len = self.journal.items.len;
-        try self.recordCreate(entry.address);
+        try self.recordCreate(entry.key);
         errdefer if (self.journal.items.len > journal_len) self.cancelLastUndo();
         try self.accounts.append(self.allocator, entry);
         const index = self.accounts.items.len - 1;
-        self.account_index.putAssumeCapacity(entry.address, index);
+        self.account_index.putAssumeCapacity(entry.key, index);
         for (entry.storage.items, 0..) |stored, slot_index| {
-            self.storage_index.putAssumeCapacity(.{ .address = entry.address, .slot = stored.slot }, slot_index);
+            self.storage_index.putAssumeCapacity(.{ .address = entry.key, .slot = stored.key }, slot_index);
         }
         return &self.accounts.items[index];
     }
@@ -448,7 +470,7 @@ pub const State = struct {
             return &self.accounts.items[index];
         }
         if (!create) return null;
-        return try self.appendNewAccount(.{ .address = address });
+        return try self.appendNewAccount(.{ .address = address, .key = keccak(&address) });
     }
 
     /// Record the account fields a later snapshot revert must restore.
@@ -463,15 +485,15 @@ pub const State = struct {
     }
 
     /// Record that an account did not exist before this snapshot.
-    fn recordCreate(self: *State, address: Address) !void {
+    fn recordCreate(self: *State, key: Hash) !void {
         if (self.snapshots.items.len == 0) return;
-        try self.journal.append(self.allocator, .{ .create = address });
+        try self.journal.append(self.allocator, .{ .create = key });
     }
 
-    /// Record a deleted account, including its storage, for restoration.
-    fn recordDelete(self: *State, address: Address) !void {
+    /// Saves a deleted account selected by its trie key for snapshot undo.
+    fn recordDeleteByKey(self: *State, key: Hash) !void {
         if (self.snapshots.items.len == 0) return;
-        const index = self.findAccount(address) orelse return;
+        const index = self.account_index.get(key) orelse return;
         var previous = try self.cloneAccount(self.accounts.items[index]);
         errdefer self.deinitAccount(&previous);
         try self.journal.append(self.allocator, .{ .delete = previous });
@@ -504,7 +526,7 @@ pub const State = struct {
                 }
             },
             .storage => |storage| self.undoStorage(storage.address, storage.slot, storage.previous),
-            .create => |address| self.removeAccount(address),
+            .create => |key| self.removeAccount(key),
             .delete => |previous| self.restoreAccount(previous),
         }
     }
@@ -513,12 +535,12 @@ pub const State = struct {
     fn undoStorage(self: *State, address: Address, slot: u256, previous: ?u256) void {
         const account_index = self.findAccount(address) orelse return;
         const entry = &self.accounts.items[account_index];
-        const key = StorageKey{ .address = address, .slot = slot };
+        const key = StorageKey{ .address = keccak(&address), .slot = slotHash(slot) };
         if (previous) |value| {
             if (self.storage_index.get(key)) |slot_index| {
                 entry.storage.items[slot_index].value = value;
             } else {
-                entry.storage.appendAssumeCapacity(.{ .slot = slot, .value = value });
+                entry.storage.appendAssumeCapacity(.{ .key = key.slot, .value = value });
                 self.storage_index.putAssumeCapacity(key, entry.storage.items.len - 1);
             }
         } else if (self.storage_index.get(key)) |slot_index| {
@@ -526,7 +548,7 @@ pub const State = struct {
             _ = self.storage_index.remove(key);
             if (slot_index < entry.storage.items.len) {
                 const moved = entry.storage.items[slot_index];
-                self.storage_index.getPtr(.{ .address = address, .slot = moved.slot }).?.* = slot_index;
+                self.storage_index.getPtr(.{ .address = key.address, .slot = moved.key }).?.* = slot_index;
             }
         }
     }
@@ -535,28 +557,28 @@ pub const State = struct {
     fn restoreAccount(self: *State, previous: AccountEntry) void {
         self.accounts.appendAssumeCapacity(previous);
         const index = self.accounts.items.len - 1;
-        self.account_index.putAssumeCapacity(previous.address, index);
+        self.account_index.putAssumeCapacity(previous.key, index);
         for (previous.storage.items, 0..) |stored, slot_index| {
-            self.storage_index.putAssumeCapacity(.{ .address = previous.address, .slot = stored.slot }, slot_index);
+            self.storage_index.putAssumeCapacity(.{ .address = previous.key, .slot = stored.key }, slot_index);
         }
     }
 
     /// Remove one account and all of its index entries.
-    fn removeAccount(self: *State, address: Address) void {
-        const index = self.findAccount(address) orelse return;
+    fn removeAccount(self: *State, key: Hash) void {
+        const index = self.account_index.get(key) orelse return;
         var removed = self.accounts.swapRemove(index);
         self.removeStorageIndex(&removed);
-        _ = self.account_index.remove(address);
+        _ = self.account_index.remove(key);
         if (index < self.accounts.items.len) {
             const moved = &self.accounts.items[index];
-            self.account_index.getPtr(moved.address).?.* = index;
+            self.account_index.getPtr(moved.key).?.* = index;
         }
         self.deinitAccount(&removed);
     }
 
     /// Remove every indexed storage slot owned by one account.
     fn removeStorageIndex(self: *State, entry: *const AccountEntry) void {
-        for (entry.storage.items) |stored| _ = self.storage_index.remove(.{ .address = entry.address, .slot = stored.slot });
+        for (entry.storage.items) |stored| _ = self.storage_index.remove(.{ .address = entry.key, .slot = stored.key });
     }
 
     /// Frees an unneeded last journal record after an account append failure.
@@ -591,14 +613,12 @@ pub const State = struct {
 
     /// Computes one account's secure storage trie root.
     fn storageRoot(self: *const State, account: *const AccountEntry) !Hash {
-        var storage_trie = trie.Trie.init(self.allocator, true);
+        var storage_trie = trie.Trie.init(self.allocator, false);
         defer storage_trie.deinit();
         for (account.storage.items) |stored| {
-            var key: [32]u8 = undefined;
-            std.mem.writeInt(u256, &key, stored.slot, .big);
             const value = try encodeValue(self.allocator, stored.value);
             defer self.allocator.free(value);
-            try storage_trie.put(&key, value);
+            try storage_trie.put(&stored.key, value);
         }
         return storage_trie.root();
     }
@@ -675,4 +695,11 @@ fn keccak(bytes: []const u8) Hash {
     var digest: Hash = undefined;
     std.crypto.hash.sha3.Keccak256.hash(bytes, &digest, .{});
     return digest;
+}
+
+/// Hashes a 256-bit storage slot as the secure storage trie key.
+fn slotHash(slot: u256) Hash {
+    var bytes: [32]u8 = undefined;
+    std.mem.writeInt(u256, &bytes, slot, .big);
+    return keccak(&bytes);
 }

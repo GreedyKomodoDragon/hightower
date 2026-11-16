@@ -1208,6 +1208,101 @@ test "execution state checkpoints and deltas restore roots" {
     try testing.expectError(error.InvalidStateData, restored.applyStateBytes(delta[0 .. delta.len - 1]));
 }
 
+test "hashed checkpoint keys remain executable after mutation and recovery" {
+    const a = testing.allocator;
+    const address: execution.Address = .{0x42} ** 20;
+    const slot: u256 = 7;
+    const value: u256 = 9;
+    var original = execution.state.State.init(a);
+    defer original.deinit();
+    try original.setNonce(address, 2);
+    try original.setBalance(address, 100);
+    try original.setStorage(address, slot, value);
+    _ = try original.setCode(address, "code");
+
+    var account_key: [32]u8 = undefined;
+    std.crypto.hash.sha3.Keccak256.hash(&address, &account_key, .{});
+    var slot_bytes: [32]u8 = undefined;
+    std.mem.writeInt(u256, &slot_bytes, slot, .big);
+    var slot_key: [32]u8 = undefined;
+    std.crypto.hash.sha3.Keccak256.hash(&slot_bytes, &slot_key, .{});
+    var raw: std.ArrayList(u8) = .empty;
+    defer raw.deinit(a);
+    var count: [4]u8 = undefined;
+    std.mem.writeInt(u32, &count, 1, .little);
+    try raw.appendSlice(a, &count);
+    try raw.append(a, 2);
+    try raw.appendSlice(a, &account_key);
+    var nonce: [8]u8 = undefined;
+    std.mem.writeInt(u64, &nonce, 2, .little);
+    try raw.appendSlice(a, &nonce);
+    var number: [32]u8 = undefined;
+    std.mem.writeInt(u256, &number, 100, .little);
+    try raw.appendSlice(a, &number);
+    std.mem.writeInt(u32, &count, 4, .little);
+    try raw.appendSlice(a, &count);
+    try raw.appendSlice(a, "code");
+    std.mem.writeInt(u32, &count, 1, .little);
+    try raw.appendSlice(a, &count);
+    try raw.appendSlice(a, &slot_key);
+    std.mem.writeInt(u256, &number, value, .little);
+    try raw.appendSlice(a, &number);
+
+    var imported = execution.state.State.init(a);
+    defer imported.deinit();
+    try imported.applyStateBytes(raw.items);
+    try testing.expectEqualSlices(u8, &(try original.stateRoot()), &(try imported.stateRoot()));
+    try testing.expectEqual(@as(u256, 100), imported.getBalance(address));
+    try testing.expectEqual(value, imported.getStorage(address, slot));
+    try testing.expectEqualStrings("code", imported.getCode(address));
+    var parent = try imported.clone(a);
+    defer parent.deinit();
+    try imported.setStorage(address, slot, 11);
+    try imported.setBalance(address, 101);
+    const delta = try imported.deltaBytes(a, &parent);
+    defer a.free(delta);
+    try parent.applyStateBytes(delta);
+    try testing.expectEqualSlices(u8, &(try imported.stateRoot()), &(try parent.stateRoot()));
+    const checkpoint = try parent.checkpointBytes(a);
+    defer a.free(checkpoint);
+    var reopened = execution.state.State.init(a);
+    defer reopened.deinit();
+    try reopened.applyStateBytes(checkpoint);
+    try testing.expectEqualSlices(u8, &(try imported.stateRoot()), &(try reopened.stateRoot()));
+}
+
+test "legacy checkpoint account preimages remain readable" {
+    const a = testing.allocator;
+    const address: execution.Address = .{0x17} ** 20;
+    var raw: std.ArrayList(u8) = .empty;
+    defer raw.deinit(a);
+    var count: [4]u8 = undefined;
+    std.mem.writeInt(u32, &count, 1, .little);
+    try raw.appendSlice(a, &count);
+    try raw.append(a, 1);
+    try raw.appendSlice(a, &address);
+    var nonce: [8]u8 = undefined;
+    std.mem.writeInt(u64, &nonce, 3, .little);
+    try raw.appendSlice(a, &nonce);
+    var balance: [32]u8 = undefined;
+    std.mem.writeInt(u256, &balance, 42, .little);
+    try raw.appendSlice(a, &balance);
+    std.mem.writeInt(u32, &count, 0, .little);
+    try raw.appendSlice(a, &count);
+    try raw.appendSlice(a, &count);
+
+    var imported = execution.state.State.init(a);
+    defer imported.deinit();
+    try imported.applyStateBytes(raw.items);
+    try testing.expectEqual(@as(u64, 3), imported.getNonce(address));
+    try testing.expectEqual(@as(u256, 42), imported.getBalance(address));
+    var expected = execution.state.State.init(a);
+    defer expected.deinit();
+    try expected.setNonce(address, 3);
+    try expected.setBalance(address, 42);
+    try testing.expectEqualSlices(u8, &(try expected.stateRoot()), &(try imported.stateRoot()));
+}
+
 // Confirms blooms use only log addresses and topics, and combine receipt logs.
 test "receipt blooms include addresses and topics but not data" {
     const logs = [_]execution.Log{.{ .address = .{0x11} ** 20, .topics = &.{.{0x22} ** 32}, .data = "ignored" }};
