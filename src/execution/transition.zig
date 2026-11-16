@@ -94,24 +94,21 @@ pub fn fields(tx: execution.Transaction, fork: Fork) !TxFields {
     };
 }
 
-/// Computes intrinsic gas including access-list entries and Prague's calldata floor.
+/// Computes intrinsic gas deducted before EVM execution, excluding the calldata floor.
 fn intrinsicGas(tx: TxFields, fork: Fork) !u64 {
     var gas: u64 = if (tx.to == null) 53_000 else 21_000;
     if (tx.to == null and @intFromEnum(fork) >= @intFromEnum(Fork.shanghai)) {
         if (tx.data.len > 49_152) return error.InitcodeTooLarge;
         gas = try std.math.add(u64, gas, try std.math.mul(u64, @intCast((tx.data.len + 31) / 32), 2));
     }
-    var tokens: u64 = 0;
     for (tx.data) |byte| {
         gas = try std.math.add(u64, gas, if (byte == 0) 4 else 16);
-        tokens = try std.math.add(u64, tokens, if (byte == 0) 1 else 4);
     }
     for (tx.access_list) |entry| {
         gas = try std.math.add(u64, gas, 2400);
         gas = try std.math.add(u64, gas, try std.math.mul(u64, @intCast(entry.storage_keys.len), 1900));
     }
     gas = try std.math.add(u64, gas, try std.math.mul(u64, @intCast(tx.authorizations.len), 25_000));
-    if (@intFromEnum(fork) >= @intFromEnum(Fork.prague)) gas = @max(gas, try std.math.add(u64, 21_000, try std.math.mul(u64, tokens, 10)));
     return gas;
 }
 
@@ -173,7 +170,8 @@ fn validateTransaction(allocator: std.mem.Allocator, world: *state.State, contex
     if (world.getNonce(sender) != f.nonce) return error.InvalidNonce;
     if (f.gas_limit > available_gas) return error.BlockGasLimitExceeded;
     const intrinsic = intrinsicGas(f, context.fork) catch |err| return if (err == error.InitcodeTooLarge) err else error.IntrinsicGasOverflow;
-    if (f.gas_limit < intrinsic) return error.IntrinsicGasTooLow;
+    const floor = if (@intFromEnum(context.fork) >= @intFromEnum(Fork.prague)) calldataFloor(f.data) catch return error.IntrinsicGasOverflow else 0;
+    if (f.gas_limit < @max(intrinsic, floor)) return error.IntrinsicGasTooLow;
     if (f.priority_fee > f.max_fee or f.max_fee < context.base_fee) return error.InvalidFee;
     if (f.blob_fee_cap != null) {
         if (f.blob_hashes.len == 0 or f.blob_hashes.len > 6) return error.InvalidBlobCount;

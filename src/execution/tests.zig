@@ -1725,7 +1725,7 @@ test "signed local token deployment, transfer, and revert commit through block a
             inline else => |p| .{ .dynamic_fee = .{ .status = p.status, .cumulative_gas_used = p.cumulative_gas_used, .logs = copied_logs, .logs_bloom = p.logs_bloom } },
         };
     }
-    try testing.expectEqual(@as(u64, 184_995), gas_used);
+    try testing.expectEqual(@as(u64, 183_261), gas_used);
     try testing.expectEqual(@as(u256, 925), simulated.getStorage(contract, std.mem.readInt(u160, &sender, .big)));
     try testing.expectEqual(@as(u256, 75), simulated.getStorage(contract, std.mem.readInt(u160, &recipient, .big)));
     try testing.expectEqual(@as(usize, 0), receipts[2].dynamic_fee.logs.len);
