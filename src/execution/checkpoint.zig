@@ -32,4 +32,3 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io, header_path: []const u8, s
     world.* = restored;
     return header;
 }
-

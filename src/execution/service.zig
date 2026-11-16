@@ -37,7 +37,7 @@ fn parseConfig(a: std.mem.Allocator, bytes: []const u8) !struct { value: Config,
     if (config.checkpoint_header != null or config.checkpoint_state != null or config.checkpoint_hash != null) {
         if (config.checkpoint_header == null or config.checkpoint_state == null or config.checkpoint_hash == null) return error.MissingCheckpoint;
         if (config.checkpoint_header.?.len == 0 or config.checkpoint_state.?.len == 0 or config.checkpoint_hash.?.len != 66 or !std.mem.startsWith(u8, config.checkpoint_hash.?, "0x")) return error.InvalidCheckpoint;
-        var hash: execution.Hash = undefined;
+        var hash: execution.Hash = .{0} ** 32;
         _ = std.fmt.hexToBytes(&hash, config.checkpoint_hash.?[2..]) catch return error.InvalidCheckpoint;
     }
     const engine_address = try bindAddress(config.engine_bind);
@@ -81,7 +81,7 @@ pub fn main(init: std.process.Init) !void {
     const genesis = try execution.genesis.load(a, init.io, config.genesis, &world);
     var anchor = genesis.header;
     if (config.checkpoint_header) |path| {
-        var trusted_hash: execution.Hash = undefined;
+        var trusted_hash: execution.Hash = .{0} ** 32;
         _ = std.fmt.hexToBytes(&trusted_hash, config.checkpoint_hash.?[2..]) catch return error.InvalidCheckpoint;
         anchor = try execution.checkpoint.load(a, init.io, path, config.checkpoint_state.?, trusted_hash, &world);
     }
