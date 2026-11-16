@@ -116,7 +116,7 @@ def compare_block(hightower_port, geth_port, number):
             raise AssertionError(f"block {number} {method} mismatch: Hightower={lresult!r}; Geth={rresult!r}")
 
 
-def test_peer_catchup(temporary, config, secret, geth_rpc_port, peer_bin, head, number, payload, execution_requests):
+def test_peer_catchup(temporary, config, secret, geth_rpc_port, geth_engine_port, peer_bin, head, number, payload, execution_requests):
     """Fetch Geth's blocks over eth/69 into a fresh Hightower database."""
     fresh = dict(config, data_dir=str(temporary / "peer-data"), engine_bind=f"127.0.0.1:{port()}", rpc_bind=f"127.0.0.1:{port()}")
     fresh.pop("transfer_contract", None)
@@ -172,6 +172,50 @@ def test_peer_catchup(temporary, config, secret, geth_rpc_port, peer_bin, head, 
         time.sleep(2)
         assert worker.poll() is None, f"execution peer failed after restart: {(temporary / 'execution-peer.log').read_text()}"
         assert request(fresh_rpc, "eth_syncing", []) is False
+        worker.terminate()
+        worker.wait(timeout=5)
+        worker = None
+        stop(service, secret)
+        service = None
+
+        header_file = temporary / "snap-header.rlp"
+        header_file.write_bytes(bytes.fromhex(request(geth_rpc_port, "debug_getRawHeader", [hex(number)])[2:]))
+        snap = dict(fresh, data_dir=str(temporary / "snap-data"), engine_bind=f"127.0.0.1:{port()}", rpc_bind=f"127.0.0.1:{port()}")
+        snap.update(checkpoint_header=str(header_file), checkpoint_state=str(temporary / "snap-state.bin"), checkpoint_hash=head)
+        snap_path = temporary / "snap-config.json"
+        snap_path.write_text(json.dumps(snap))
+        downloaded = subprocess.run([peer_bin, "--snapshot", "--config", str(snap_path), "--peer", enode], cwd=ROOT, capture_output=True, timeout=60)
+        assert downloaded.returncode == 0, f"SNAP download failed: {downloaded.stderr.decode()}; Geth log tail={(temporary / 'geth.log').read_text()[-4000:]}"
+        service = subprocess.Popen([str(ROOT / "zig-out/bin/hightower-execution"), "--config", str(snap_path)], cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        snap_rpc = int(snap["rpc_bind"].split(":")[-1])
+        wait_ready(service, snap_rpc)
+        assert request(snap_rpc, "eth_blockNumber", []) == hex(number)
+        compare_block(snap_rpc, geth_rpc_port, number)
+        primary_rpc = int(config["rpc_bind"].split(":")[-1])
+        genesis_hash = request(primary_rpc, "eth_getBlockByNumber", ["0x0", False])["hash"]
+        primary_engine = int(config["engine_bind"].split(":")[-1])
+        choice = {"headBlockHash": head, "safeBlockHash": genesis_hash, "finalizedBlockHash": genesis_hash}
+        attributes = {"timestamp": hex(number + 1), "prevRandao": ZERO, "suggestedFeeRecipient": "0x" + "00" * 20, "withdrawals": [], "parentBeaconBlockRoot": ZERO}
+        update = request(primary_engine, "engine_forkchoiceUpdatedV3", [choice, attributes], token(secret))
+        successor = request(primary_engine, "engine_getPayloadV5", [update["payloadId"]], token(secret))
+        next_payload = successor["executionPayload"]
+        assert request(primary_engine, "engine_newPayloadV4", [next_payload, [], ZERO, successor["executionRequests"]], token(secret))["status"] == "VALID"
+        assert request(geth_engine_port, "engine_newPayloadV4", [next_payload, [], ZERO, successor["executionRequests"]], token(secret))["status"] == "VALID"
+        next_hash = next_payload["blockHash"]
+        next_choice = {"headBlockHash": next_hash, "safeBlockHash": head, "finalizedBlockHash": head}
+        assert request(geth_engine_port, "engine_forkchoiceUpdatedV3", [next_choice, None], token(secret))["payloadStatus"]["status"] == "VALID"
+        worker = subprocess.Popen([peer_bin, "--config", str(snap_path), "--peer", enode], cwd=ROOT, stdout=peer_log, stderr=peer_log)
+        snap_engine = int(snap["engine_bind"].split(":")[-1])
+        for _ in range(100):
+            assert worker.poll() is None, f"SNAP successor worker exited: {(temporary / 'execution-peer.log').read_text()}"
+            if request(snap_engine, "hightower_hasExecutionBlock", [next_hash], token(secret)):
+                break
+            time.sleep(0.1)
+        else:
+            raise AssertionError(f"SNAP checkpoint did not import successor: {(temporary / 'execution-peer.log').read_text()}")
+        assert request(snap_rpc, "eth_blockNumber", []) == hex(number)
+        assert request(snap_engine, "engine_forkchoiceUpdatedV3", [next_choice, None], token(secret))["payloadStatus"]["status"] == "VALID"
+        compare_block(snap_rpc, geth_rpc_port, number + 1)
     finally:
         if worker and worker.poll() is None:
             worker.terminate()
@@ -214,7 +258,7 @@ def run(geth_bin=None, peer_bin=None):
             initialized = subprocess.run([geth_bin, "--datadir", str(geth_data), "init", str(temporary / "genesis.json")], capture_output=True, timeout=30)
             assert initialized.returncode == 0, initialized.stderr.decode()
             geth_log = (temporary / "geth.log").open("wb")
-            geth_args = [geth_bin, "--datadir", str(geth_data), "--networkid", "1", "--syncmode", "full", "--authrpc.addr", "127.0.0.1", "--authrpc.port", str(geth_engine_port), "--authrpc.vhosts", "*", "--authrpc.jwtsecret", str(temporary / "jwt.hex"), "--http", "--http.addr", "127.0.0.1", "--http.port", str(geth_rpc_port), "--http.api", "eth,net,web3,admin" if peer_bin else "eth,net,web3", "--nodiscover", "--maxpeers", "2" if peer_bin else "0"]
+            geth_args = [geth_bin, "--datadir", str(geth_data), "--networkid", "1", "--syncmode", "full", "--authrpc.addr", "127.0.0.1", "--authrpc.port", str(geth_engine_port), "--authrpc.vhosts", "*", "--authrpc.jwtsecret", str(temporary / "jwt.hex"), "--http", "--http.addr", "127.0.0.1", "--http.port", str(geth_rpc_port), "--http.api", "eth,net,web3,admin,debug" if peer_bin else "eth,net,web3", "--nodiscover", "--maxpeers", "2" if peer_bin else "0"]
             if peer_bin:
                 geth_args += ["--port", str(port()), "--nat", "extip:127.0.0.1"]
             geth_process = subprocess.Popen(
@@ -348,7 +392,7 @@ def run(geth_bin=None, peer_bin=None):
             reader.join(timeout=5)
             assert not read_errors, read_errors
             if peer_bin:
-                test_peer_catchup(temporary, config, secret, geth_rpc_port, peer_bin, head, 18, payload, built["executionRequests"])
+                test_peer_catchup(temporary, config, secret, geth_rpc_port, geth_engine_port, peer_bin, head, 18, payload, built["executionRequests"])
                 return
             assert request(rpc_port, "eth_getBalance", [SENDER, "latest"]) != "0x3b9aca00"
             logs = request(rpc_port, "eth_getLogs", [{"fromBlock": "0x1"}])

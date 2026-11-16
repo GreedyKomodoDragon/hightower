@@ -1,10 +1,11 @@
-// Execution peers use devp2p discovery and the eth/69 capability to exchange
-// headers and bodies. A trusted local checkpoint supplies the first complete
-// post-state; every later block is submitted to Hightower for execution and
-// root checks before durable storage. Requests use one hash or number at a
-// time, at most two peers, and the protocol's 10 MiB message ceiling.
+// Execution peers use devp2p discovery and eth/69 to exchange headers and
+// bodies. A trusted header can first anchor a SNAP state download; verified
+// account, storage, and code data becomes the complete local checkpoint.
+// Later blocks are submitted to Hightower for execution and root checks before
+// durable storage. Requests use one hash or number at a time, at most two
+// block peers, and the protocols' 10 MiB message ceiling.
 //
-// checkpoint -> header -> body -> Hightower validation -> Engine fork choice
+// trusted header -> SNAP checkpoint -> eth header/body -> validation -> fork choice
 package main
 
 import (
@@ -45,6 +46,7 @@ const maxAncestry = 16
 type config struct {
 	Genesis          string `json:"genesis"`
 	CheckpointHeader string `json:"checkpoint_header"`
+	CheckpointState  string `json:"checkpoint_state"`
 	CheckpointHash   string `json:"checkpoint_hash"`
 	JWTSecret        string `json:"jwt_secret"`
 	EngineBind       string `json:"engine_bind"`
@@ -94,16 +96,23 @@ func (p *peerFlags) Set(value string) error {
 	return nil
 }
 
-// main starts a bounded eth peer worker against the existing Engine listener.
+// main starts SNAP checkpoint acquisition or the bounded eth peer worker.
 func main() {
 	configPath := flag.String("config", "", "execution service config")
+	snapshot := flag.Bool("snapshot", false, "download a complete SNAP checkpoint before starting Hightower")
 	var peers peerFlags
 	flag.Var(&peers, "peer", "reference enode or ENR (repeat for a second peer)")
 	flag.Parse()
 	if *configPath == "" || len(peers) == 0 {
 		log.Fatal("usage: execution-peer --config service.json --peer enode://...")
 	}
-	if err := run(*configPath, peers); err != nil {
+	var err error
+	if *snapshot {
+		err = runSnapshot(*configPath, peers)
+	} else {
+		err = run(*configPath, peers)
+	}
+	if err != nil {
 		log.Fatal(err)
 	}
 }

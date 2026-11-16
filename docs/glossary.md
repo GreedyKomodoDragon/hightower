@@ -42,6 +42,7 @@ Chain:      [Block 0] ───────────────────�
 | devp2p | Ethereum's peer connection and discovery protocols used to exchange execution-chain data. |
 | eth/69 | A version of Ethereum's execution peer protocol that exchanges block headers, bodies, and related messages. |
 | SNAP | An execution peer protocol for downloading authenticated state ranges around a recent block. |
+| SNAP range proof | Trie nodes sent with an account or storage range to show that the returned entries belong to a stated root and that no entries were skipped. |
 | Hashed trie key | The Keccak hash of an account address or storage slot; SNAP sends this key without the original address or slot. |
 | Contract creation transaction | A transaction with no recipient address; its input runs as initcode at an address derived from the sender and nonce. |
 | CREATE | The EVM instruction that runs initcode at an address derived from the creating account and its current nonce. |
