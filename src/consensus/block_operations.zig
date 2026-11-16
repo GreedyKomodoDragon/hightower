@@ -129,6 +129,8 @@ pub fn processAttestation(allocator: std.mem.Allocator, state: *fulu.BeaconState
         target_epoch != helpers.computeEpochAtSlot(data.slot) or data.index != 0 or
         data.slot > state.slot or state.slot - data.slot < preset.MIN_ATTESTATION_INCLUSION_DELAY or state.slot - data.slot > helpers.SLOTS_PER_EPOCH)
         return error.InvalidAttestation;
+    const justified = if (target_epoch == current_epoch) state.current_justified_checkpoint else state.previous_justified_checkpoint;
+    if (!std.meta.eql(data.source, justified)) return error.InvalidAttestation;
 
     const attesting = try getAttestingIndices(allocator, state, attestation);
     defer allocator.free(attesting);
@@ -145,11 +147,9 @@ pub fn processAttestation(allocator: std.mem.Allocator, state: *fulu.BeaconState
     const head_index: usize = helpers.TIMELY_HEAD_FLAG_INDEX;
     var flags: [3]bool = .{ false, false, false };
     const delay = state.slot - data.slot;
-    flags[source_index] = data.source.epoch == helpers.computePreviousEpoch(target_epoch) and
-        std.meta.eql(data.source.root, if (target_epoch == current_epoch) state.current_justified_checkpoint.root else state.previous_justified_checkpoint.root);
+    flags[source_index] = delay <= std.math.sqrt(helpers.SLOTS_PER_EPOCH);
     flags[target_index] = std.meta.eql(data.target.root, blockRootAtEpoch(state, target_epoch) catch return error.InvalidAttestation);
-    flags[head_index] = std.meta.eql(data.beacon_block_root, block_root) and delay == preset.MIN_ATTESTATION_INCLUSION_DELAY;
-    if (delay > std.math.sqrt(helpers.SLOTS_PER_EPOCH)) flags[source_index] = false;
+    flags[head_index] = flags[target_index] and std.meta.eql(data.beacon_block_root, block_root) and delay == preset.MIN_ATTESTATION_INCLUSION_DELAY;
     if (delay > helpers.SLOTS_PER_EPOCH) flags[target_index] = false;
 
     const participation = if (target_epoch == current_epoch)
