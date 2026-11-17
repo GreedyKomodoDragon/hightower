@@ -127,7 +127,7 @@ pub fn processAttestation(allocator: std.mem.Allocator, state: *fulu.BeaconState
     const target_epoch = data.target.epoch;
     if ((target_epoch != current_epoch and target_epoch != helpers.computePreviousEpoch(current_epoch)) or
         target_epoch != helpers.computeEpochAtSlot(data.slot) or data.index != 0 or
-        data.slot > state.slot or state.slot - data.slot < preset.MIN_ATTESTATION_INCLUSION_DELAY or state.slot - data.slot > helpers.SLOTS_PER_EPOCH)
+        data.slot > state.slot or state.slot - data.slot < preset.MIN_ATTESTATION_INCLUSION_DELAY)
         return error.InvalidAttestation;
     const justified = if (target_epoch == current_epoch) state.current_justified_checkpoint else state.previous_justified_checkpoint;
     if (!std.meta.eql(data.source, justified)) return error.InvalidAttestation;
@@ -150,7 +150,6 @@ pub fn processAttestation(allocator: std.mem.Allocator, state: *fulu.BeaconState
     flags[source_index] = delay <= std.math.sqrt(helpers.SLOTS_PER_EPOCH);
     flags[target_index] = std.meta.eql(data.target.root, blockRootAtEpoch(state, target_epoch) catch return error.InvalidAttestation);
     flags[head_index] = flags[target_index] and std.meta.eql(data.beacon_block_root, block_root) and delay == preset.MIN_ATTESTATION_INCLUSION_DELAY;
-    if (delay > helpers.SLOTS_PER_EPOCH) flags[target_index] = false;
 
     const participation = if (target_epoch == current_epoch)
         @constCast(state.current_epoch_participation.data)
