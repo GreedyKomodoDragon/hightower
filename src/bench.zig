@@ -16,6 +16,9 @@ const anchor_state_bytes = @embedFile("consensus/fixtures/fulu_fork_choice/basic
 const anchor_block_bytes = @embedFile("consensus/fixtures/fulu_fork_choice/basic/anchor_block.ssz_snappy");
 const attestation_pre_bytes = @embedFile("consensus/fixtures/fulu_block_operations/attestation_valid/pre.ssz_snappy");
 const attestation_bytes = @embedFile("consensus/fixtures/fulu_block_operations/attestation_valid/attestation.ssz_snappy");
+const sync_state_bytes = @embedFile("consensus/fixtures/fulu_block_operations/sync_aggregate_valid/pre.ssz_snappy");
+const sync_aggregate_bytes = @embedFile("consensus/fixtures/fulu_block_operations/sync_aggregate_valid/sync_aggregate.ssz_snappy");
+const mainnet_validator_count: usize = 1_000_000;
 const heavier_blocks = [_][]const u8{
     @embedFile("consensus/fixtures/fulu_fork_choice/heavier_branch/block_0xbc8706b8945c619414fb557decb7cb893c5e240ea95ec8a0e9d97c6f56532cff.ssz_snappy"),
     @embedFile("consensus/fixtures/fulu_fork_choice/heavier_branch/block_0xc44a335c2ae08ad57a68b81affd6b22d79427b4c755214eebcc74351d2b29347.ssz_snappy"),
@@ -108,6 +111,17 @@ const RootContext = struct {
     fn run(self: @This()) !void {
         const root = try merkle.HashTreeRoot(self.allocator, self.state.*);
         std.mem.doNotOptimizeAway(root);
+    }
+};
+
+const SyncAggregateContext = struct {
+    allocator: std.mem.Allocator,
+    state: *fulu.BeaconState,
+    aggregate: fulu.SyncAggregate,
+
+    /// Measure sync aggregate processing with a mainnet-sized registry.
+    fn run(self: @This()) !void {
+        try consensus.processSyncAggregate(self.allocator, self.state, self.aggregate);
     }
 };
 
@@ -313,6 +327,33 @@ pub fn main(init: std.process.Init) !void {
     try bench(io, allocator, "merkle.hash_tree_root_beacon_state", 20, RootContext{ .allocator = allocator, .state = &anchor[0] });
     try bench(io, allocator, "fork_choice.init_store", 10, InitStoreContext{ .allocator = allocator, .state = &anchor[0], .block = &anchor[1] });
     try bench(io, allocator, "fork_choice.import_block", 5, ImportBlockContext{ .allocator = allocator, .state = &anchor[0], .block = &anchor[1] });
+
+    var sync_state = try fixtures.decodeState(allocator, sync_state_bytes);
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, sync_state);
+    const original_validators = sync_state.validators.data;
+    const original_balances = sync_state.balances.data;
+    const validators = try allocator.alloc(fulu.Validator, mainnet_validator_count);
+    const balances = try allocator.alloc(u64, mainnet_validator_count);
+    @memcpy(validators[0..original_validators.len], original_validators);
+    @memcpy(balances[0..original_balances.len], original_balances);
+    for (validators[original_validators.len..], original_validators.len..) |*validator, index| {
+        validator.* = original_validators[0];
+        validator.pubkey = [_]u8{0xff} ** 48;
+        std.mem.writeInt(u64, validator.pubkey[0..8], index, .little);
+        validator.activation_epoch = 0;
+        validator.exit_epoch = std.math.maxInt(u64);
+        balances[index] = validator.effective_balance;
+    }
+    allocator.free(@constCast(original_validators));
+    allocator.free(@constCast(original_balances));
+    sync_state.validators.data = validators;
+    sync_state.balances.data = balances;
+    const sync_raw = try fixtures.decode(allocator, sync_aggregate_bytes);
+    defer allocator.free(sync_raw);
+    var sync_reader: std.Io.Reader = .fixed(sync_raw);
+    const sync_aggregate = try ssz.deserialize(allocator, fulu.SyncAggregate, &sync_reader);
+    defer ssz.freeDecoded(allocator, fulu.SyncAggregate, sync_aggregate);
+    try bench(io, allocator, "sync_aggregate.1m_validators", 3, SyncAggregateContext{ .allocator = allocator, .state = &sync_state, .aggregate = sync_aggregate });
 
     var store = try loadHeavyStore(allocator);
     defer store.deinit();

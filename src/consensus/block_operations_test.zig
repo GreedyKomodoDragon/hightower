@@ -284,6 +284,19 @@ test "pinned sync aggregate fixtures verify participation signatures" {
     try runInvalid(fulu.SyncAggregate, processSyncAggregate, "sync_aggregate_invalid", "sync_aggregate", error.InvalidSignature);
 }
 
+test "sync aggregate rejects a committee key removed from the validator registry" {
+    const allocator = std.testing.allocator;
+    var state = try fixtures.decodeState(allocator, @embedFile("fixtures/fulu_block_operations/sync_aggregate_valid/pre.ssz_snappy"));
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
+    const aggregate = try decodeValue(fulu.SyncAggregate, allocator, @embedFile("fixtures/fulu_block_operations/sync_aggregate_valid/sync_aggregate.ssz_snappy"));
+    defer ssz.freeDecoded(allocator, fulu.SyncAggregate, aggregate);
+    const key = state.current_sync_committee.pubkeys[0];
+    for (@constCast(state.validators.data)) |*validator| {
+        if (std.mem.eql(u8, &validator.pubkey, &key)) validator.pubkey = [_]u8{0xff} ** 48;
+    }
+    try std.testing.expectError(error.InvalidSyncCommittee, block.processSyncAggregate(allocator, &state, aggregate));
+}
+
 test "Fulu block operations reject legacy deposit bodies" {
     const allocator = std.testing.allocator;
     const case = fixtures.find("empty_block_transition").?;

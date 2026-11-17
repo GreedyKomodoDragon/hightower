@@ -5,6 +5,7 @@
 // execution payload, and discards the mutable state if a transition fails.
 // Fork choice selects the head; snapshots preserve its state across restarts.
 pub const stateTransition = @import("block.zig").stateTransition;
+pub const processSyncAggregate = @import("block.zig").processSyncAggregate;
 pub const processSlots = @import("transition.zig").processSlots;
 pub const processSlot = @import("transition.zig").processSlot;
 pub const processEpoch = @import("epoch.zig").processEpoch;
