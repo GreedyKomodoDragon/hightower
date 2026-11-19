@@ -191,16 +191,27 @@ pub fn processSyncAggregate(allocator: std.mem.Allocator, state: *fulu.BeaconSta
     const participant_reward: u64 = @intCast(max_participant_rewards / preset.SYNC_COMMITTEE_SIZE);
     const proposer_reward: u64 = participant_reward * helpers.PROPOSER_WEIGHT / (helpers.WEIGHT_DENOMINATOR - helpers.PROPOSER_WEIGHT);
     const proposer_index = state.proposer_lookahead[state.slot % helpers.SLOTS_PER_EPOCH];
-    // Index the validator set once; the sync committee repeats 512 pubkeys per block.
+    // Index only committee keys; rebuilding per call sees registry changes.
     var pubkey_indices = std.AutoHashMap(fulu.BLSPubkey, usize).init(allocator);
     defer pubkey_indices.deinit();
-    try pubkey_indices.ensureTotalCapacity(@intCast(state.validators.data.len));
+    try pubkey_indices.ensureTotalCapacity(@intCast(state.current_sync_committee.pubkeys.len));
+    for (state.current_sync_committee.pubkeys) |pubkey| {
+        const entry = try pubkey_indices.getOrPut(pubkey);
+        if (!entry.found_existing) entry.value_ptr.* = std.math.maxInt(usize);
+    }
+    var unresolved = pubkey_indices.count();
     for (state.validators.data, 0..) |validator, index| {
-        const entry = try pubkey_indices.getOrPut(validator.pubkey);
-        if (!entry.found_existing) entry.value_ptr.* = index;
+        if (pubkey_indices.getPtr(validator.pubkey)) |found| {
+            if (found.* == std.math.maxInt(usize)) {
+                found.* = index;
+                unresolved -= 1;
+                if (unresolved == 0) break;
+            }
+        }
     }
     for (state.current_sync_committee.pubkeys, aggregate.sync_committee_bits.data) |pubkey, bit| {
         const index = pubkey_indices.get(pubkey) orelse return error.InvalidSyncCommittee;
+        if (index == std.math.maxInt(usize)) return error.InvalidSyncCommittee;
         if (bit) {
             @constCast(state.balances.data)[index] = std.math.add(u64, state.balances.data[index], participant_reward) catch return error.BalanceOverflow;
             @constCast(state.balances.data)[proposer_index] = std.math.add(u64, state.balances.data[proposer_index], proposer_reward) catch return error.BalanceOverflow;
