@@ -680,6 +680,9 @@ pub fn build(b: *std.Build) void {
     const transition_test_step = b.step("test-transition", "Run selected Fulu transition fixture tests");
     transition_test_step.dependOn(&run_consensus_tests.step);
     transition_test_step.dependOn(&run_api_tests.step);
+    const compile_transition_step = b.step("compile-test-transition", "Compile transition test targets without running them");
+    compile_transition_step.dependOn(&consensus_tests.step);
+    compile_transition_step.dependOn(&api_tests.step);
     const api_test_step = b.step("test-api", "Run Beacon API tests");
     api_test_step.dependOn(&run_api_tests.step);
     test_step.dependOn(&run_mod_tests.step);

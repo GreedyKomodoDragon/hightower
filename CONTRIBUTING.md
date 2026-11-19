@@ -10,7 +10,7 @@ Install Lefthook and zlint v0.10.0 (use the platform binary and checksum in [the
 just hooks-install
 ```
 
-The pre-commit hook runs the same Zig lint and format checks as CI.
+The pre-commit hook runs the same Zig lint and format checks as CI, plus a compile-only check of the consensus and API test targets used by `test-transition`.
 
 ## Pull request description
 
