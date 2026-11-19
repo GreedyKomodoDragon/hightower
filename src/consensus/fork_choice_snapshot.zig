@@ -446,10 +446,14 @@ test "forked chain restores head votes and post-state roots" {
     try saveForkChoiceStore(allocator, io, tmp.dir, "fork.bin", &store);
     var restored = try loadForkChoiceStore(allocator, io, tmp.dir, "fork.bin");
     defer restored.deinit();
+    try std.testing.expectEqual(store.time, restored.time);
+    try std.testing.expectEqual(store.block_timeliness.count(), restored.block_timeliness.count());
     try std.testing.expectEqual(try fork_choice.getHead(&store), try fork_choice.getHead(&restored));
     try std.testing.expectEqual(store.justified_checkpoint, restored.justified_checkpoint);
     try std.testing.expectEqual(store.finalized_checkpoint, restored.finalized_checkpoint);
     try std.testing.expectEqual(store.proposer_boost_root, restored.proposer_boost_root);
+    try fork_choice.onTick(&restored, store.time + @import("consensus_preset").Config.SECONDS_PER_SLOT);
+    try std.testing.expectEqual([_]u8{0} ** 32, restored.proposer_boost_root);
     try std.testing.expectEqual(store.signed_block_signatures.count(), restored.signed_block_signatures.count());
     try std.testing.expectEqual(store.latest_messages.count(), restored.latest_messages.count());
     var votes = store.latest_messages.iterator();
