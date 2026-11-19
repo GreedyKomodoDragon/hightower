@@ -17,6 +17,11 @@ comptime {
 
 const version = "0.0.0";
 const max_sync_range_slots: u64 = 16;
+
+/// Return current wall-clock seconds for fork-choice slot and boost timing.
+fn wallClockSeconds(io: std.Io) u64 {
+    return @intCast(std.Io.Timestamp.toSeconds(std.Io.Clock.real.now(io)));
+}
 const Config = struct {
     listen_address: []const u8,
     anchor_state: []const u8 = "",
@@ -137,6 +142,9 @@ fn runRuntime(init: std.process.Init) !void {
     defer kzg.deinit();
     var engine = try hightower.engine_client.Client.init(allocator, init.io, settings.engine_url, jwt, .osaka);
     defer engine.deinit();
+    // Recovery starts from the saved slot time, so catch up before selecting a head.
+    const startup_time = wallClockSeconds(init.io);
+    if (startup_time > store.time) try hightower.consensus.onForkChoiceTick(&store, startup_time);
     try hightower.consensus.PeerSync.confirmExecutionHead(&store, engine.interface());
     // Recovery needs a durable anchor before the first peer can mutate fork choice.
     try hightower.consensus.saveForkChoiceStore(allocator, init.io, dir, "fork-choice.bin", &store);
@@ -170,6 +178,7 @@ fn runRuntime(init: std.process.Init) !void {
     var scans: [hightower.consensus.P2PService.max_active_peers]?PeerScan = .{null} ** hightower.consensus.P2PService.max_active_peers;
     while (true) {
         try p2p.step(100);
+        try tickRuntime(init.io, &store, &coordinator, &mutex);
         p2p.status.head_root = coordinator.head;
         p2p.status.head_slot = store.blocks.get(coordinator.head).?.slot;
         for (0..hightower.consensus.P2PService.max_active_peers) |index| {
@@ -217,6 +226,24 @@ fn runRuntime(init: std.process.Init) !void {
             p2p.status.head_slot = store.blocks.get(coordinator.head).?.slot;
         }
     }
+}
+
+/// Advance fork-choice time to the wall clock and persist a head changed by ticks.
+fn tickRuntime(io: std.Io, store: *hightower.consensus.ForkChoiceStore, coordinator: *hightower.consensus.PeerSync.Coordinator, mutex: *std.Io.Mutex) !void {
+    try mutex.lock(io);
+    defer mutex.unlock(io);
+    const now = wallClockSeconds(io);
+    if (now <= store.time) return;
+    try hightower.consensus.onForkChoiceTick(store, now);
+    const selected = try hightower.consensus.getForkChoiceHeadCached(store);
+    if (std.mem.eql(u8, &selected, &coordinator.head)) {
+        try hightower.consensus.saveForkChoiceStoreAt(coordinator.allocator, io, coordinator.dir, "fork-choice.bin", store, selected);
+        return;
+    }
+    try hightower.consensus.PeerSync.confirmExecutionHeadAt(store, coordinator.engine, selected);
+    try hightower.consensus.saveForkChoiceStoreAt(coordinator.allocator, io, coordinator.dir, "fork-choice.bin", store, selected);
+    coordinator.head = selected;
+    coordinator.next_slot = try std.math.add(u64, store.blocks.get(selected).?.slot, 1);
 }
 
 /// Keep the original read-only fixture mode for existing minimal configs.
@@ -267,6 +294,7 @@ const Announcements = struct {
         if (!self.importing) try self.mutex.lock(self.coordinator.io);
         defer if (!self.importing) self.mutex.unlock(self.coordinator.io);
         errdefer self.coordinator.restoreSnapshot() catch @panic("cannot restore durable fork-choice snapshot");
+        try self.coordinator.tick(wallClockSeconds(self.coordinator.io));
         try hightower.consensus.onForkChoiceAttestation(self.coordinator.store, value.*, false);
         const selected = try hightower.consensus.getForkChoiceHeadCached(self.coordinator.store);
         hightower.consensus.PeerSync.confirmExecutionHeadAt(self.coordinator.store, self.coordinator.engine, selected) catch return error.ForkchoiceUpdateFailed;

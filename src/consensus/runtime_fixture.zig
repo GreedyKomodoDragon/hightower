@@ -92,6 +92,8 @@ fn writeFixture(init: std.process.Init) !void {
             break :blk try ssz.deserialize(allocator, fulu.SignedBeaconBlock, &input);
         } else try fixtures.decodeBlock(allocator, fixtures.fork_choice_heavier_blocks[index]);
         fixture_hashes[index + 1] = std.fmt.bytesToHex(next.message.body.execution_payload.block_hash, .lower);
+        // Keep fixture imports at their block time instead of catching up to the real wall clock.
+        coordinator.now_seconds = next.message.body.execution_payload.timestamp + 1;
         _ = try coordinator.importBlocks(null, &.{next}, index + 1, 1);
     }
     const hashes = try std.fmt.allocPrint(allocator, "{s}\n{s}\n{s}\n", .{ fixture_hashes[0], fixture_hashes[1], fixture_hashes[2] });

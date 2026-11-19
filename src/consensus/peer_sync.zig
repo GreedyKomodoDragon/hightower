@@ -1,7 +1,9 @@
 // Peer sync imports ordered ranges and missing ancestors from authenticated peers. A block names its
 // parent by root, and fork choice stores the post-state only after transition
 // and data availability checks pass. The snapshot is replaced after each
-// accepted block, so recovery starts from the last durable head.
+// accepted block, so recovery starts from the last durable head. Store time
+// follows the wall clock; only a block at the wall-clock slot has a known live
+// arrival, so historical range and checkpoint imports stay untimely.
 //
 //   known ancestor -> blocks by root -> verified columns -> transition -> Engine -> snapshot
 // Range requests are capped at 16 slots by the runtime. Each imported side
@@ -17,6 +19,7 @@ const requests = @import("p2p_requests.zig");
 const snapshot = @import("fork_choice_snapshot.zig");
 const engine_api = @import("execution_engine.zig");
 const kzg = @import("execution").kzg;
+const preset = @import("consensus_preset").Config;
 
 /// Select the consensus head in execution before exposing or saving it.
 pub fn confirmExecutionHead(store: *fork_choice.Store, engine: engine_api.ExecutionEngine) !void {
@@ -44,7 +47,25 @@ pub const Coordinator = struct {
     head: fulu.Root,
     next_slot: u64,
     cancelled: ?*const std.atomic.Value(bool) = null,
+    /// Deterministic test clock override; production uses the real wall clock.
+    now_seconds: ?u64 = null,
     const ColumnContext = struct { block: *const fulu.BeaconBlock, parent_state: *const fulu.BeaconState };
+
+    /// Return the configured test clock or the current wall-clock second.
+    fn nowSeconds(self: *const Coordinator) u64 {
+        if (self.now_seconds) |value| return value;
+        return @intCast(std.Io.Timestamp.toSeconds(std.Io.Clock.real.now(self.io)));
+    }
+
+    /// Advance store time to an explicit timestamp without ever moving backward.
+    pub fn tick(self: *Coordinator, now: u64) !void {
+        if (now > self.store.time) try fork_choice.onTick(self.store, now);
+    }
+
+    /// Advance store time to the wall clock so missed slots and boost expiry apply.
+    pub fn tickToWallClock(self: *Coordinator) !void {
+        try self.tick(self.nowSeconds());
+    }
 
     /// Fetch one bounded range after the last scanned slot.
     pub fn step(self: *Coordinator, remote: *peer.Peer, count: u64) !usize {
@@ -130,10 +151,13 @@ pub const Coordinator = struct {
             _ = try active.fetchColumnsByRoot(&.{identifier}, self.columns, self.settings, lookup);
             if (!try self.columns.available(root, &block)) return error.DataUnavailable;
         }
-        const at_slot = try std.math.add(u64, self.store.genesis_time, try std.math.mul(u64, block.slot, @import("consensus_preset").Config.SECONDS_PER_SLOT));
+        const now = self.nowSeconds();
+        try self.tick(now);
+        // Only a block at the wall-clock slot has a known live arrival. Range and
+        // checkpoint backfill for older slots stays untimely regardless of order.
+        const arrival: ?u64 = if (now >= self.store.genesis_time and (now - self.store.genesis_time) / preset.SECONDS_PER_SLOT == block.slot) now else null;
         errdefer self.restoreSnapshot() catch @panic("cannot restore durable fork-choice snapshot");
-        if (at_slot > self.store.time) try fork_choice.onTick(self.store, at_slot);
-        try fork_choice.onBlock(self.store, signed.*, self.engine, .{ .context = self.columns, .is_available = columns.Store.check });
+        try fork_choice.onBlockAt(self.store, signed.*, self.engine, .{ .context = self.columns, .is_available = columns.Store.check }, arrival);
         const selected = fork_choice.getHeadCached(self.store) catch return error.ImportCommitFailed;
         try confirmExecutionHeadAt(self.store, self.engine, selected);
         snapshot.saveForkChoiceStoreAt(self.allocator, self.io, self.dir, "fork-choice.bin", self.store, selected) catch return error.ImportCommitFailed;
@@ -211,6 +235,7 @@ test "ordered import saves a valid head and skips a duplicate replay" {
     const first = try fixtures.decodeBlock(allocator, fixtures.fork_choice_heavier_blocks[0]);
     defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, first);
     try std.testing.expectEqual(@as(usize, 0), first.message.body.blob_kzg_commitments.data.len);
+    coordinator.now_seconds = chain.genesis_time + first.message.slot * preset.SECONDS_PER_SLOT + 1;
     try std.testing.expectEqual(@as(usize, 1), try coordinator.importBlocks(null, &.{first}, 1, 1));
     const accepted = coordinator.head;
     var restored = try snapshot.loadForkChoiceStore(allocator, io, tmp.dir, "fork-choice.bin");
@@ -222,6 +247,7 @@ test "ordered import saves a valid head and skips a duplicate replay" {
     const second = try fixtures.decodeBlock(allocator, fixtures.fork_choice_heavier_blocks[1]);
     defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, second);
     var resumed = Coordinator{ .allocator = allocator, .io = io, .dir = tmp.dir, .store = &restored, .columns = &column_store, .settings = &setup, .engine = engine.interface(), .head = accepted, .next_slot = 2 };
+    resumed.now_seconds = restored.genesis_time + second.message.slot * preset.SECONDS_PER_SLOT + 1;
     var cancel = std.atomic.Value(bool).init(true);
     resumed.cancelled = &cancel;
     try std.testing.expectError(error.Canceled, resumed.importBlocks(null, &.{second}, 2, 1));
@@ -249,8 +275,10 @@ test "ordered import saves a valid head and skips a duplicate replay" {
     defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, third);
     const competing = try fixtures.decodeBlock(allocator, fixtures.fork_choice_heavier_blocks[3]);
     defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, competing);
+    resumed.now_seconds = restored.genesis_time + third.message.slot * preset.SECONDS_PER_SLOT + 1;
     try std.testing.expectEqual(@as(usize, 1), try resumed.importBlocks(null, &.{third}, 3, 1));
     const selected = resumed.head;
+    resumed.now_seconds = restored.genesis_time + competing.message.slot * preset.SECONDS_PER_SLOT + 1;
     try std.testing.expectEqual(@as(usize, 1), try resumed.importBlocks(null, &.{competing}, competing.message.slot, 1));
     try std.testing.expectEqual(selected, resumed.head);
     const competing_root = try merkle.HashTreeRoot(allocator, competing.message);
@@ -271,6 +299,48 @@ test "ordered import saves a valid head and skips a duplicate replay" {
     try std.testing.expectEqual(competing_root, voted);
     try confirmExecutionHeadAt(&restored, engine.interface(), voted);
     try std.testing.expectEqual(competing.message.body.execution_payload.block_hash, engine.head.?);
+}
+
+test "peer sync records live late and historical arrival timeliness" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const fixtures = @import("fixture_runner.zig");
+    const ssz = @import("ssz");
+    const cases = [_]struct { name: []const u8, offset: u64, timely: bool }{
+        .{ .name = "live", .offset = 1, .timely = true },
+        .{ .name = "late", .offset = preset.PROPOSER_BOOST_WINDOW_SECONDS, .timely = false },
+        .{ .name = "historical", .offset = preset.SECONDS_PER_SLOT + 1, .timely = false },
+    };
+    for (cases) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const state = try fixtures.decodeState(allocator, fixtures.fork_choice_anchor_state);
+        defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
+        const anchor_bytes = try fixtures.decode(allocator, fixtures.fork_choice_anchor_block);
+        defer allocator.free(anchor_bytes);
+        var reader: std.Io.Reader = .fixed(anchor_bytes);
+        const anchor = try ssz.deserialize(allocator, fulu.BeaconBlock, &reader);
+        defer ssz.freeDecoded(allocator, fulu.BeaconBlock, anchor);
+        var chain = try fork_choice.initStore(allocator, &state, &anchor);
+        defer chain.deinit();
+        var column_store = try columns.Store.open(allocator, io, tmp.dir, "columns", state.genesis_validators_root, [_]u8{1} ** 32, 128);
+        defer column_store.deinit();
+        var setup = kzg.Settings{};
+        var engine = engine_api.TestEngine{ .status = .valid };
+        const signed = try fixtures.decodeBlock(allocator, fixtures.fork_choice_heavier_blocks[0]);
+        defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, signed);
+        const slot_start = chain.genesis_time + signed.message.slot * preset.SECONDS_PER_SLOT;
+        var coordinator = Coordinator{ .allocator = allocator, .io = io, .dir = tmp.dir, .store = &chain, .columns = &column_store, .settings = &setup, .engine = engine.interface(), .head = try merkle.HashTreeRoot(allocator, anchor), .next_slot = signed.message.slot, .now_seconds = slot_start + case.offset };
+
+        try std.testing.expectEqual(@as(usize, 1), try coordinator.importBlocks(null, &.{signed}, signed.message.slot, 1));
+        const root = try merkle.HashTreeRoot(allocator, signed.message);
+        try std.testing.expectEqual(case.timely, chain.block_timeliness.get(root).?);
+        if (case.timely) {
+            try std.testing.expectEqual(root, chain.proposer_boost_root);
+        } else {
+            try std.testing.expectEqual([_]u8{0} ** 32, chain.proposer_boost_root);
+        }
+    }
 }
 
 test "two peers catch up from an anchor and resume after restart" {
@@ -315,9 +385,13 @@ test "two peers catch up from an anchor and resume after restart" {
     const competing = try fixtures.decodeBlock(allocator, fixtures.fork_choice_heavier_blocks[3]);
     defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, competing);
     const competing_root = try merkle.HashTreeRoot(allocator, competing.message);
-    try std.testing.expectEqual(@as(usize, 2), try source_sync.importBlocks(null, &.{ first, second }, 1, 2));
+    source_sync.now_seconds = source_chain.genesis_time + first.message.slot * preset.SECONDS_PER_SLOT + 1;
+    try std.testing.expectEqual(@as(usize, 1), try source_sync.importBlocks(null, &.{first}, 1, 1));
+    source_sync.now_seconds = source_chain.genesis_time + second.message.slot * preset.SECONDS_PER_SLOT + 1;
+    try std.testing.expectEqual(@as(usize, 1), try source_sync.importBlocks(null, &.{second}, 2, 1));
     const third = try fixtures.decodeBlock(allocator, fixtures.fork_choice_heavier_blocks[2]);
     defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, third);
+    source_sync.now_seconds = source_chain.genesis_time + third.message.slot * preset.SECONDS_PER_SLOT + 1;
     try std.testing.expectEqual(@as(usize, 1), try source_sync.importBlocks(null, &.{third}, 3, 1));
     const ingress_config = ingress.Config{ .genesis_validators_root = state.genesis_validators_root, .fulu_version = state.fork.current_version, .fulu_epoch = 0, .blob_schedule = &@import("helpers.zig").BLOB_SCHEDULE };
     const digest = try ingress_config.digestAtSlot(0);
@@ -391,11 +465,14 @@ test "two peers catch up from an anchor and resume after restart" {
     if (!target_service.connected()) return target_service.last_handshake_error orelse error.ConnectionTimeout;
     try std.testing.expectEqual(@as(usize, 0), try target_sync.stepFrom(try target_service.activePeer(), 19, 16));
     try std.testing.expectEqual(@as(u64, 1), target_sync.next_slot);
+    target_sync.now_seconds = target_chain.genesis_time + first.message.slot * preset.SECONDS_PER_SLOT + 1;
     try std.testing.expectEqual(@as(usize, 1), try target_sync.step(try target_service.activePeer(), 1));
     var restored = try snapshot.loadForkChoiceStore(allocator, io, target_dir.dir, "fork-choice.bin");
     defer restored.deinit();
     var resumed = Coordinator{ .allocator = allocator, .io = io, .dir = target_dir.dir, .store = &restored, .columns = &target_columns, .settings = &setup, .engine = target_engine.interface(), .head = try fork_choice.getHeadCached(&restored), .next_slot = 2 };
+    resumed.now_seconds = restored.genesis_time + second.message.slot * preset.SECONDS_PER_SLOT + 1;
     try std.testing.expectEqual(@as(usize, 1), try resumed.step(try target_service.activePeer(), 1));
+    resumed.now_seconds = restored.genesis_time + third.message.slot * preset.SECONDS_PER_SLOT + 1;
     try std.testing.expectEqual(@as(usize, 1), try resumed.step(try target_service.activePeer(), 1));
     try std.testing.expectEqual(source_sync.head, resumed.head);
     try std.testing.expectEqual(third.message.body.execution_payload.block_hash, target_engine.head.?);
@@ -531,8 +608,9 @@ test "a valid block after more than sixteen empty slots imports from a later ran
     defer pool.deinit();
     const signed = try proposer.propose(allocator, &state, slot, &key, &pool, engine.interface(), choice, sync, payload.fee_recipient, [_]u8{0} ** 32);
     defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, signed);
-    var source_sync = Coordinator{ .allocator = allocator, .io = io, .dir = source_dir, .store = &source, .columns = &source_columns, .settings = &settings, .engine = engine.interface(), .head = anchor_root, .next_slot = 1 };
-    var target_sync = Coordinator{ .allocator = allocator, .io = io, .dir = target_dir, .store = &target, .columns = &target_columns, .settings = &settings, .engine = engine.interface(), .head = anchor_root, .next_slot = 1 };
+    const live_time = state.genesis_time + slot * preset.SECONDS_PER_SLOT + 1;
+    var source_sync = Coordinator{ .allocator = allocator, .io = io, .dir = source_dir, .store = &source, .columns = &source_columns, .settings = &settings, .engine = engine.interface(), .head = anchor_root, .next_slot = 1, .now_seconds = live_time };
+    var target_sync = Coordinator{ .allocator = allocator, .io = io, .dir = target_dir, .store = &target, .columns = &target_columns, .settings = &settings, .engine = engine.interface(), .head = anchor_root, .next_slot = 1, .now_seconds = live_time };
     try snapshot.saveForkChoiceStore(allocator, io, target_dir, "fork-choice.bin", &target);
     try std.testing.expectEqual(@as(usize, 1), try source_sync.importBlocks(null, &.{signed}, slot, 1));
     try std.testing.expectEqual(@as(usize, 0), try target_sync.importBlocks(null, &.{}, 1, 16));

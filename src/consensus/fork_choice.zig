@@ -3,9 +3,11 @@
 // finality; an unrealized checkpoint is known before epoch processing makes it
 // part of the on-chain state. Proposer boost is temporary weight for the first
 // timely block in a slot. Ticks advance in order: clear boost at each slot,
-// then promote newer checkpoints at epoch starts. Fulu keeps these rules and
-// adds data-availability validation during block import. Slot timing and
-// epoch boundaries come from the selected compile-time preset.
+// then promote newer checkpoints at epoch starts. Timeliness uses the block's
+// arrival timestamp, not the slot used to catch the store up, so historical
+// backfill without an arrival time is recorded as untimely. Fulu keeps these
+// rules and adds data-availability validation during block import. Slot timing
+// and epoch boundaries come from the selected compile-time preset.
 //
 //   tick -> slot boundary -> clear proposer boost -> epoch boundary? -> promote checkpoints
 const std = @import("std");
@@ -307,8 +309,26 @@ pub fn isWithinWeakSubjectivityPeriod(store: *const Store, state: *const fulu.Be
     return current_epoch <= checkpoint.epoch or current_epoch - checkpoint.epoch <= period;
 }
 
-/// Import a validated, available block without changing the store on rejection.
+/// Return whether a block for `slot` arrived inside its proposer-boost window.
+/// Unknown arrival time, historical slots, and late arrivals are not timely.
+pub fn isBlockTimely(store: *const Store, slot: u64, arrival_time: ?u64) bool {
+    const arrived = arrival_time orelse return false;
+    if (arrived < store.genesis_time) return false;
+    const elapsed = arrived - store.genesis_time;
+    const arrival_slot = elapsed / preset.SECONDS_PER_SLOT;
+    const seconds_into_slot = elapsed % preset.SECONDS_PER_SLOT;
+    return arrival_slot == slot and store.currentSlot() == slot and seconds_into_slot < preset.PROPOSER_BOOST_WINDOW_SECONDS;
+}
+
+/// Import a validated, available block using the store's current time as arrival.
 pub fn onBlock(store: *Store, signed_block: fulu.SignedBeaconBlock, engine: engine_api.ExecutionEngine, availability: DataAvailabilityCheck) !void {
+    return onBlockAt(store, signed_block, engine, availability, store.time);
+}
+
+/// Import a validated, available block with an explicit arrival timestamp.
+/// A null arrival means the block came from historical backfill, so it is
+/// recorded as untimely and cannot receive proposer boost based on import order.
+pub fn onBlockAt(store: *Store, signed_block: fulu.SignedBeaconBlock, engine: engine_api.ExecutionEngine, availability: DataAvailabilityCheck, arrival_time: ?u64) !void {
     const prior_finalized_epoch = store.finalized_checkpoint.epoch;
     const block = signed_block.message;
     const parent_state = store.block_states.getPtr(block.parent_root) orelse return error.UnknownParent;
@@ -339,8 +359,7 @@ pub fn onBlock(store: *Store, signed_block: fulu.SignedBeaconBlock, engine: engi
     state_owned = false;
     try putStateOwned(store, block_root, state);
     errdefer if (store.block_states.fetchRemove(block_root)) |entry| ssz.freeDecoded(store.allocator, fulu.BeaconState, entry.value);
-    const seconds_into_slot = (store.time - store.genesis_time) % preset.SECONDS_PER_SLOT;
-    const timely = store.currentSlot() == block.slot and seconds_into_slot < preset.PROPOSER_BOOST_WINDOW_SECONDS;
+    const timely = isBlockTimely(store, block.slot, arrival_time);
     try store.block_timeliness.put(block_root, timely);
     errdefer _ = store.block_timeliness.remove(block_root);
     try store.unrealized_justifications.put(block_root, pulled.current_justified_checkpoint);
@@ -854,6 +873,45 @@ test "fork-choice stores an available block and assigns timely proposer boost" {
     try std.testing.expectEqual(@as(usize, 2), store.unrealized_justifications.count());
     try std.testing.expectEqual(block_root, try getHead(&store));
     try std.testing.expect((try getWeight(&store, block_root)) > 0);
+}
+
+test "fork-choice records unknown arrival time as untimely" {
+    const allocator = std.testing.allocator;
+    var fixture = try loadAvailabilityFixture(allocator);
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, fixture[0]);
+    defer ssz.freeDecoded(allocator, fulu.BeaconBlock, fixture[1]);
+    defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, fixture[2]);
+    var store = try initStore(allocator, &fixture[0], &fixture[1]);
+    defer store.deinit();
+    try onTick(&store, fixture[2].message.slot * preset.SECONDS_PER_SLOT);
+    var availability = AvailabilityTestContext{ .available = true };
+    var engine: engine_api.TestEngine = .{ .status = .valid };
+
+    try onBlockAt(&store, fixture[2], engine.interface(), .{
+        .context = &availability,
+        .is_available = AvailabilityTestContext.check,
+    }, null);
+    const root = try merkle.HashTreeRoot(allocator, fixture[2].message);
+    try std.testing.expectEqual(false, store.block_timeliness.get(root).?);
+    try std.testing.expectEqual([_]u8{0} ** 32, store.proposer_boost_root);
+}
+
+test "fork-choice classifies arrival against the proposer boost window" {
+    const allocator = std.testing.allocator;
+    var fixture = try loadAvailabilityFixture(allocator);
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, fixture[0]);
+    defer ssz.freeDecoded(allocator, fulu.BeaconBlock, fixture[1]);
+    defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, fixture[2]);
+    var store = try initStore(allocator, &fixture[0], &fixture[1]);
+    defer store.deinit();
+    const slot = fixture[2].message.slot;
+    const slot_start = store.genesis_time + slot * preset.SECONDS_PER_SLOT;
+    try onTick(&store, slot_start);
+
+    try std.testing.expect(isBlockTimely(&store, slot, slot_start + preset.PROPOSER_BOOST_WINDOW_SECONDS - 1));
+    try std.testing.expect(!isBlockTimely(&store, slot, slot_start + preset.PROPOSER_BOOST_WINDOW_SECONDS));
+    try std.testing.expect(!isBlockTimely(&store, slot, slot_start + preset.SECONDS_PER_SLOT));
+    try std.testing.expect(!isBlockTimely(&store, slot, null));
 }
 
 test "fork-choice votes, proposer boost, expiry, and invalid events" {
