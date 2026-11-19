@@ -22,6 +22,7 @@ pub const ForkchoiceResult = @import("execution_engine.zig").ForkchoiceResult;
 pub const PayloadAttributes = @import("execution_engine.zig").PayloadAttributes;
 pub const BuiltPayload = @import("execution_engine.zig").BuiltPayload;
 pub const OperationPool = @import("operation_pool.zig").Pool;
+pub const OperationStore = @import("operation_store.zig").Store;
 pub const proposeBlock = @import("proposer.zig").propose;
 pub const ForkChoiceStore = @import("fork_choice.zig").Store;
 pub const initForkChoiceStore = @import("fork_choice.zig").initStore;
