@@ -357,9 +357,7 @@ fn decode(allocator: std.mem.Allocator, key: []const u8, bytes: []const u8) !Rec
         .bls_change => |item| merkle.HashTreeRoot(allocator, item),
     };
     if (!std.mem.eql(u8, &root, bytes[2..34])) return error.InvalidRecord;
-    var result: Record = .{ .key = undefined, .value = value };
-    @memcpy(&result.key, key);
-    return result;
+    return .{ .key = key[0 .. prefix.len + 33].*, .value = value };
 }
 
 /// Construct a stable namespace key from its type and root.
