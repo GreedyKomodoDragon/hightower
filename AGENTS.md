@@ -30,3 +30,8 @@
 - The CI workflow runs on pushes to `main` and on pull requests; feature branch pushes alone do not start it. Open a pull request to run CI for branch work.
 - Do not use `gh run watch` or continuously poll CI runs; this fills the context. Check run status once and continue other work if it is still running.
 - Read CI logs only after the run has completed; checking logs while it is running wastes context.
+
+## GitHub CLI from Codex
+
+- If a GitHub CLI command fails in the normal sandbox with an authentication error such as HTTP 401, retry that same `gh` command with Codex sandbox escalation (`require_escalated`). The sandbox may expose an invalid cached token while the elevated CLI has the valid host credentials.
+- Do not start `gh auth login` or switch to browser automation for this sandbox-specific 401; the elevated CLI is the working path.
