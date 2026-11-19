@@ -116,7 +116,7 @@ pub const Store = struct {
         while (offset < keys.len) {
             const count = @min(128, keys.len - offset);
             var ops: [128]lsm.Operation = undefined;
-            for (keys[offset .. offset + count], 0..) |key, i| ops[i] = .{ .delete = &key };
+            for (keys[offset .. offset + count], 0..) |*key, i| ops[i] = .{ .delete = key };
             self.database.write(ops[0..count]) catch |err| {
                 self.poisoned = true;
                 return err;
@@ -185,6 +185,55 @@ pub const Store = struct {
                 if (err == error.OutOfMemory) return err;
                 try invalid.append(allocator, record.key);
             };
+        }
+        for (pool.attestations.items) |entry| {
+            const key = recordKey(.attestation, &entry.root);
+            var stored = false;
+            for (records) |record| {
+                if (std.mem.eql(u8, &record.key, &key)) {
+                    stored = true;
+                    break;
+                }
+            }
+            if (!stored) {
+                const bytes = try encode(allocator, .{ .attestation = entry.value });
+                defer allocator.free(bytes);
+                var ops: [max_records + 1]lsm.Operation = undefined;
+                var count: usize = 0;
+                for (records) |*record| {
+                    if (record.value != .attestation or !std.meta.eql(record.value.attestation.data, entry.value.data)) continue;
+                    var retained = false;
+                    for (pool.attestations.items) |candidate| {
+                        if (std.mem.eql(u8, record.key[prefix.len + 1 ..], &candidate.root)) {
+                            retained = true;
+                            break;
+                        }
+                    }
+                    if (!retained) {
+                        ops[count] = .{ .delete = &record.key };
+                        count += 1;
+                    }
+                }
+                ops[count] = .{ .put = .{ .key = &key, .value = bytes } };
+                try self.mutex.lock(self.database.io);
+                defer self.mutex.unlock(self.database.io);
+                try self.requireWritable();
+                self.database.write(ops[0 .. count + 1]) catch |err| {
+                    self.poisoned = true;
+                    return err;
+                };
+            }
+        }
+        for (records) |record| {
+            if (kind(record.value) != .attestation) continue;
+            var retained = false;
+            for (pool.attestations.items) |entry| {
+                if (std.mem.eql(u8, record.key[prefix.len + 1 ..], &entry.root)) {
+                    retained = true;
+                    break;
+                }
+            }
+            if (!retained) try invalid.append(allocator, record.key);
         }
         try self.delete(invalid.items);
         return pool;
@@ -399,19 +448,78 @@ test "operation store syncs, recovers, and deletes typed records" {
     defer tmp.cleanup();
     var store = try Store.open(allocator, std.testing.io, tmp.dir, "operations");
     const value: Value = .{ .voluntary_exit = .{ .message = .{ .epoch = 2, .validator_index = 3 }, .signature = [_]u8{0} ** 96 } };
+    const other: Value = .{ .voluntary_exit = .{ .message = .{ .epoch = 2, .validator_index = 4 }, .signature = [_]u8{0} ** 96 } };
     try store.put(value);
+    try store.put(other);
     try store.put(value);
     store.poisoned = true;
     try std.testing.expectError(error.DatabaseNeedsReopen, store.put(value));
     store.deinit();
     store = try Store.open(allocator, std.testing.io, tmp.dir, "operations");
     var records = try store.recover(allocator);
-    try std.testing.expectEqual(@as(usize, 1), records.len);
-    const key = records[0].key;
+    try std.testing.expectEqual(@as(usize, 2), records.len);
+    const keys = [_][prefix.len + 33]u8{ records[0].key, records[1].key };
     Store.freeRecords(allocator, records);
-    try store.delete(&.{key});
+    try store.delete(&keys);
     records = try store.recover(allocator);
     defer Store.freeRecords(allocator, records);
     try std.testing.expectEqual(@as(usize, 0), records.len);
     store.deinit();
+}
+
+test "recovery persists merged attestation under its final root" {
+    const allocator = std.testing.allocator;
+    const fixtures = @import("fixture_runner.zig");
+    const blst = @import("blst");
+    const bls = @import("bls.zig");
+    const domains = @import("domains.zig");
+    const helpers = @import("helpers.zig");
+    const operations = @import("block_operations.zig");
+    var state = try fixtures.decodeState(allocator, @embedFile("fixtures/fulu_block_operations/attestation_valid/pre.ssz_snappy"));
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
+    const fixture = try fixtures.decode(allocator, @embedFile("fixtures/fulu_block_operations/attestation_valid/attestation.ssz_snappy"));
+    defer allocator.free(fixture);
+    var reader: std.Io.Reader = .fixed(fixture);
+    const template = try ssz.deserialize(allocator, fulu.Attestation, &reader);
+    defer ssz.freeDecoded(allocator, fulu.Attestation, template);
+    if (template.aggregation_bits.data.len < 2) return error.FixtureTooSmall;
+    var votes = [2]fulu.Attestation{ template, template };
+    var signing_keys = [2]blst.SecretKey{ .{}, .{} };
+    defer for (&signing_keys) |*signing_key| signing_key.deinit();
+    const root = try merkle.HashTreeRoot(allocator, template.data);
+    const domain = domains.getDomain(state, helpers.DOMAIN_BEACON_ATTESTER, template.data.target.epoch);
+    for (&votes, &signing_keys, 0..) |*vote, *signing_key, i| {
+        const bits = try allocator.dupe(bool, template.aggregation_bits.data);
+        @memset(bits, false);
+        bits[i] = true;
+        vote.aggregation_bits.data = bits;
+        const indices = try operations.getAttestingIndices(allocator, &state, vote.*);
+        defer allocator.free(indices);
+        if (indices.len != 1) return error.InvalidFixtureCommittee;
+        const seed = [_]u8{@as(u8, @intCast(0x50 + i))} ** 32;
+        signing_key.keygen(&seed, null);
+        @constCast(state.validators.data)[indices[0]].pubkey = try bls.publicKey(signing_key);
+        vote.signature = bls.sign(signing_key, domains.computeSigningRoot(root, domain));
+    }
+    defer for (votes) |vote| allocator.free(vote.aggregation_bits.data);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try Store.open(allocator, std.testing.io, tmp.dir, "operations");
+    try store.put(.{ .attestation = votes[0] });
+    try store.put(.{ .attestation = votes[1] });
+    var pool = try store.recoverPool(allocator, &state);
+    try std.testing.expectEqual(@as(usize, 1), pool.attestations.items.len);
+    const merged_key = recordKey(.attestation, &pool.attestations.items[0].root);
+    pool.deinit();
+    store.deinit();
+    store = try Store.open(allocator, std.testing.io, tmp.dir, "operations");
+    defer store.deinit();
+    const records = try store.recover(allocator);
+    defer Store.freeRecords(allocator, records);
+    try std.testing.expectEqual(@as(usize, 1), records.len);
+    try std.testing.expectEqualSlices(u8, &merged_key, &records[0].key);
+    try store.delete(&.{merged_key});
+    var recovered = try store.recoverPool(allocator, &state);
+    defer recovered.deinit();
+    try std.testing.expectEqual(@as(usize, 0), recovered.attestations.items.len);
 }
