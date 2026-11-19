@@ -107,7 +107,7 @@ pub const Store = struct {
     /// Delete operation keys in synced atomic batches of at most 128.
     pub fn delete(self: *Store, keys: []const [prefix.len + 33]u8) !void {
         for (keys) |key| {
-            if (!std.mem.startsWith(u8, &key, prefix) or std.meta.intToEnum(Kind, key[prefix.len]) catch null == null) return error.InvalidKey;
+            if (!std.mem.startsWith(u8, &key, prefix) or std.enums.fromInt(Kind, key[prefix.len]) == null) return error.InvalidKey;
         }
         try self.mutex.lock(self.database.io);
         defer self.mutex.unlock(self.database.io);
@@ -139,7 +139,7 @@ pub const Store = struct {
         var total: usize = 0;
         var counts = [_]usize{0} ** 5;
         while (true) {
-            const rows = try self.database.scan(allocator, &lower, &upper, cursor, scan_rows, 16 * 1024 * 1024);
+            const rows = try self.database.scan(allocator, lower, upper, cursor, scan_rows, 16 * 1024 * 1024);
             defer lsm.Database.freeRows(allocator, rows);
             if (rows.len == 0) break;
             for (rows) |row| {
@@ -222,7 +222,7 @@ pub const Store = struct {
         var cursor: ?[]u8 = null;
         defer if (cursor) |key| self.allocator.free(key);
         while (true) {
-            const rows = try self.database.scan(self.allocator, &lower, &upper, cursor, scan_rows, 16 * 1024 * 1024);
+            const rows = try self.database.scan(self.allocator, lower, upper, cursor, scan_rows, 16 * 1024 * 1024);
             defer lsm.Database.freeRows(self.allocator, rows);
             if (rows.len == 0) break;
             for (rows) |row| {
@@ -233,7 +233,7 @@ pub const Store = struct {
                     counts[@intFromEnum(added_kind) - 1] -|= 1;
                     continue;
                 };
-                const tag = std.meta.intToEnum(Kind, row.key[prefix.len]) catch return error.UnknownOperationType;
+                const tag = std.enums.fromInt(Kind, row.key[prefix.len]) orelse return error.UnknownOperationType;
                 total = std.math.add(usize, total, row.key.len + row.value.len) catch return error.PoolByteLimit;
                 records += 1;
                 counts[@intFromEnum(tag) - 1] += 1;
@@ -336,7 +336,7 @@ fn encode(allocator: std.mem.Allocator, value: Value) ![]u8 {
 /// Decode and validate the key, schema, encoded length, SSZ value, and root.
 fn decode(allocator: std.mem.Allocator, key: []const u8, bytes: []const u8) !Record {
     if (key.len != prefix.len + 33 or !std.mem.startsWith(u8, key, prefix) or bytes.len < header_len or bytes[0] != 1) return error.InvalidRecord;
-    const tag = std.meta.intToEnum(Kind, bytes[1]) catch return error.UnknownOperationType;
+    const tag = std.enums.fromInt(Kind, bytes[1]) orelse return error.UnknownOperationType;
     if (key[prefix.len] != @intFromEnum(tag) or std.mem.readInt(u32, bytes[34..38], .little) != bytes.len - header_len or !std.mem.eql(u8, key[prefix.len + 1 ..], bytes[2..34])) return error.InvalidRecord;
     if (bytes.len - header_len > maxSszSizeForKind(tag)) return error.InvalidRecord;
     var reader: std.Io.Reader = .fixed(bytes[header_len..]);
