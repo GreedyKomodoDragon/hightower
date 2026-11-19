@@ -20,6 +20,7 @@ const consolidations = @import("pending_consolidations.zig");
 
 test {
     _ = @import("helpers.zig");
+    _ = @import("operation_store.zig");
     _ = @import("domains.zig");
     _ = @import("bls.zig");
     _ = @import("bls_vectors_test.zig");

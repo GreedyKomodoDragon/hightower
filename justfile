@@ -62,6 +62,10 @@ fmt:
 fmt-check:
     zig fmt --check build.zig build.zig.zon src
 
+# install Lefthook's configured Git hooks
+hooks-install:
+    lefthook install
+
 # remove build artifacts
 clean:
     rm -rf zig-out .zig-cache

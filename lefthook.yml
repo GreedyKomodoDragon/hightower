@@ -1,0 +1,9 @@
+pre-commit:
+  parallel: true
+  commands:
+    zig-lint:
+      run: zlint --deny-warnings src
+    zig-format:
+      run: zig fmt --check build.zig build.zig.zon src
+    zig-compile:
+      run: zig build compile-test-transition
