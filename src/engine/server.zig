@@ -564,10 +564,9 @@ pub const Server = struct {
             self.chain.durability_uncertain = true;
             return err;
         };
-        var previous_path = self.chain.canonical;
-        defer previous_path.deinit(self.allocator);
-        self.chain.canonical = path;
+        var previous_path = try self.chain.replaceCanonical(path);
         path = .empty;
+        defer previous_path.deinit(self.allocator);
         self.chain.safe_hash = safe;
         self.chain.finalized_hash = finalized;
         self.world.deinit();
