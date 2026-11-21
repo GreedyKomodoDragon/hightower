@@ -22,6 +22,8 @@ fn available(_: *anyopaque, _: fulu.Root, _: *const fulu.BeaconBlock) anyerror!b
 
 test "Beacon API resolves canonical roots and rejects invalid requests" {
     const allocator = std.testing.allocator;
+    var router = try api.Router.init(allocator);
+    defer router.deinit();
     const state = try fixtures.decodeState(allocator, fixtures.fork_choice_anchor_state);
     defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
     const block_bytes = try fixtures.decode(allocator, fixtures.fork_choice_anchor_block);
@@ -39,7 +41,7 @@ test "Beacon API resolves canonical roots and rejects invalid requests" {
         "/eth/v1/beacon/states/genesis/root", "/eth/v1/beacon/states/head/finality_checkpoints",
     };
     for (paths) |path| {
-        const response = try api.dispatch(allocator, &store, metadata, path);
+        const response = try api.dispatch(allocator, &router, &store, metadata, path);
         defer response.deinit(allocator);
         try std.testing.expectEqual(std.http.Status.ok, response.status);
         if (response.body.len != 0) {
@@ -80,36 +82,45 @@ test "Beacon API resolves canonical roots and rejects invalid requests" {
         .{ .path = "/eth/v1/beacon/states/999/root", .status = .not_found },
     };
     for (cases) |case| {
-        const response = try api.dispatch(allocator, &store, metadata, case.path);
+        const response = try api.dispatch(allocator, &router, &store, metadata, case.path);
         defer response.deinit(allocator);
         try std.testing.expectEqual(case.status, response.status);
     }
     const block_root = try consensus.getForkChoiceHead(&store);
     const block_path = try std.fmt.allocPrint(allocator, "/eth/v1/beacon/blocks/0x{s}/root", .{std.fmt.bytesToHex(block_root, .lower)});
     defer allocator.free(block_path);
-    const by_block_root = try api.dispatch(allocator, &store, metadata, block_path);
+    const by_block_root = try api.dispatch(allocator, &router, &store, metadata, block_path);
     defer by_block_root.deinit(allocator);
     try std.testing.expectEqual(std.http.Status.ok, by_block_root.status);
     const state_root = try merkle.HashTreeRoot(allocator, state);
     const state_path = try std.fmt.allocPrint(allocator, "/eth/v1/beacon/states/0x{s}/root", .{std.fmt.bytesToHex(state_root, .lower)});
     defer allocator.free(state_path);
-    const by_state_root = try api.dispatch(allocator, &store, metadata, state_path);
+    const by_state_root = try api.dispatch(allocator, &router, &store, metadata, state_path);
     defer by_state_root.deinit(allocator);
     try std.testing.expectEqual(std.http.Status.ok, by_state_root.status);
-    const unknown_root = try api.dispatch(allocator, &store, metadata, "/eth/v1/beacon/blocks/0x0000000000000000000000000000000000000000000000000000000000000000/root");
+    const unknown_root = try api.dispatch(allocator, &router, &store, metadata, "/eth/v1/beacon/blocks/0x0000000000000000000000000000000000000000000000000000000000000000/root");
     defer unknown_root.deinit(allocator);
     try std.testing.expectEqual(std.http.Status.not_found, unknown_root.status);
-    const unavailable = try api.dispatch(allocator, null, metadata, "/eth/v1/beacon/genesis");
+    const unavailable = try api.dispatch(allocator, &router, null, metadata, "/eth/v1/beacon/genesis");
     defer unavailable.deinit(allocator);
     try std.testing.expectEqual(std.http.Status.service_unavailable, unavailable.status);
     var not_ready = metadata;
     not_ready.ready = false;
-    const unavailable_store = try api.dispatch(allocator, &store, not_ready, "/eth/v1/beacon/blocks/head/root");
+    const unavailable_store = try api.dispatch(allocator, &router, &store, not_ready, "/eth/v1/beacon/blocks/head/root");
     defer unavailable_store.deinit(allocator);
     try std.testing.expectEqual(std.http.Status.service_unavailable, unavailable_store.status);
+    const unknown_not_ready = try api.dispatch(allocator, &router, &store, not_ready, "/unknown");
+    defer unknown_not_ready.deinit(allocator);
+    try std.testing.expectEqual(std.http.Status.service_unavailable, unknown_not_ready.status);
+    const unknown = try api.dispatch(allocator, &router, &store, metadata, "/unknown");
+    defer unknown.deinit(allocator);
+    try std.testing.expectEqual(std.http.Status.not_found, unknown.status);
+    const query = try api.dispatch(allocator, &router, &store, metadata, "/eth/v1/node/syncing?ignored=true");
+    defer query.deinit(allocator);
+    try std.testing.expectEqual(std.http.Status.ok, query.status);
     var syncing = metadata;
     syncing.is_syncing = true;
-    const health = try api.dispatch(allocator, &store, syncing, "/eth/v1/node/health");
+    const health = try api.dispatch(allocator, &router, &store, syncing, "/eth/v1/node/health");
     defer health.deinit(allocator);
     try std.testing.expectEqual(std.http.Status.partial_content, health.status);
 }
@@ -151,6 +162,8 @@ test "Beacon API returns a JSON response over a local connection" {
 
 test "metrics scrape reports fork-choice state" {
     const allocator = std.testing.allocator;
+    var router = try api.Router.init(allocator);
+    defer router.deinit();
     const state = try fixtures.decodeState(allocator, fixtures.fork_choice_anchor_state);
     defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
     const block_bytes = try fixtures.decode(allocator, fixtures.fork_choice_anchor_block);
@@ -160,7 +173,7 @@ test "metrics scrape reports fork-choice state" {
     defer ssz.freeDecoded(allocator, fulu.BeaconBlock, block);
     var store = try consensus.initForkChoiceStore(allocator, &state, &block);
     defer store.deinit();
-    const response = try api.dispatch(allocator, &store, .{ .genesis_fork_version = .{ 0, 0, 0, 0 } }, "/metrics");
+    const response = try api.dispatch(allocator, &router, &store, .{ .genesis_fork_version = .{ 0, 0, 0, 0 } }, "/metrics");
     defer response.deinit(allocator);
     try std.testing.expectEqual(std.http.Status.ok, response.status);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "hightower_slot 0\n") != null);
@@ -171,6 +184,8 @@ test "metrics scrape reports fork-choice state" {
 
 test "Beacon API accepts stored noncanonical block and state roots" {
     const allocator = std.testing.allocator;
+    var router = try api.Router.init(allocator);
+    defer router.deinit();
     const state = try fixtures.decodeState(allocator, fixtures.fork_choice_anchor_state);
     defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
     const block_bytes = try fixtures.decode(allocator, fixtures.fork_choice_anchor_block);
@@ -206,14 +221,14 @@ test "Beacon API accepts stored noncanonical block and state roots" {
         if (on_head_chain) continue;
         const path = try std.fmt.allocPrint(allocator, "/eth/v1/beacon/blocks/0x{s}/root", .{std.fmt.bytesToHex(root.*, .lower)});
         defer allocator.free(path);
-        const response = try api.dispatch(allocator, &store, .{ .genesis_fork_version = .{ 0, 0, 0, 0 } }, path);
+        const response = try api.dispatch(allocator, &router, &store, .{ .genesis_fork_version = .{ 0, 0, 0, 0 } }, path);
         defer response.deinit(allocator);
         try std.testing.expectEqual(std.http.Status.ok, response.status);
         const branch_state = store.block_states.get(root.*).?;
         const state_root = try merkle.HashTreeRoot(allocator, branch_state);
         const state_path = try std.fmt.allocPrint(allocator, "/eth/v1/beacon/states/0x{s}/root", .{std.fmt.bytesToHex(state_root, .lower)});
         defer allocator.free(state_path);
-        const state_response = try api.dispatch(allocator, &store, .{ .genesis_fork_version = .{ 0, 0, 0, 0 } }, state_path);
+        const state_response = try api.dispatch(allocator, &router, &store, .{ .genesis_fork_version = .{ 0, 0, 0, 0 } }, state_path);
         defer state_response.deinit(allocator);
         try std.testing.expectEqual(std.http.Status.ok, state_response.status);
         return;

@@ -8,6 +8,8 @@
 const std = @import("std");
 const fulu = @import("fulu");
 const consensus = @import("consensus");
+const routing = @import("router.zig");
+pub const Router = routing.Router;
 
 pub const Metadata = struct {
     ready: bool = true,
@@ -29,10 +31,11 @@ pub const Response = struct {
 };
 
 /// Resolve one bounded GET target against a stable, validated store.
-pub fn dispatch(allocator: std.mem.Allocator, store: ?*const consensus.ForkChoiceStore, metadata: Metadata, target: []const u8) !Response {
-    if (target.len > 1024) return reply(allocator, .bad_request, "invalid request target");
+pub fn dispatch(allocator: std.mem.Allocator, router: *const Router, store: ?*const consensus.ForkChoiceStore, metadata: Metadata, target: []const u8) !Response {
+    if (target.len > routing.max_path_length) return reply(allocator, .bad_request, "invalid request target");
     const path = target[0 .. std.mem.indexOfScalar(u8, target, '?') orelse target.len];
-    if (std.mem.eql(u8, path, "/metrics")) {
+    const route = router.match("GET", path);
+    if (route != null and route.?.handler == @intFromEnum(routing.Handler.metrics)) {
         const chain = store orelse return reply(allocator, .service_unavailable, "service unavailable");
         const head = if (metadata.head) |cached| cached.* else consensus.getForkChoiceHead(chain) catch return reply(allocator, .service_unavailable, "service unavailable");
         const block = chain.blocks.get(head) orelse return reply(allocator, .service_unavailable, "service unavailable");
@@ -43,74 +46,81 @@ pub fn dispatch(allocator: std.mem.Allocator, store: ?*const consensus.ForkChoic
         );
         return .{ .status = .ok, .body = body };
     }
-    // shortcut: route matching scans each endpoint, use the router in https://github.com/GreedyKomodoDragon/hightower/issues/111 when implemented.
-    if (std.mem.eql(u8, path, "/eth/v1/node/health")) {
+    if (route != null and route.?.handler == @intFromEnum(routing.Handler.health)) {
         if (!metadata.ready or store == null) return reply(allocator, .service_unavailable, "service unavailable");
         return .{ .status = if (metadata.is_syncing) .partial_content else .ok, .body = try allocator.dupe(u8, "") };
     }
     if (!metadata.ready or store == null) return reply(allocator, .service_unavailable, "service unavailable");
+    if (route == null) {
+        if (std.mem.eql(u8, path, "/eth/v1/beacon/blocks/root") or
+            std.mem.eql(u8, path, "/eth/v1/beacon/blocks//root") or
+            std.mem.eql(u8, path, "/eth/v1/beacon/states/root") or
+            std.mem.eql(u8, path, "/eth/v1/beacon/states//root") or
+            std.mem.eql(u8, path, "/eth/v1/beacon/states/finality_checkpoints") or
+            std.mem.eql(u8, path, "/eth/v1/beacon/states//finality_checkpoints"))
+            return reply(allocator, .bad_request, "invalid identifier");
+        return reply(allocator, .not_found, "not found");
+    }
+    const matched = route.?;
     const chain = store.?;
     const head = if (metadata.head) |cached| cached.* else consensus.getForkChoiceHead(chain) catch return reply(allocator, .service_unavailable, "service unavailable");
     const head_block = chain.blocks.get(head) orelse return reply(allocator, .service_unavailable, "service unavailable");
-    if (std.mem.eql(u8, path, "/eth/v1/node/syncing")) {
-        var head_slot_buffer: [20]u8 = undefined;
-        var distance_buffer: [20]u8 = undefined;
-        return jsonResponse(allocator, .ok, .{ .data = .{
-            .head_slot = decimal(head_block.slot, &head_slot_buffer),
-            .sync_distance = decimal(metadata.sync_distance, &distance_buffer),
-            .is_syncing = metadata.is_syncing,
-            .is_optimistic = false,
-            .el_offline = false,
-        } });
+    switch (matched.handler) {
+        @intFromEnum(routing.Handler.syncing) => {
+            var head_slot_buffer: [20]u8 = undefined;
+            var distance_buffer: [20]u8 = undefined;
+            return jsonResponse(allocator, .ok, .{ .data = .{
+                .head_slot = decimal(head_block.slot, &head_slot_buffer),
+                .sync_distance = decimal(metadata.sync_distance, &distance_buffer),
+                .is_syncing = metadata.is_syncing,
+                .is_optimistic = false,
+                .el_offline = false,
+            } });
+        },
+        @intFromEnum(routing.Handler.genesis) => {
+            const genesis = chain.block_states.get(chain.finalized_checkpoint.root) orelse return reply(allocator, .service_unavailable, "service unavailable");
+            var time_buffer: [20]u8 = undefined;
+            return jsonResponse(allocator, .ok, .{ .data = .{
+                .genesis_time = decimal(chain.genesis_time, &time_buffer),
+                .genesis_validators_root = hexBytes(32, genesis.genesis_validators_root),
+                .genesis_fork_version = hexBytes(4, metadata.genesis_fork_version),
+            } });
+        },
+        @intFromEnum(routing.Handler.block_root) => {
+            const id = matched.parameter.?;
+            const root = resolveBlock(chain, head, id) catch |err| return idError(allocator, err);
+            return jsonResponse(allocator, .ok, .{ .data = .{ .root = hexBytes(32, root) }, .execution_optimistic = false, .finalized = isFinalized(chain, root) });
+        },
+        @intFromEnum(routing.Handler.state_root), @intFromEnum(routing.Handler.finality_checkpoints) => {
+            const finality = matched.handler == @intFromEnum(routing.Handler.finality_checkpoints);
+            const id = matched.parameter.?;
+            const resolved = resolveState(chain, head, id) catch |err| return idError(allocator, err);
+            if (!finality) return jsonResponse(allocator, .ok, .{ .data = .{ .root = hexBytes(32, resolved.root) }, .execution_optimistic = false, .finalized = isFinalized(chain, resolved.block_root) });
+            const state = resolved.state;
+            var epoch_buffers: [3][20]u8 = undefined;
+            return jsonResponse(allocator, .ok, .{
+                .data = .{
+                    .previous_justified = jsonCheckpoint(state.previous_justified_checkpoint, &epoch_buffers[0]),
+                    .current_justified = jsonCheckpoint(state.current_justified_checkpoint, &epoch_buffers[1]),
+                    .finalized = jsonCheckpoint(state.finalized_checkpoint, &epoch_buffers[2]),
+                },
+                .execution_optimistic = false,
+                .finalized = isFinalized(chain, resolved.block_root),
+            });
+        },
+        else => return reply(allocator, .not_found, "not found"),
     }
-    if (std.mem.eql(u8, path, "/eth/v1/beacon/genesis")) {
-        const genesis = chain.block_states.get(chain.finalized_checkpoint.root) orelse return reply(allocator, .service_unavailable, "service unavailable");
-        var time_buffer: [20]u8 = undefined;
-        return jsonResponse(allocator, .ok, .{ .data = .{
-            .genesis_time = decimal(chain.genesis_time, &time_buffer),
-            .genesis_validators_root = hexBytes(32, genesis.genesis_validators_root),
-            .genesis_fork_version = hexBytes(4, metadata.genesis_fork_version),
-        } });
-    }
-    const block_prefix = "/eth/v1/beacon/blocks/";
-    const state_prefix = "/eth/v1/beacon/states/";
-    if (std.mem.startsWith(u8, path, block_prefix) and std.mem.endsWith(u8, path, "/root")) {
-        if (path.len <= block_prefix.len + "/root".len) return reply(allocator, .bad_request, "invalid identifier");
-        const id = path[block_prefix.len .. path.len - "/root".len];
-        const root = resolveBlock(chain, head, id) catch |err| return idError(allocator, err);
-        return jsonResponse(allocator, .ok, .{ .data = .{ .root = hexBytes(32, root) }, .execution_optimistic = false, .finalized = isFinalized(chain, root) });
-    }
-    if (std.mem.startsWith(u8, path, state_prefix)) {
-        const finality = std.mem.endsWith(u8, path, "/finality_checkpoints");
-        const state_root = std.mem.endsWith(u8, path, "/root");
-        if (!finality and !state_root) return reply(allocator, .not_found, "not found");
-        const suffix_len: usize = if (finality) "/finality_checkpoints".len else "/root".len;
-        if (path.len <= state_prefix.len + suffix_len) return reply(allocator, .bad_request, "invalid identifier");
-        const id = path[state_prefix.len .. path.len - suffix_len];
-        const resolved = resolveState(chain, head, id) catch |err| return idError(allocator, err);
-        if (state_root) return jsonResponse(allocator, .ok, .{ .data = .{ .root = hexBytes(32, resolved.root) }, .execution_optimistic = false, .finalized = isFinalized(chain, resolved.block_root) });
-        const state = resolved.state;
-        var epoch_buffers: [3][20]u8 = undefined;
-        return jsonResponse(allocator, .ok, .{
-            .data = .{
-                .previous_justified = jsonCheckpoint(state.previous_justified_checkpoint, &epoch_buffers[0]),
-                .current_justified = jsonCheckpoint(state.current_justified_checkpoint, &epoch_buffers[1]),
-                .finalized = jsonCheckpoint(state.finalized_checkpoint, &epoch_buffers[2]),
-            },
-            .execution_optimistic = false,
-            .finalized = isFinalized(chain, resolved.block_root),
-        });
-    }
-    return reply(allocator, .not_found, "not found");
 }
 
 /// Serve one TCP connection with an 8 KiB header bound and no request body.
 pub fn serveConnection(allocator: std.mem.Allocator, io: std.Io, stream: std.Io.net.Stream, store: ?*const consensus.ForkChoiceStore, metadata: Metadata) !void {
-    return serveConnectionWithLock(allocator, io, stream, store, metadata, null);
+    var router = try Router.init(allocator);
+    defer router.deinit();
+    return serveConnectionWithRouter(allocator, io, stream, &router, store, metadata, null);
 }
 
 /// Serve one request while protecting the shared store during response construction.
-fn serveConnectionWithLock(allocator: std.mem.Allocator, io: std.Io, stream: std.Io.net.Stream, store: ?*const consensus.ForkChoiceStore, metadata: Metadata, mutex: ?*std.Io.Mutex) !void {
+fn serveConnectionWithRouter(allocator: std.mem.Allocator, io: std.Io, stream: std.Io.net.Stream, router: *const Router, store: ?*const consensus.ForkChoiceStore, metadata: Metadata, mutex: ?*std.Io.Mutex) !void {
     defer stream.close(io);
     var read_buffer: [8192]u8 = undefined;
     var write_buffer: [8192]u8 = undefined;
@@ -126,7 +136,7 @@ fn serveConnectionWithLock(allocator: std.mem.Allocator, io: std.Io, stream: std
         else if (request.head.content_length orelse 0 != 0 or request.head.transfer_encoding != .none)
             try reply(allocator, .payload_too_large, "request body unsupported")
         else
-            try dispatch(allocator, store, metadata, request.head.target);
+            try dispatch(allocator, router, store, metadata, request.head.target);
     };
     defer result.deinit(allocator);
     const content_type = if (std.mem.startsWith(u8, request.head.target, "/metrics")) "text/plain; version=0.0.4" else "application/json";
@@ -135,17 +145,21 @@ fn serveConnectionWithLock(allocator: std.mem.Allocator, io: std.Io, stream: std
 
 /// Accept connections until the caller closes or cancels the listening socket.
 pub fn serve(allocator: std.mem.Allocator, io: std.Io, listener: *std.Io.net.Server, store: ?*const consensus.ForkChoiceStore, metadata: Metadata) !void {
+    var router = try Router.init(allocator);
+    defer router.deinit();
     while (true) {
         const stream = try listener.accept(io);
-        serveConnection(allocator, io, stream, store, metadata) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
+        serveConnectionWithRouter(allocator, io, stream, &router, store, metadata, null) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
     }
 }
 
 /// Accept API requests with a lock shared by the peer importer.
 pub fn serveLocked(allocator: std.mem.Allocator, io: std.Io, listener: *std.Io.net.Server, store: *const consensus.ForkChoiceStore, metadata: Metadata, mutex: *std.Io.Mutex) !void {
+    var router = try Router.init(allocator);
+    defer router.deinit();
     while (true) {
         const stream = try listener.accept(io);
-        serveConnectionWithLock(allocator, io, stream, store, metadata, mutex) catch |err| std.log.err("API request failed: {s}", .{@errorName(err)});
+        serveConnectionWithRouter(allocator, io, stream, &router, store, metadata, mutex) catch |err| std.log.err("API request failed: {s}", .{@errorName(err)});
     }
 }
 
