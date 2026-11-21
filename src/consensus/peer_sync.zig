@@ -89,8 +89,6 @@ pub const Coordinator = struct {
     fn readmitDetached(self: *Coordinator, old_head: fulu.Root, new_head: fulu.Root) !void {
         const durable = self.operation_store orelse return;
         const pool = self.operation_pool orelse return error.ImportCommitFailed;
-        var state = try self.currentState(new_head);
-        defer ssz.freeDecoded(self.allocator, fulu.BeaconState, state);
         var new_ancestors = std.AutoHashMap(fulu.Root, void).init(self.allocator);
         defer new_ancestors.deinit();
         var root = new_head;
@@ -100,6 +98,9 @@ pub const Coordinator = struct {
             if (std.mem.eql(u8, &block.parent_root, &root) or !self.store.blocks.contains(block.parent_root)) break;
             root = block.parent_root;
         }
+        if (new_ancestors.contains(old_head)) return;
+        var state = try self.currentState(new_head);
+        defer ssz.freeDecoded(self.allocator, fulu.BeaconState, state);
         root = old_head;
         while (!new_ancestors.contains(root)) {
             const block = self.store.blocks.get(root) orelse return error.UnknownParent;
@@ -112,6 +113,14 @@ pub const Coordinator = struct {
     fn refreshOperationPool(self: *Coordinator, head: fulu.Root) !void {
         const durable = self.operation_store orelse return;
         const pool = self.operation_pool orelse return error.ImportCommitFailed;
+        const records = try durable.recover(self.allocator);
+        defer @import("operation_store.zig").Store.freeRecords(self.allocator, records);
+        if (records.len == 0) {
+            pool.deinit();
+            pool.* = @import("operation_pool.zig").Pool.init(self.allocator);
+            self.operation_slot = self.store.currentSlot();
+            return;
+        }
         var current = try self.currentState(head);
         defer ssz.freeDecoded(self.allocator, fulu.BeaconState, current);
         const recovered = try durable.recoverPool(self.allocator, &current);

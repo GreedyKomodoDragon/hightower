@@ -193,21 +193,25 @@ pub fn initStore(
     return store;
 }
 
-/// Advance explicit time, processing every crossed slot and epoch boundary.
+/// Advance explicit time, applying the first crossed epoch transition and final slot expiry.
 pub fn onTick(store: *Store, time: u64) !void {
     if (time < store.time) return error.TimeRegression;
     if (time == store.time) return;
 
     store.markDirty();
     const target_slot = (time - store.genesis_time) / preset.SECONDS_PER_SLOT;
-    while (store.currentSlot() < target_slot) {
-        const next_slot = store.currentSlot() + 1;
-        const elapsed = try std.math.mul(u64, next_slot, preset.SECONDS_PER_SLOT);
-        const next_time = try std.math.add(u64, store.genesis_time, elapsed);
-        if (next_slot % helpers.SLOTS_PER_EPOCH == 0) try ensureCheckpointState(store, store.unrealized_justified_checkpoint);
-        store.time = next_time;
+    const current_slot = store.currentSlot();
+    if (current_slot < target_slot) {
         store.proposer_boost_root = [_]u8{0} ** 32;
-        if (next_slot % helpers.SLOTS_PER_EPOCH == 0) {
+        const first_epoch_boundary = try std.math.mul(
+            u64,
+            try std.math.add(u64, current_slot / helpers.SLOTS_PER_EPOCH, 1),
+            helpers.SLOTS_PER_EPOCH,
+        );
+        if (first_epoch_boundary <= target_slot) {
+            const elapsed = try std.math.mul(u64, first_epoch_boundary, preset.SECONDS_PER_SLOT);
+            store.time = try std.math.add(u64, store.genesis_time, elapsed);
+            try ensureCheckpointState(store, store.unrealized_justified_checkpoint);
             const prior_finalized_epoch = store.finalized_checkpoint.epoch;
             updateCheckpoints(store);
             if (store.finalized_checkpoint.epoch > prior_finalized_epoch) pruneToFinalized(store);
@@ -771,11 +775,14 @@ test "fork-choice ticks clear proposer boost, promote checkpoints, and reject re
     try std.testing.expectEqual(next_checkpoint, store.finalized_checkpoint);
 
     store.proposer_boost_root = [_]u8{0xcc} ** 32;
-    try onTick(&store, 48);
-    try std.testing.expectEqual([_]u8{0xcc} ** 32, store.proposer_boost_root);
-    try std.testing.expectError(error.TimeRegression, onTick(&store, 47));
-    try std.testing.expectEqual(@as(u64, 48), store.time);
-    try std.testing.expectEqual([_]u8{0xcc} ** 32, store.proposer_boost_root);
+    const distant_slot: u64 = 1_000_000;
+    const distant_time = distant_slot * preset.SECONDS_PER_SLOT;
+    try onTick(&store, distant_time);
+    try std.testing.expectEqual(distant_slot, store.currentSlot());
+    try std.testing.expectEqual([_]u8{0} ** 32, store.proposer_boost_root);
+    try std.testing.expectError(error.TimeRegression, onTick(&store, distant_time - 1));
+    try std.testing.expectEqual(distant_time, store.time);
+    try std.testing.expectEqual([_]u8{0} ** 32, store.proposer_boost_root);
 }
 
 const AvailabilityTestContext = struct {

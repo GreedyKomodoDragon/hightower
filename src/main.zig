@@ -272,6 +272,9 @@ fn tickRuntime(io: std.Io, store: *hightower.consensus.ForkChoiceStore, coordina
 
 /// Revalidate durable operations against the current head state advanced to the store slot.
 fn recoverOperationPool(allocator: std.mem.Allocator, operations: *hightower.consensus.OperationStore, head_state: *const hightower.fulu.BeaconState, slot: u64) !hightower.consensus.OperationPool {
+    const records = try operations.recover(allocator);
+    defer hightower.consensus.OperationStore.freeRecords(allocator, records);
+    if (records.len == 0) return hightower.consensus.OperationPool.init(allocator);
     var state = try advancedBeaconState(allocator, head_state, slot);
     defer ssz.freeDecoded(allocator, hightower.fulu.BeaconState, state);
     return operations.recoverPool(allocator, &state);
