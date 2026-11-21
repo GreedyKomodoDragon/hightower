@@ -84,6 +84,43 @@ test "pinned attestation fixtures update participation and reject empty particip
     try runInvalid(fulu.Attestation, operations.processAttestation, "attestation_invalid", "attestation", error.InvalidAttestation);
 }
 
+test "attester cache matches standalone indices and refreshes at epoch boundaries" {
+    const allocator = std.testing.allocator;
+    const state = try fixtures.decodeState(allocator, @embedFile("fixtures/fulu_block_operations/attestation_valid/pre.ssz_snappy"));
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
+    const vote = try decodeValue(fulu.Attestation, allocator, @embedFile("fixtures/fulu_block_operations/attestation_valid/attestation.ssz_snappy"));
+    defer ssz.freeDecoded(allocator, fulu.Attestation, vote);
+    var cache = operations.AttesterCache.init(allocator);
+    defer cache.deinit();
+
+    const expected = try operations.getAttestingIndices(allocator, &state, vote);
+    defer allocator.free(expected);
+    const first = try cache.indices(&state, vote);
+    defer allocator.free(first);
+    try std.testing.expectEqualSlices(fulu.ValidatorIndex, expected, first);
+    const active_ptr = @intFromPtr(cache.epochs[0].active.ptr);
+    const pivots = cache.epochs[0].pivots.?;
+    const second = try cache.indices(&state, vote);
+    defer allocator.free(second);
+    try std.testing.expectEqualSlices(fulu.ValidatorIndex, expected, second);
+    try std.testing.expectEqual(active_ptr, @intFromPtr(cache.epochs[0].active.ptr));
+    try std.testing.expectEqualDeep(pivots, cache.epochs[0].pivots.?);
+
+    var next_epoch_vote = vote;
+    next_epoch_vote.data.slot += helpers.SLOTS_PER_EPOCH;
+    const next_epoch_indices = try cache.indices(&state, next_epoch_vote);
+    defer allocator.free(next_epoch_indices);
+    const expected_next_epoch = try operations.getAttestingIndices(allocator, &state, next_epoch_vote);
+    defer allocator.free(expected_next_epoch);
+    try std.testing.expectEqualSlices(fulu.ValidatorIndex, expected_next_epoch, next_epoch_indices);
+    try std.testing.expectEqual(helpers.computeEpochAtSlot(next_epoch_vote.data.slot), cache.epochs[1].epoch.?);
+    const original_again = try cache.indices(&state, vote);
+    defer allocator.free(original_again);
+    try std.testing.expectEqualSlices(fulu.ValidatorIndex, expected, original_again);
+    try std.testing.expectEqual(active_ptr, @intFromPtr(cache.epochs[0].active.ptr));
+    try std.testing.expectEqualDeep(pivots, cache.epochs[0].pivots.?);
+}
+
 test "attestation source checkpoint mismatch leaves state unchanged" {
     const allocator = std.testing.allocator;
     const input = try decodeValue(fulu.Attestation, allocator, @embedFile("fixtures/fulu_block_operations/attestation_valid/attestation.ssz_snappy"));

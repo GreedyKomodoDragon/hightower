@@ -297,13 +297,29 @@ pub fn computeCommittee(
     if (committee_count == 0 or committee_index >= committee_count) return error.InvalidCommittee;
     const start = indices.len * committee_index / committee_count;
     const end = indices.len * (committee_index + 1) / committee_count;
+    if (end == start) return allocator.alloc(fulu.ValidatorIndex, 0);
+    const pivots = try computeShuffleRoundPivots(indices.len, seed);
+    return computeCommitteeWithPivots(allocator, indices, seed, &pivots, committee_index, committee_count);
+}
+
+/// Build one committee using pivots already derived for the same active set and seed.
+pub fn computeCommitteeWithPivots(
+    allocator: std.mem.Allocator,
+    indices: []const fulu.ValidatorIndex,
+    seed: [32]u8,
+    pivots: *const ShuffleRoundPivots,
+    committee_index: usize,
+    committee_count: usize,
+) ![]fulu.ValidatorIndex {
+    if (committee_count == 0 or committee_index >= committee_count) return error.InvalidCommittee;
+    const start = indices.len * committee_index / committee_count;
+    const end = indices.len * (committee_index + 1) / committee_count;
     const committee = try allocator.alloc(fulu.ValidatorIndex, end - start);
     errdefer allocator.free(committee);
     if (end == start) return committee;
 
-    const pivots = try computeShuffleRoundPivots(indices.len, seed);
     for (start..end, 0..) |position, output_index| {
-        const shuffled = try computeShuffledIndexWithPivots(position, indices.len, seed, &pivots);
+        const shuffled = try computeShuffledIndexWithPivots(position, indices.len, seed, pivots);
         committee[output_index] = indices[shuffled];
     }
     return committee;
@@ -319,13 +335,26 @@ pub fn getBeaconCommitteeWithActive(
 ) ![]fulu.ValidatorIndex {
     const per_slot = @max(1, @min(MAX_COMMITTEES_PER_SLOT, active.len / SLOTS_PER_EPOCH / TARGET_COMMITTEE_SIZE));
     if (index >= per_slot) return error.InvalidCommittee;
-    return computeCommittee(
-        allocator,
-        active,
-        seed,
-        @as(usize, @intCast(slot % SLOTS_PER_EPOCH)) * per_slot + @as(usize, @intCast(index)),
-        per_slot * SLOTS_PER_EPOCH,
-    );
+    if (active.len == 0) return getBeaconCommitteeWithActiveAndPivots(allocator, active, seed, slot, index, null);
+    const pivots = try computeShuffleRoundPivots(active.len, seed);
+    return getBeaconCommitteeWithActiveAndPivots(allocator, active, seed, slot, index, &pivots);
+}
+
+/// Build a committee from an active set while reusing its precomputed shuffle pivots.
+pub fn getBeaconCommitteeWithActiveAndPivots(
+    allocator: std.mem.Allocator,
+    active: []const fulu.ValidatorIndex,
+    seed: [32]u8,
+    slot: fulu.Slot,
+    index: fulu.CommitteeIndex,
+    pivots: ?*const ShuffleRoundPivots,
+) ![]fulu.ValidatorIndex {
+    const per_slot = @max(1, @min(MAX_COMMITTEES_PER_SLOT, active.len / SLOTS_PER_EPOCH / TARGET_COMMITTEE_SIZE));
+    if (index >= per_slot) return error.InvalidCommittee;
+    const committee_index = @as(usize, @intCast(slot % SLOTS_PER_EPOCH)) * per_slot + @as(usize, @intCast(index));
+    const committee_count = per_slot * SLOTS_PER_EPOCH;
+    if (active.len == 0) return computeCommittee(allocator, active, seed, committee_index, committee_count);
+    return computeCommitteeWithPivots(allocator, active, seed, pivots orelse return error.InvalidIndex, committee_index, committee_count);
 }
 
 pub fn getBeaconCommittee(

@@ -2,7 +2,9 @@
 // future deposits and withdrawals. Verify signed consensus operations before
 // mutating state; execution requests are already authenticated by the engine
 // and invalid requests are ignored as required by Electra. Fulu keeps the old
-// deposit field in the SSZ body but requires it to be empty.
+// deposit field in the SSZ body but requires it to be empty. Attestation
+// committees use an epoch's active validator set, seed, and shuffle pivots;
+// reusing those values is safe because attestations do not change eligibility.
 //
 //   proposer slashings -> attester slashings -> attestations -> exits
 //       -> BLS changes -> deposit requests -> withdrawal requests
@@ -18,10 +20,100 @@ const helpers = @import("helpers.zig");
 const epoch = @import("epoch.zig");
 const preset = @import("consensus_preset").Config;
 
+/// Keep the active set, seed, and pivots for one attestation epoch.
+const EpochAttesterCache = struct {
+    allocator: std.mem.Allocator,
+    epoch: ?fulu.Epoch = null,
+    active: []fulu.ValidatorIndex = &.{},
+    seed: [32]u8 = [_]u8{0} ** 32,
+    pivots: ?helpers.ShuffleRoundPivots = null,
+
+    /// Build sorted attesting indices using this epoch's cached shuffle data.
+    fn indices(self: *EpochAttesterCache, state: *const fulu.BeaconState, attestation: fulu.Attestation) ![]fulu.ValidatorIndex {
+        if (self.active.len == 0) return getAttestingIndicesWithActive(self.allocator, self.active, self.seed, state, attestation);
+        return getAttestingIndicesWithCachedPivots(self.allocator, self.active, self.seed, &self.pivots.?, state, attestation);
+    }
+
+    /// Release this epoch's active validator set and clear the cached key.
+    fn deinit(self: *EpochAttesterCache) void {
+        if (self.active.len != 0) self.allocator.free(self.active);
+        self.active = &.{};
+        self.epoch = null;
+    }
+};
+
+/// Reuse current and previous epoch shuffling data across attestations.
+pub const AttesterCache = struct {
+    allocator: std.mem.Allocator,
+    epochs: [2]EpochAttesterCache,
+    initialized: [2]bool = .{ false, false },
+    replacement: usize = 0,
+
+    /// Construct an empty cache with both epoch slots using the allocator.
+    pub fn init(allocator: std.mem.Allocator) AttesterCache {
+        return .{
+            .allocator = allocator,
+            .epochs = .{ .{ .allocator = allocator }, .{ .allocator = allocator } },
+        };
+    }
+
+    /// Return attesting indices, rebuilding a cached epoch only when needed.
+    pub fn indices(self: *AttesterCache, state: *const fulu.BeaconState, attestation: fulu.Attestation) ![]fulu.ValidatorIndex {
+        const epoch_number = helpers.computeEpochAtSlot(attestation.data.slot);
+        for (&self.epochs, 0..) |*cached, i| {
+            if (self.initialized[i] and cached.epoch.? == epoch_number) return cached.indices(state, attestation);
+        }
+        var selected: usize = 0;
+        if (self.initialized[0] and self.initialized[1]) {
+            selected = self.replacement;
+            self.replacement = 1 - self.replacement;
+            self.epochs[selected].deinit();
+            self.initialized[selected] = false;
+        } else if (self.initialized[0]) {
+            selected = 1;
+        }
+        const cached = &self.epochs[selected];
+        errdefer {
+            cached.deinit();
+            self.initialized[selected] = false;
+        }
+        cached.active = try helpers.getActiveValidatorIndices(self.allocator, state.validators.data, epoch_number);
+        cached.seed = helpers.computeSeed(state.*, epoch_number, helpers.DOMAIN_BEACON_ATTESTER);
+        cached.pivots = if (cached.active.len == 0) null else try helpers.computeShuffleRoundPivots(cached.active.len, cached.seed);
+        cached.epoch = epoch_number;
+        self.initialized[selected] = true;
+        return cached.indices(state, attestation);
+    }
+
+    /// Validate and apply an attestation with this cache's epoch context.
+    pub fn process(self: *AttesterCache, allocator: std.mem.Allocator, state: *fulu.BeaconState, attestation: fulu.Attestation) !void {
+        return processAttestationWithCache(allocator, state, attestation, self);
+    }
+
+    /// Build a committee from an epoch warmed by `indices` or `process`.
+    pub fn committee(self: *const AttesterCache, slot: fulu.Slot, index: fulu.CommitteeIndex) ![]fulu.ValidatorIndex {
+        const epoch_number = helpers.computeEpochAtSlot(slot);
+        for (&self.epochs, 0..) |*cached, i| {
+            if (!self.initialized[i] or cached.epoch.? != epoch_number) continue;
+            return helpers.getBeaconCommitteeWithActiveAndPivots(self.allocator, cached.active, cached.seed, slot, index, if (cached.pivots) |*pivots| pivots else null);
+        }
+        return error.MissingAttesterCache;
+    }
+
+    /// Release all retained epoch validator sets.
+    pub fn deinit(self: *AttesterCache) void {
+        for (&self.epochs, 0..) |*cached, i| {
+            if (self.initialized[i]) cached.deinit();
+        }
+    }
+};
+
 pub fn processOperations(allocator: std.mem.Allocator, state: *fulu.BeaconState, body: fulu.BeaconBlockBody) !void {
     for (body.proposer_slashings.data) |operation| try processProposerSlashing(allocator, state, operation);
     for (body.attester_slashings.data) |operation| try processAttesterSlashing(allocator, state, operation);
-    for (body.attestations.data) |operation| try processAttestation(allocator, state, operation);
+    var attester_cache = AttesterCache.init(allocator);
+    defer attester_cache.deinit();
+    for (body.attestations.data) |operation| try processAttestationWithCache(allocator, state, operation, &attester_cache);
     if (body.deposits.data.len != 0) return error.UnsupportedLegacyDeposits;
     for (body.voluntary_exits.data) |operation| try processVoluntaryExit(allocator, state, operation);
     for (body.bls_to_execution_changes.data) |operation| try processBLSToExecutionChange(allocator, state, operation);
@@ -122,6 +214,13 @@ fn slashValidator(state: *fulu.BeaconState, index: fulu.ValidatorIndex) !void {
 
 /// Validate an included attestation and credit its participants and proposer.
 pub fn processAttestation(allocator: std.mem.Allocator, state: *fulu.BeaconState, attestation: fulu.Attestation) !void {
+    var attester_cache = AttesterCache.init(allocator);
+    defer attester_cache.deinit();
+    return attester_cache.process(allocator, state, attestation);
+}
+
+/// Validate and apply an attestation using shared epoch shuffle data.
+fn processAttestationWithCache(allocator: std.mem.Allocator, state: *fulu.BeaconState, attestation: fulu.Attestation, cache: *AttesterCache) !void {
     const data = attestation.data;
     const current_epoch = helpers.getCurrentEpoch(state);
     const target_epoch = data.target.epoch;
@@ -132,7 +231,7 @@ pub fn processAttestation(allocator: std.mem.Allocator, state: *fulu.BeaconState
     const justified = if (target_epoch == current_epoch) state.current_justified_checkpoint else state.previous_justified_checkpoint;
     if (!std.meta.eql(data.source, justified)) return error.InvalidAttestation;
 
-    const attesting = try getAttestingIndices(allocator, state, attestation);
+    const attesting = try cache.indices(state, attestation);
     defer allocator.free(attesting);
     const indexed = fulu.IndexedAttestation{
         .attesting_indices = .{ .data = attesting },
@@ -192,6 +291,20 @@ pub fn getAttestingIndicesWithActive(
     state: *const fulu.BeaconState,
     attestation: fulu.Attestation,
 ) ![]fulu.ValidatorIndex {
+    if (active.len == 0) return getAttestingIndicesWithCachedPivots(allocator, active, seed, null, state, attestation);
+    const pivots = try helpers.computeShuffleRoundPivots(active.len, seed);
+    return getAttestingIndicesWithCachedPivots(allocator, active, seed, &pivots, state, attestation);
+}
+
+/// Decode attesting indices while reusing pivots derived for the supplied active set and seed.
+pub fn getAttestingIndicesWithCachedPivots(
+    allocator: std.mem.Allocator,
+    active: []const fulu.ValidatorIndex,
+    seed: [32]u8,
+    pivots: ?*const helpers.ShuffleRoundPivots,
+    state: *const fulu.BeaconState,
+    attestation: fulu.Attestation,
+) ![]fulu.ValidatorIndex {
     const committees = try getCommitteeIndices(allocator, &attestation.committee_bits.data);
     defer allocator.free(committees);
     if (committees.len == 0) return error.InvalidAttestation;
@@ -200,7 +313,7 @@ pub fn getAttestingIndicesWithActive(
     // Aggregation bits concatenate the selected committees in committee-index order.
     var offset: usize = 0;
     for (committees) |committee_index| {
-        const committee = try helpers.getBeaconCommitteeWithActive(allocator, active, seed, attestation.data.slot, committee_index);
+        const committee = try helpers.getBeaconCommitteeWithActiveAndPivots(allocator, active, seed, attestation.data.slot, committee_index, pivots);
         defer allocator.free(committee);
         if (attestation.aggregation_bits.data.len < offset + committee.len) return error.InvalidAttestation;
         var participants: usize = 0;

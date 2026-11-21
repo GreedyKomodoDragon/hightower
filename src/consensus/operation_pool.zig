@@ -30,33 +30,7 @@ pub fn copyValue(allocator: std.mem.Allocator, comptime T: type, value: T) !T {
     return ssz.deserialize(allocator, T, &reader);
 }
 
-/// Reuse one epoch's active set and seed across attestations admitted together.
-const AttesterCache = struct {
-    allocator: std.mem.Allocator,
-    epoch: ?fulu.Epoch = null,
-    active: []fulu.ValidatorIndex = &.{},
-    seed: [32]u8 = [_]u8{0} ** 32,
-
-    /// Return sorted attesting indices, rebuilding the epoch context when needed.
-    fn indices(self: *AttesterCache, state: *const fulu.BeaconState, attestation: fulu.Attestation) ![]fulu.ValidatorIndex {
-        const epoch = helpers.computeEpochAtSlot(attestation.data.slot);
-        if (self.epoch == null or self.epoch.? != epoch) {
-            if (self.active.len != 0) self.allocator.free(self.active);
-            self.active = &.{};
-            self.epoch = null;
-            self.active = try helpers.getActiveValidatorIndices(self.allocator, state.validators.data, epoch);
-            self.seed = helpers.computeSeed(state.*, epoch, helpers.DOMAIN_BEACON_ATTESTER);
-            self.epoch = epoch;
-        }
-        return operations.getAttestingIndicesWithActive(self.allocator, self.active, self.seed, state, attestation);
-    }
-
-    /// Free the retained active set.
-    fn deinit(self: *AttesterCache) void {
-        if (self.active.len != 0) self.allocator.free(self.active);
-        self.active = &.{};
-    }
-};
+const AttesterCache = operations.AttesterCache;
 
 /// Owned and bounded signed operations, sorted by SSZ root for deterministic choice.
 pub const Pool = struct {
@@ -93,11 +67,11 @@ pub const Pool = struct {
 
     /// Validate an attestation and commit its durable representation before changing the pool.
     fn addAttestationWithCommit(self: *Pool, state: *const fulu.BeaconState, value: fulu.Attestation, context: anytype, commit: anytype) !void {
-        try validate(self.allocator, state, value, operations.processAttestation);
+        var attester_cache = AttesterCache.init(self.allocator);
+        defer attester_cache.deinit();
+        try validateAttestation(self.allocator, state, value, &attester_cache);
         self.pruneExpiredAttestations(state.slot);
         try pruneInvalid(self.allocator, fulu.Attestation, &self.attestations, state, 2 * preset.MAX_ATTESTATIONS_ELECTRA, operations.processAttestation);
-        var attester_cache = AttesterCache{ .allocator = self.allocator };
-        defer attester_cache.deinit();
         const incoming = try attester_cache.indices(state, value);
         defer self.allocator.free(incoming);
         for (self.attestations.items) |entry| {
@@ -111,9 +85,9 @@ pub const Pool = struct {
         if (contains(fulu.Attestation, self.attestations.items, root)) return error.DuplicateOperation;
         for (self.attestations.items, 0..) |entry, i| {
             if (!std.meta.eql(entry.value.data, value.data)) continue;
-            const combined = try combineAttestations(self.allocator, state, entry.value, value) orelse continue;
+            const combined = try combineAttestations(self.allocator, state, entry.value, value, &attester_cache) orelse continue;
             errdefer ssz.freeDecoded(self.allocator, fulu.Attestation, combined);
-            try validate(self.allocator, state, combined, operations.processAttestation);
+            try validateAttestation(self.allocator, state, combined, &attester_cache);
             const combined_root = try merkle.HashTreeRoot(self.allocator, combined);
             try commit(context, entry.root, combined);
             ssz.freeDecoded(self.allocator, fulu.Attestation, self.attestations.items[i].value);
@@ -259,6 +233,13 @@ fn validate(allocator: std.mem.Allocator, state: *const fulu.BeaconState, value:
     try process(allocator, &copy, value);
 }
 
+/// Validate an attestation on a state copy while sharing its epoch shuffle cache.
+fn validateAttestation(allocator: std.mem.Allocator, state: *const fulu.BeaconState, value: fulu.Attestation, cache: *AttesterCache) !void {
+    var copy = try copyValue(allocator, fulu.BeaconState, state.*);
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, copy);
+    try cache.process(allocator, &copy, value);
+}
+
 /// Replay each candidate on a trial state, retaining valid entries up to limit.
 fn selectList(allocator: std.mem.Allocator, comptime T: type, entries: []const Entry(T), scratch: *std.heap.ArenaAllocator, base: *const fulu.BeaconState, working: *?fulu.BeaconState, limit: usize, process: anytype) ![]T {
     var chosen = std.ArrayList(T).empty;
@@ -299,10 +280,10 @@ fn removeIncluded(allocator: std.mem.Allocator, comptime T: type, entries: *std.
 }
 
 /// Merge disjoint committee participants for matching attestation data.
-fn combineAttestations(allocator: std.mem.Allocator, state: *const fulu.BeaconState, first: fulu.Attestation, second: fulu.Attestation) !?fulu.Attestation {
-    const a = try operations.getAttestingIndices(allocator, state, first);
+fn combineAttestations(allocator: std.mem.Allocator, state: *const fulu.BeaconState, first: fulu.Attestation, second: fulu.Attestation, cache: *AttesterCache) !?fulu.Attestation {
+    const a = try cache.indices(state, first);
     defer allocator.free(a);
-    const b = try operations.getAttestingIndices(allocator, state, second);
+    const b = try cache.indices(state, second);
     defer allocator.free(b);
     for (a) |index| for (b) |other| {
         if (index == other) return null;
@@ -316,7 +297,7 @@ fn combineAttestations(allocator: std.mem.Allocator, state: *const fulu.BeaconSt
     var b_offset: usize = 0;
     for (result.committee_bits.data, 0..) |selected, committee_index| {
         if (!selected) continue;
-        const committee = try @import("helpers.zig").getBeaconCommittee(allocator, state, first.data.slot, committee_index);
+        const committee = try cache.committee(first.data.slot, committee_index);
         defer allocator.free(committee);
         for (0..committee.len) |i| {
             const left = first.committee_bits.data[committee_index] and first.aggregation_bits.data[a_offset + i];
