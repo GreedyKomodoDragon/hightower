@@ -28,6 +28,11 @@ pub const LatestMessage = struct {
     root: fulu.Root,
 };
 
+const PulledUpCheckpoints = struct {
+    justified: fulu.Checkpoint,
+    finalized: fulu.Checkpoint,
+};
+
 const ChildMap = std.AutoHashMap(fulu.Root, std.ArrayListUnmanaged(fulu.Root));
 const WeightMap = std.AutoHashMap(fulu.Root, u128);
 
@@ -350,23 +355,7 @@ pub fn onBlockAt(store: *Store, signed_block: fulu.SignedBeaconBlock, engine: en
     defer if (state_owned) ssz.freeDecoded(store.allocator, fulu.BeaconState, state);
     try block_transition.stateTransition(store.allocator, &state, signed_block, engine);
 
-    const old_previous_justified = state.previous_justified_checkpoint;
-    const old_current_justified = state.current_justified_checkpoint;
-    const old_finalized = state.finalized_checkpoint;
-    const old_justification_bits = state.justification_bits.data;
-    defer {
-        state.previous_justified_checkpoint = old_previous_justified;
-        state.current_justified_checkpoint = old_current_justified;
-        state.finalized_checkpoint = old_finalized;
-        state.justification_bits.data = old_justification_bits;
-    }
-    try epoch_transition.processJustificationAndFinalization(&state, helpers.getCurrentEpoch(&state));
-    const pulled_justified = state.current_justified_checkpoint;
-    const pulled_finalized = state.finalized_checkpoint;
-    state.previous_justified_checkpoint = old_previous_justified;
-    state.current_justified_checkpoint = old_current_justified;
-    state.finalized_checkpoint = old_finalized;
-    state.justification_bits.data = old_justification_bits;
+    const pulled = try pullUpCheckpoints(&state);
 
     store.markDirty();
     // Roll back each owned insertion if a later allocation fails.
@@ -380,11 +369,11 @@ pub fn onBlockAt(store: *Store, signed_block: fulu.SignedBeaconBlock, engine: en
     const timely = isBlockTimely(store, block.slot, arrival_time);
     try store.block_timeliness.put(block_root, timely);
     errdefer _ = store.block_timeliness.remove(block_root);
-    try store.unrealized_justifications.put(block_root, pulled_justified);
+    try store.unrealized_justifications.put(block_root, pulled.justified);
     errdefer _ = store.unrealized_justifications.remove(block_root);
     const past_epoch = helpers.computeEpochAtSlot(block.slot) < helpers.computeEpochAtSlot(store.currentSlot());
-    const next_justified = if (past_epoch and pulled_justified.epoch > state.current_justified_checkpoint.epoch)
-        pulled_justified
+    const next_justified = if (past_epoch and pulled.justified.epoch > state.current_justified_checkpoint.epoch)
+        pulled.justified
     else
         state.current_justified_checkpoint;
     if (next_justified.epoch > store.justified_checkpoint.epoch) try ensureCheckpointState(store, next_justified);
@@ -394,14 +383,53 @@ pub fn onBlockAt(store: *Store, signed_block: fulu.SignedBeaconBlock, engine: en
     }
     if (state.current_justified_checkpoint.epoch > store.justified_checkpoint.epoch) store.justified_checkpoint = state.current_justified_checkpoint;
     if (state.finalized_checkpoint.epoch > store.finalized_checkpoint.epoch) store.finalized_checkpoint = state.finalized_checkpoint;
-    if (pulled_justified.epoch > store.unrealized_justified_checkpoint.epoch) {
-        store.unrealized_justified_checkpoint = pulled_justified;
+    if (pulled.justified.epoch > store.unrealized_justified_checkpoint.epoch) {
+        store.unrealized_justified_checkpoint = pulled.justified;
     }
-    if (pulled_finalized.epoch > store.unrealized_finalized_checkpoint.epoch) {
-        store.unrealized_finalized_checkpoint = pulled_finalized;
+    if (pulled.finalized.epoch > store.unrealized_finalized_checkpoint.epoch) {
+        store.unrealized_finalized_checkpoint = pulled.finalized;
     }
     if (past_epoch) updateCheckpoints(store);
     if (store.finalized_checkpoint.epoch > prior_finalized_epoch) pruneToFinalized(store);
+}
+
+/// Compute pulled-up checkpoints while restoring every justification field in the valid post-state.
+fn pullUpCheckpoints(state: *fulu.BeaconState) !PulledUpCheckpoints {
+    const original = .{
+        .previous_justified = state.previous_justified_checkpoint,
+        .current_justified = state.current_justified_checkpoint,
+        .finalized = state.finalized_checkpoint,
+        .justification_bits = state.justification_bits,
+    };
+    defer {
+        state.previous_justified_checkpoint = original.previous_justified;
+        state.current_justified_checkpoint = original.current_justified;
+        state.finalized_checkpoint = original.finalized;
+        state.justification_bits = original.justification_bits;
+    }
+    try epoch_transition.processJustificationAndFinalization(state, helpers.getCurrentEpoch(state));
+    return .{
+        .justified = state.current_justified_checkpoint,
+        .finalized = state.finalized_checkpoint,
+    };
+}
+
+test "pulling up checkpoints restores the valid state's justification bits" {
+    var state = std.mem.zeroes(fulu.BeaconState);
+    state.slot = (helpers.EPOCH_OFFSET + 1) * helpers.SLOTS_PER_EPOCH;
+    state.justification_bits.data[0] = true;
+    state.justification_bits.data[2] = true;
+    state.justification_bits.data[3] = true;
+    const original_bits = state.justification_bits;
+
+    var pulled_state = state;
+    try epoch_transition.processJustificationAndFinalization(&pulled_state, helpers.getCurrentEpoch(&pulled_state));
+    try std.testing.expect(!std.meta.eql(original_bits, pulled_state.justification_bits));
+
+    const checkpoints = try pullUpCheckpoints(&state);
+    try std.testing.expectEqual(pulled_state.current_justified_checkpoint, checkpoints.justified);
+    try std.testing.expectEqual(pulled_state.finalized_checkpoint, checkpoints.finalized);
+    try std.testing.expectEqual(original_bits, state.justification_bits);
 }
 
 /// Deep-copy an SSZ value so store ownership is independent of caller memory.
