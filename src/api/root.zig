@@ -65,50 +65,51 @@ pub fn dispatch(allocator: std.mem.Allocator, router: *const Router, store: ?*co
     const chain = store.?;
     const head = if (metadata.head) |cached| cached.* else consensus.getForkChoiceHead(chain) catch return reply(allocator, .service_unavailable, "service unavailable");
     const head_block = chain.blocks.get(head) orelse return reply(allocator, .service_unavailable, "service unavailable");
-    if (matched.handler == @intFromEnum(routing.Handler.syncing)) {
-        var head_slot_buffer: [20]u8 = undefined;
-        var distance_buffer: [20]u8 = undefined;
-        return jsonResponse(allocator, .ok, .{ .data = .{
-            .head_slot = decimal(head_block.slot, &head_slot_buffer),
-            .sync_distance = decimal(metadata.sync_distance, &distance_buffer),
-            .is_syncing = metadata.is_syncing,
-            .is_optimistic = false,
-            .el_offline = false,
-        } });
+    switch (matched.handler) {
+        @intFromEnum(routing.Handler.syncing) => {
+            var head_slot_buffer: [20]u8 = undefined;
+            var distance_buffer: [20]u8 = undefined;
+            return jsonResponse(allocator, .ok, .{ .data = .{
+                .head_slot = decimal(head_block.slot, &head_slot_buffer),
+                .sync_distance = decimal(metadata.sync_distance, &distance_buffer),
+                .is_syncing = metadata.is_syncing,
+                .is_optimistic = false,
+                .el_offline = false,
+            } });
+        },
+        @intFromEnum(routing.Handler.genesis) => {
+            const genesis = chain.block_states.get(chain.finalized_checkpoint.root) orelse return reply(allocator, .service_unavailable, "service unavailable");
+            var time_buffer: [20]u8 = undefined;
+            return jsonResponse(allocator, .ok, .{ .data = .{
+                .genesis_time = decimal(chain.genesis_time, &time_buffer),
+                .genesis_validators_root = hexBytes(32, genesis.genesis_validators_root),
+                .genesis_fork_version = hexBytes(4, metadata.genesis_fork_version),
+            } });
+        },
+        @intFromEnum(routing.Handler.block_root) => {
+            const id = matched.parameter.?;
+            const root = resolveBlock(chain, head, id) catch |err| return idError(allocator, err);
+            return jsonResponse(allocator, .ok, .{ .data = .{ .root = hexBytes(32, root) }, .execution_optimistic = false, .finalized = isFinalized(chain, root) });
+        },
+        @intFromEnum(routing.Handler.state_root), @intFromEnum(routing.Handler.finality_checkpoints) => {
+            const finality = matched.handler == @intFromEnum(routing.Handler.finality_checkpoints);
+            const id = matched.parameter.?;
+            const resolved = resolveState(chain, head, id) catch |err| return idError(allocator, err);
+            if (!finality) return jsonResponse(allocator, .ok, .{ .data = .{ .root = hexBytes(32, resolved.root) }, .execution_optimistic = false, .finalized = isFinalized(chain, resolved.block_root) });
+            const state = resolved.state;
+            var epoch_buffers: [3][20]u8 = undefined;
+            return jsonResponse(allocator, .ok, .{
+                .data = .{
+                    .previous_justified = jsonCheckpoint(state.previous_justified_checkpoint, &epoch_buffers[0]),
+                    .current_justified = jsonCheckpoint(state.current_justified_checkpoint, &epoch_buffers[1]),
+                    .finalized = jsonCheckpoint(state.finalized_checkpoint, &epoch_buffers[2]),
+                },
+                .execution_optimistic = false,
+                .finalized = isFinalized(chain, resolved.block_root),
+            });
+        },
+        else => return reply(allocator, .not_found, "not found"),
     }
-    if (matched.handler == @intFromEnum(routing.Handler.genesis)) {
-        const genesis = chain.block_states.get(chain.finalized_checkpoint.root) orelse return reply(allocator, .service_unavailable, "service unavailable");
-        var time_buffer: [20]u8 = undefined;
-        return jsonResponse(allocator, .ok, .{ .data = .{
-            .genesis_time = decimal(chain.genesis_time, &time_buffer),
-            .genesis_validators_root = hexBytes(32, genesis.genesis_validators_root),
-            .genesis_fork_version = hexBytes(4, metadata.genesis_fork_version),
-        } });
-    }
-    if (matched.handler == @intFromEnum(routing.Handler.block_root)) {
-        const id = matched.parameter.?;
-        const root = resolveBlock(chain, head, id) catch |err| return idError(allocator, err);
-        return jsonResponse(allocator, .ok, .{ .data = .{ .root = hexBytes(32, root) }, .execution_optimistic = false, .finalized = isFinalized(chain, root) });
-    }
-    if (matched.handler == @intFromEnum(routing.Handler.state_root) or matched.handler == @intFromEnum(routing.Handler.finality_checkpoints)) {
-        const finality = matched.handler == @intFromEnum(routing.Handler.finality_checkpoints);
-        const state_root = !finality;
-        const id = matched.parameter.?;
-        const resolved = resolveState(chain, head, id) catch |err| return idError(allocator, err);
-        if (state_root) return jsonResponse(allocator, .ok, .{ .data = .{ .root = hexBytes(32, resolved.root) }, .execution_optimistic = false, .finalized = isFinalized(chain, resolved.block_root) });
-        const state = resolved.state;
-        var epoch_buffers: [3][20]u8 = undefined;
-        return jsonResponse(allocator, .ok, .{
-            .data = .{
-                .previous_justified = jsonCheckpoint(state.previous_justified_checkpoint, &epoch_buffers[0]),
-                .current_justified = jsonCheckpoint(state.current_justified_checkpoint, &epoch_buffers[1]),
-                .finalized = jsonCheckpoint(state.finalized_checkpoint, &epoch_buffers[2]),
-            },
-            .execution_optimistic = false,
-            .finalized = isFinalized(chain, resolved.block_root),
-        });
-    }
-    return reply(allocator, .not_found, "not found");
 }
 
 /// Serve one TCP connection with an 8 KiB header bound and no request body.
