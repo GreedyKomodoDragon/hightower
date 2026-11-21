@@ -83,6 +83,16 @@ pub const Pool = struct {
 
     /// Verify and own an attestation, merging disjoint participants for the same data.
     pub fn addAttestation(self: *Pool, state: *const fulu.BeaconState, value: fulu.Attestation) !void {
+        return self.addAttestationWithCommit(state, value, {}, noCommit);
+    }
+
+    /// Commit a new or merged attestation after validation but before pool publication.
+    pub fn addAttestationDurable(self: *Pool, state: *const fulu.BeaconState, value: fulu.Attestation, context: anytype, commit: anytype) !void {
+        return self.addAttestationWithCommit(state, value, context, commit);
+    }
+
+    /// Validate an attestation and commit its durable representation before changing the pool.
+    fn addAttestationWithCommit(self: *Pool, state: *const fulu.BeaconState, value: fulu.Attestation, context: anytype, commit: anytype) !void {
         try validate(self.allocator, state, value, operations.processAttestation);
         self.pruneExpiredAttestations(state.slot);
         try pruneInvalid(self.allocator, fulu.Attestation, &self.attestations, state, 2 * preset.MAX_ATTESTATIONS_ELECTRA, operations.processAttestation);
@@ -105,11 +115,13 @@ pub const Pool = struct {
             errdefer ssz.freeDecoded(self.allocator, fulu.Attestation, combined);
             try validate(self.allocator, state, combined, operations.processAttestation);
             const combined_root = try merkle.HashTreeRoot(self.allocator, combined);
+            try commit(context, entry.root, combined);
             ssz.freeDecoded(self.allocator, fulu.Attestation, self.attestations.items[i].value);
             self.attestations.items[i] = .{ .root = combined_root, .value = combined };
             std.mem.sort(Entry(fulu.Attestation), self.attestations.items, {}, lessThan(fulu.Attestation));
             return;
         }
+        try commit(context, null, value);
         try add(self.allocator, fulu.Attestation, &self.attestations, value, 2 * preset.MAX_ATTESTATIONS_ELECTRA);
     }
 
@@ -195,6 +207,9 @@ pub const Selection = struct {
     voluntary_exits: []fulu.SignedVoluntaryExit,
     bls_changes: []fulu.SignedBLSToExecutionChange,
 };
+
+/// Keep in-memory-only tests and callers on the same validated admission path.
+fn noCommit(_: void, _: ?fulu.Root, _: fulu.Attestation) !void {}
 
 /// Return the comparator used for deterministic root order.
 fn lessThan(comptime T: type) fn (void, Entry(T), Entry(T)) bool {
