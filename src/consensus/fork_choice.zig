@@ -28,6 +28,11 @@ pub const LatestMessage = struct {
     root: fulu.Root,
 };
 
+const PulledUpCheckpoints = struct {
+    justified: fulu.Checkpoint,
+    finalized: fulu.Checkpoint,
+};
+
 const ChildMap = std.AutoHashMap(fulu.Root, std.ArrayListUnmanaged(fulu.Root));
 const WeightMap = std.AutoHashMap(fulu.Root, u128);
 
@@ -350,9 +355,7 @@ pub fn onBlockAt(store: *Store, signed_block: fulu.SignedBeaconBlock, engine: en
     defer if (state_owned) ssz.freeDecoded(store.allocator, fulu.BeaconState, state);
     try block_transition.stateTransition(store.allocator, &state, signed_block, engine);
 
-    var pulled = try cloneSSZ(store.allocator, fulu.BeaconState, state);
-    defer ssz.freeDecoded(store.allocator, fulu.BeaconState, pulled);
-    try epoch_transition.processJustificationAndFinalization(&pulled, helpers.getCurrentEpoch(&pulled));
+    const pulled = try pullUpCheckpoints(&state);
 
     store.markDirty();
     // Roll back each owned insertion if a later allocation fails.
@@ -366,11 +369,11 @@ pub fn onBlockAt(store: *Store, signed_block: fulu.SignedBeaconBlock, engine: en
     const timely = isBlockTimely(store, block.slot, arrival_time);
     try store.block_timeliness.put(block_root, timely);
     errdefer _ = store.block_timeliness.remove(block_root);
-    try store.unrealized_justifications.put(block_root, pulled.current_justified_checkpoint);
+    try store.unrealized_justifications.put(block_root, pulled.justified);
     errdefer _ = store.unrealized_justifications.remove(block_root);
     const past_epoch = helpers.computeEpochAtSlot(block.slot) < helpers.computeEpochAtSlot(store.currentSlot());
-    const next_justified = if (past_epoch and pulled.current_justified_checkpoint.epoch > state.current_justified_checkpoint.epoch)
-        pulled.current_justified_checkpoint
+    const next_justified = if (past_epoch and pulled.justified.epoch > state.current_justified_checkpoint.epoch)
+        pulled.justified
     else
         state.current_justified_checkpoint;
     if (next_justified.epoch > store.justified_checkpoint.epoch) try ensureCheckpointState(store, next_justified);
@@ -380,14 +383,53 @@ pub fn onBlockAt(store: *Store, signed_block: fulu.SignedBeaconBlock, engine: en
     }
     if (state.current_justified_checkpoint.epoch > store.justified_checkpoint.epoch) store.justified_checkpoint = state.current_justified_checkpoint;
     if (state.finalized_checkpoint.epoch > store.finalized_checkpoint.epoch) store.finalized_checkpoint = state.finalized_checkpoint;
-    if (pulled.current_justified_checkpoint.epoch > store.unrealized_justified_checkpoint.epoch) {
-        store.unrealized_justified_checkpoint = pulled.current_justified_checkpoint;
+    if (pulled.justified.epoch > store.unrealized_justified_checkpoint.epoch) {
+        store.unrealized_justified_checkpoint = pulled.justified;
     }
-    if (pulled.finalized_checkpoint.epoch > store.unrealized_finalized_checkpoint.epoch) {
-        store.unrealized_finalized_checkpoint = pulled.finalized_checkpoint;
+    if (pulled.finalized.epoch > store.unrealized_finalized_checkpoint.epoch) {
+        store.unrealized_finalized_checkpoint = pulled.finalized;
     }
     if (past_epoch) updateCheckpoints(store);
     if (store.finalized_checkpoint.epoch > prior_finalized_epoch) pruneToFinalized(store);
+}
+
+/// Compute pulled-up checkpoints while restoring every justification field in the valid post-state.
+fn pullUpCheckpoints(state: *fulu.BeaconState) !PulledUpCheckpoints {
+    const original = .{
+        .previous_justified = state.previous_justified_checkpoint,
+        .current_justified = state.current_justified_checkpoint,
+        .finalized = state.finalized_checkpoint,
+        .justification_bits = state.justification_bits,
+    };
+    defer {
+        state.previous_justified_checkpoint = original.previous_justified;
+        state.current_justified_checkpoint = original.current_justified;
+        state.finalized_checkpoint = original.finalized;
+        state.justification_bits = original.justification_bits;
+    }
+    try epoch_transition.processJustificationAndFinalization(state, helpers.getCurrentEpoch(state));
+    return .{
+        .justified = state.current_justified_checkpoint,
+        .finalized = state.finalized_checkpoint,
+    };
+}
+
+test "pulling up checkpoints restores the valid state's justification bits" {
+    var state = std.mem.zeroes(fulu.BeaconState);
+    state.slot = (helpers.EPOCH_OFFSET + 1) * helpers.SLOTS_PER_EPOCH;
+    state.justification_bits.data[0] = true;
+    state.justification_bits.data[2] = true;
+    state.justification_bits.data[3] = true;
+    const original_bits = state.justification_bits;
+
+    var pulled_state = state;
+    try epoch_transition.processJustificationAndFinalization(&pulled_state, helpers.getCurrentEpoch(&pulled_state));
+    try std.testing.expect(!std.meta.eql(original_bits, pulled_state.justification_bits));
+
+    const checkpoints = try pullUpCheckpoints(&state);
+    try std.testing.expectEqual(pulled_state.current_justified_checkpoint, checkpoints.justified);
+    try std.testing.expectEqual(pulled_state.finalized_checkpoint, checkpoints.finalized);
+    try std.testing.expectEqual(original_bits, state.justification_bits);
 }
 
 /// Deep-copy an SSZ value so store ownership is independent of caller memory.
@@ -462,15 +504,21 @@ pub fn onAttestation(store: *Store, attestation: fulu.Attestation, is_from_block
         !std.mem.eql(u8, &data.target.root, &(try checkpointBlock(store, data.beacon_block_root, data.target.epoch)))) return error.InvalidAttestationAncestry;
     if (data.slot >= store.currentSlot()) return error.EarlyAttestation;
 
-    var target_state = try cloneSSZ(store.allocator, fulu.BeaconState, (store.checkpoint_states.get(data.target) orelse
-        store.block_states.get(data.target.root) orelse return error.UnknownTarget));
-    var target_state_owned = true;
-    defer if (target_state_owned) ssz.freeDecoded(store.allocator, fulu.BeaconState, target_state);
     const start_slot = try helpers.computeStartSlotAtEpoch(data.target.epoch);
-    if (target_state.slot < start_slot) try transition.processSlots(store.allocator, &target_state, start_slot, epoch_transition.processEpoch);
-    const indices = try operations.getAttestingIndices(store.allocator, &target_state, attestation);
+    var target_state_storage: ?fulu.BeaconState = null;
+    defer if (target_state_storage) |state| ssz.freeDecoded(store.allocator, fulu.BeaconState, state);
+    const target_state: *const fulu.BeaconState = if (store.checkpoint_states.getPtr(data.target)) |cached| cached else blk: {
+        const source = store.block_states.get(data.target.root) orelse return error.UnknownTarget;
+        if (source.slot > start_slot) return error.InvalidCheckpoint;
+        var state = try cloneSSZ(store.allocator, fulu.BeaconState, source);
+        errdefer ssz.freeDecoded(store.allocator, fulu.BeaconState, state);
+        if (state.slot < start_slot) try transition.processSlots(store.allocator, &state, start_slot, epoch_transition.processEpoch);
+        target_state_storage = state;
+        break :blk &target_state_storage.?;
+    };
+    const indices = try operations.getAttestingIndices(store.allocator, target_state, attestation);
     defer store.allocator.free(indices);
-    try operations.validateIndexedAttestation(store.allocator, &target_state, .{
+    try operations.validateIndexedAttestation(store.allocator, target_state, .{
         .attesting_indices = .{ .data = indices },
         .data = data,
         .signature = attestation.signature,
@@ -478,9 +526,9 @@ pub fn onAttestation(store: *Store, attestation: fulu.Attestation, is_from_block
 
     store.markDirty();
     try store.latest_messages.ensureUnusedCapacity(@intCast(indices.len));
-    if (!store.checkpoint_states.contains(data.target)) {
-        target_state_owned = false;
-        try putCheckpointStateOwned(store, data.target, target_state);
+    if (target_state_storage) |state| {
+        target_state_storage = null;
+        try putCheckpointStateOwned(store, data.target, state);
     }
     for (indices) |index| {
         if (store.equivocating_indices.contains(index)) continue;
@@ -870,6 +918,12 @@ test "fork-choice stores an available block and assigns timely proposer boost" {
     try std.testing.expectEqual(@as(usize, 2), store.block_states.count());
     try std.testing.expectEqual(@as(usize, 1), store.block_timeliness.count());
     const block_root = try merkle.HashTreeRoot(allocator, fixture[2].message);
+    const stored_state = store.block_states.get(block_root).?;
+    try std.testing.expectEqual(fixture[2].message.state_root, try merkle.HashTreeRoot(allocator, stored_state));
+    var expected_pulled_state = try cloneSSZ(allocator, fulu.BeaconState, stored_state);
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, expected_pulled_state);
+    try epoch_transition.processJustificationAndFinalization(&expected_pulled_state, helpers.getCurrentEpoch(&expected_pulled_state));
+    try std.testing.expectEqual(expected_pulled_state.current_justified_checkpoint, store.unrealized_justifications.get(block_root).?);
     const served_signed = store.signedBlock(block_root).?;
     try std.testing.expectEqualSlices(u8, &fixture[2].signature, &served_signed.signature);
     try std.testing.expectEqual(block_root, store.proposer_boost_root);
@@ -1041,6 +1095,9 @@ test "official Fulu heavier-branch fixture changes head after attestation" {
     bad_signature.signature = [_]u8{0} ** 96;
     if (onAttestation(&store, bad_signature, false)) |_| return error.ExpectedRejection else |_| {}
     try std.testing.expectEqual(@as(usize, 0), store.latest_messages.count());
+    try onAttestation(&store, attestation, false);
+    const checkpoint_state = store.checkpoint_states.get(attestation.data.target).?;
+    try std.testing.expectEqual(try helpers.computeStartSlotAtEpoch(attestation.data.target.epoch), checkpoint_state.slot);
     try onAttestation(&store, attestation, false);
     _ = try std.fmt.hexToBytes(&expected, "c892833adc0fff2de4366886a5eaecfaa6228dfddc6dc0a9c44d2fda4518d5e5");
     try std.testing.expectEqual(expected, try getHead(&store));
