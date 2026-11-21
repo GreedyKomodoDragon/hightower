@@ -11,6 +11,7 @@
 const std = @import("std");
 const fulu = @import("fulu");
 const merkle = @import("merkle");
+const ssz = @import("ssz");
 const fork_choice = @import("fork_choice.zig");
 const columns = @import("data_columns.zig");
 const peer = @import("p2p_peer.zig");
@@ -20,6 +21,9 @@ const snapshot = @import("fork_choice_snapshot.zig");
 const engine_api = @import("execution_engine.zig");
 const kzg = @import("execution").kzg;
 const preset = @import("consensus_preset").Config;
+const pool_api = @import("operation_pool.zig");
+const transition = @import("transition.zig");
+const epoch = @import("epoch.zig");
 
 /// Select the consensus head in execution before exposing or saving it.
 pub fn confirmExecutionHead(store: *fork_choice.Store, engine: engine_api.ExecutionEngine) !void {
@@ -46,6 +50,11 @@ pub const Coordinator = struct {
     engine: engine_api.ExecutionEngine,
     head: fulu.Root,
     next_slot: u64,
+    operation_store: ?*@import("operation_store.zig").Store = null,
+    operation_pool: ?*@import("operation_pool.zig").Pool = null,
+    operation_slot: ?u64 = null,
+    operation_pool_ready: bool = false,
+    proposal_mutex: ?*std.Io.Mutex = null,
     cancelled: ?*const std.atomic.Value(bool) = null,
     /// Deterministic test clock override; production uses the real wall clock.
     now_seconds: ?u64 = null,
@@ -65,6 +74,93 @@ pub const Coordinator = struct {
     /// Advance store time to the wall clock so missed slots and boost expiry apply.
     pub fn tickToWallClock(self: *Coordinator) !void {
         try self.tick(self.nowSeconds());
+    }
+
+    /// Return an owned selected-head state advanced through the current fork-choice slot.
+    fn currentState(self: *Coordinator, root: fulu.Root) !fulu.BeaconState {
+        const stored = self.store.block_states.getPtr(root) orelse return error.UnknownHead;
+        var state = try pool_api.copyValue(self.allocator, fulu.BeaconState, stored.*);
+        errdefer ssz.freeDecoded(self.allocator, fulu.BeaconState, state);
+        try transition.processSlots(self.allocator, &state, self.store.currentSlot(), epoch.processEpoch);
+        return state;
+    }
+
+    /// Re-admit operations from the old head's detached suffix through normal checks.
+    fn readmitDetached(self: *Coordinator, old_head: fulu.Root, new_head: fulu.Root) !void {
+        const durable = self.operation_store orelse return;
+        const pool = self.operation_pool orelse return error.ImportCommitFailed;
+        var state = try self.currentState(new_head);
+        defer ssz.freeDecoded(self.allocator, fulu.BeaconState, state);
+        var new_ancestors = std.AutoHashMap(fulu.Root, void).init(self.allocator);
+        defer new_ancestors.deinit();
+        var root = new_head;
+        while (true) {
+            try new_ancestors.put(root, {});
+            const block = self.store.blocks.get(root) orelse return error.UnknownParent;
+            if (std.mem.eql(u8, &block.parent_root, &root) or !self.store.blocks.contains(block.parent_root)) break;
+            root = block.parent_root;
+        }
+        root = old_head;
+        while (!new_ancestors.contains(root)) {
+            const block = self.store.blocks.get(root) orelse return error.UnknownParent;
+            try readmitBody(durable, pool, &state, block.body);
+            root = block.parent_root;
+        }
+    }
+
+    /// Revalidate retained records against a newly selected head before proposals resume.
+    fn refreshOperationPool(self: *Coordinator, head: fulu.Root) !void {
+        const durable = self.operation_store orelse return;
+        const pool = self.operation_pool orelse return error.ImportCommitFailed;
+        var current = try self.currentState(head);
+        defer ssz.freeDecoded(self.allocator, fulu.BeaconState, current);
+        const recovered = try durable.recoverPool(self.allocator, &current);
+        pool.deinit();
+        pool.* = recovered;
+        self.operation_slot = current.slot;
+    }
+
+    /// Admit a consensus operation through the runtime's durable pool owner.
+    pub fn admitOperation(self: *Coordinator, value: @import("operation_store.zig").Value) !void {
+        if (self.proposal_mutex) |mutex| try mutex.lock(self.io);
+        defer if (self.proposal_mutex) |mutex| mutex.unlock(self.io);
+        return self.admitOperationLocked(value);
+    }
+
+    /// Admit an operation when the caller already holds the runtime state lock.
+    pub fn admitOperationLocked(self: *Coordinator, value: @import("operation_store.zig").Value) !void {
+        const pool = self.operation_pool orelse return error.OperationPoolUnavailable;
+        const durable = self.operation_store orelse return error.OperationPoolUnavailable;
+        if (!self.operation_pool_ready or durable.poisoned) return error.OperationPoolUnavailable;
+        var state = try self.currentState(self.head);
+        defer ssz.freeDecoded(self.allocator, fulu.BeaconState, state);
+        try durable.admit(pool, &state, value);
+        self.operation_slot = state.slot;
+    }
+
+    /// Build a block from the recovered runtime pool while holding the runtime state lock.
+    pub fn proposeBlock(
+        self: *Coordinator,
+        slot: fulu.Slot,
+        key: *@import("blst").SecretKey,
+        sync_aggregate: fulu.SyncAggregate,
+        fee_recipient: fulu.ExecutionAddress,
+        graffiti: fulu.Bytes32,
+    ) !fulu.SignedBeaconBlock {
+        const pool = self.operation_pool orelse return error.OperationPoolUnavailable;
+        const durable = self.operation_store orelse return error.OperationPoolUnavailable;
+        if (self.proposal_mutex) |mutex| try mutex.lock(self.io);
+        defer if (self.proposal_mutex) |mutex| mutex.unlock(self.io);
+        if (!self.operation_pool_ready or durable.poisoned) return error.OperationPoolUnavailable;
+        const parent = self.store.block_states.getPtr(self.head) orelse return error.UnknownHead;
+        const safe = self.store.block_states.get(self.store.justified_checkpoint.root) orelse return error.UnknownHead;
+        const finalized = self.store.block_states.get(self.store.finalized_checkpoint.root) orelse return error.UnknownHead;
+        const choice: engine_api.ForkchoiceState = .{
+            .head_block_hash = parent.latest_execution_payload_header.block_hash,
+            .safe_block_hash = safe.latest_execution_payload_header.block_hash,
+            .finalized_block_hash = finalized.latest_execution_payload_header.block_hash,
+        };
+        return @import("proposer.zig").propose(self.allocator, parent, slot, key, pool, self.engine, choice, sync_aggregate, fee_recipient, graffiti);
     }
 
     /// Fetch one bounded range after the last scanned slot.
@@ -139,6 +235,7 @@ pub const Coordinator = struct {
     fn importOne(self: *Coordinator, remote: ?*peer.Peer, signed: *const fulu.SignedBeaconBlock) !void {
         if (self.cancelled) |flag| if (flag.load(.acquire)) return error.Canceled;
         const block = signed.message;
+        const previous_head = self.head;
         const parent_state = self.store.block_states.getPtr(block.parent_root) orelse return error.UnknownParent;
         const root = try merkle.HashTreeRoot(self.allocator, block);
         if (block.body.blob_kzg_commitments.data.len != 0) {
@@ -161,6 +258,14 @@ pub const Coordinator = struct {
         const selected = fork_choice.getHeadCached(self.store) catch return error.ImportCommitFailed;
         try confirmExecutionHeadAt(self.store, self.engine, selected);
         snapshot.saveForkChoiceStoreAt(self.allocator, self.io, self.dir, "fork-choice.bin", self.store, selected) catch return error.ImportCommitFailed;
+        if (self.operation_store) |operations| {
+            self.operation_pool_ready = false;
+            const pool = self.operation_pool orelse return error.ImportCommitFailed;
+            operations.accepted(pool, block.body) catch return error.ImportCommitFailed;
+        }
+        if (!std.mem.eql(u8, &previous_head, &selected)) self.readmitDetached(previous_head, selected) catch return error.ImportCommitFailed;
+        self.refreshOperationPool(selected) catch return error.ImportCommitFailed;
+        if (self.operation_store != null) self.operation_pool_ready = true;
         self.head = selected;
         self.next_slot = @max(self.next_slot, try std.math.add(u64, self.store.blocks.get(selected).?.slot, 1));
     }
@@ -200,11 +305,66 @@ pub const Coordinator = struct {
     }
 };
 
+/// Submit every detached block operation to the durable pool in block field order.
+fn readmitBody(durable: *@import("operation_store.zig").Store, pool: *@import("operation_pool.zig").Pool, state: *const fulu.BeaconState, body: fulu.BeaconBlockBody) !void {
+    for (body.proposer_slashings.data) |value| try durable.readmit(pool, state, .{ .proposer_slashing = value });
+    for (body.attester_slashings.data) |value| try durable.readmit(pool, state, .{ .attester_slashing = value });
+    for (body.attestations.data) |value| try durable.readmit(pool, state, .{ .attestation = value });
+    for (body.voluntary_exits.data) |value| try durable.readmit(pool, state, .{ .voluntary_exit = value });
+    for (body.bls_to_execution_changes.data) |value| try durable.readmit(pool, state, .{ .bls_change = value });
+}
+
+test "reorg readmission walks back to a retained anchor and validates detached operations" {
+    const allocator = std.testing.allocator;
+    const fixtures = @import("fixture_runner.zig");
+    const state = try fixtures.decodeState(allocator, @embedFile("fixtures/fulu_block_operations/voluntary_exit_valid/pre.ssz_snappy"));
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
+    const input = try fixtures.decode(allocator, @embedFile("fixtures/fulu_block_operations/voluntary_exit_valid/voluntary_exit.ssz_snappy"));
+    defer allocator.free(input);
+    var reader: std.Io.Reader = .fixed(input);
+    const exit = try ssz.deserialize(allocator, fulu.SignedVoluntaryExit, &reader);
+    defer ssz.freeDecoded(allocator, fulu.SignedVoluntaryExit, exit);
+    var anchor = std.mem.zeroes(fulu.BeaconBlock);
+    anchor.state_root = try merkle.HashTreeRoot(allocator, state);
+    var chain = try fork_choice.initStore(allocator, &state, &anchor);
+    defer chain.deinit();
+    const anchor_root = try merkle.HashTreeRoot(allocator, anchor);
+    var detached = std.mem.zeroes(fulu.BeaconBlock);
+    detached.slot = state.slot + 1;
+    detached.parent_root = anchor_root;
+    detached.body.voluntary_exits.data = &.{exit};
+    const detached_root = try merkle.HashTreeRoot(allocator, detached);
+    try chain.blocks.put(detached_root, try pool_api.copyValue(allocator, fulu.BeaconBlock, detached));
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var operations = try @import("operation_store.zig").Store.open(allocator, std.testing.io, tmp.dir, "operations");
+    defer operations.deinit();
+    var pool = pool_api.Pool.init(allocator);
+    defer pool.deinit();
+    var coordinator = Coordinator{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .dir = tmp.dir,
+        .store = &chain,
+        .columns = undefined,
+        .settings = undefined,
+        .engine = undefined,
+        .head = anchor_root,
+        .next_slot = state.slot + 1,
+        .operation_store = &operations,
+        .operation_pool = &pool,
+    };
+    try coordinator.readmitDetached(detached_root, anchor_root);
+    try std.testing.expectEqual(@as(usize, 1), pool.voluntary_exits.items.len);
+    const records = try operations.recover(allocator);
+    defer @import("operation_store.zig").Store.freeRecords(allocator, records);
+    try std.testing.expectEqual(@as(usize, 1), records.len);
+}
+
 test "ordered import saves a valid head and skips a duplicate replay" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const fixtures = @import("fixture_runner.zig");
-    const ssz = @import("ssz");
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const state = try fixtures.decodeState(allocator, fixtures.fork_choice_anchor_state);
@@ -221,7 +381,11 @@ test "ordered import saves a valid head and skips a duplicate replay" {
     defer column_store.deinit();
     var setup = kzg.Settings{};
     var engine = engine_api.TestEngine{ .status = .valid };
-    var coordinator = Coordinator{ .allocator = allocator, .io = io, .dir = tmp.dir, .store = &chain, .columns = &column_store, .settings = &setup, .engine = engine.interface(), .head = initial_root, .next_slot = 1 };
+    var operation_store = try @import("operation_store.zig").Store.open(allocator, io, tmp.dir, "operations");
+    defer operation_store.deinit();
+    var operation_pool = pool_api.Pool.init(allocator);
+    defer operation_pool.deinit();
+    var coordinator = Coordinator{ .allocator = allocator, .io = io, .dir = tmp.dir, .store = &chain, .columns = &column_store, .settings = &setup, .engine = engine.interface(), .head = initial_root, .next_slot = 1, .operation_store = &operation_store, .operation_pool = &operation_pool };
     try confirmExecutionHead(&chain, engine.interface());
     try std.testing.expectEqual(state.latest_execution_payload_header.block_hash, engine.head.?);
     engine.forkchoice_status = .syncing;
@@ -246,7 +410,7 @@ test "ordered import saves a valid head and skips a duplicate replay" {
     try std.testing.expectEqual(accepted, coordinator.head);
     const second = try fixtures.decodeBlock(allocator, fixtures.fork_choice_heavier_blocks[1]);
     defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, second);
-    var resumed = Coordinator{ .allocator = allocator, .io = io, .dir = tmp.dir, .store = &restored, .columns = &column_store, .settings = &setup, .engine = engine.interface(), .head = accepted, .next_slot = 2 };
+    var resumed = Coordinator{ .allocator = allocator, .io = io, .dir = tmp.dir, .store = &restored, .columns = &column_store, .settings = &setup, .engine = engine.interface(), .head = accepted, .next_slot = 2, .operation_store = &operation_store, .operation_pool = &operation_pool };
     resumed.now_seconds = restored.genesis_time + second.message.slot * preset.SECONDS_PER_SLOT + 1;
     var cancel = std.atomic.Value(bool).init(true);
     resumed.cancelled = &cancel;
@@ -279,7 +443,12 @@ test "ordered import saves a valid head and skips a duplicate replay" {
     try std.testing.expectEqual(@as(usize, 1), try resumed.importBlocks(null, &.{third}, 3, 1));
     const selected = resumed.head;
     resumed.now_seconds = restored.genesis_time + competing.message.slot * preset.SECONDS_PER_SLOT + 1;
-    try std.testing.expectEqual(@as(usize, 1), try resumed.importBlocks(null, &.{competing}, competing.message.slot, 1));
+    operation_store.poisoned = true;
+    try std.testing.expectError(error.ImportCommitFailed, resumed.importBlocks(null, &.{competing}, competing.message.slot, 1));
+    try std.testing.expect(!resumed.operation_pool_ready);
+    operation_store.poisoned = false;
+    try std.testing.expectEqual(@as(usize, 0), try resumed.importBlocks(null, &.{competing}, competing.message.slot, 1));
+    try std.testing.expect(!resumed.operation_pool_ready);
     try std.testing.expectEqual(selected, resumed.head);
     const competing_root = try merkle.HashTreeRoot(allocator, competing.message);
     try std.testing.expect(restored.block_states.contains(competing_root));
@@ -305,7 +474,6 @@ test "peer sync records live late and historical arrival timeliness" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const fixtures = @import("fixture_runner.zig");
-    const ssz = @import("ssz");
     const cases = [_]struct { name: []const u8, offset: u64, timely: bool }{
         .{ .name = "live", .offset = 1, .timely = true },
         .{ .name = "late", .offset = preset.PROPOSER_BOOST_WINDOW_SECONDS, .timely = false },
@@ -347,7 +515,6 @@ test "two peers catch up from an anchor and resume after restart" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const fixtures = @import("fixture_runner.zig");
-    const ssz = @import("ssz");
     const gossip = @import("p2p_gossip.zig");
     const service = @import("p2p_service.zig");
     const control = @import("p2p_control.zig");
@@ -543,15 +710,10 @@ test "a valid block after more than sixteen empty slots imports from a later ran
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const fixtures = @import("fixture_runner.zig");
-    const ssz = @import("ssz");
     const blst = @import("blst");
     const bls = @import("bls.zig");
-    const proposer = @import("proposer.zig");
     const operations = @import("block_operations.zig");
-    const transition = @import("transition.zig");
-    const epoch = @import("epoch.zig");
     const helpers = @import("helpers.zig");
-    const pool_api = @import("operation_pool.zig");
     const slot: u64 = 18;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -599,17 +761,25 @@ test "a valid block after more than sixteen empty slots imports from a later ran
     payload.withdrawals.data = try operations.expectedWithdrawals(allocator, &advanced);
     defer allocator.free(payload.withdrawals.data);
     var engine = engine_api.TestEngine{ .status = .valid, .built = .{ .payload = payload, .commitments = &.{}, .requests = template.message.body.execution_requests } };
-    const execution_head = state.latest_execution_payload_header.block_hash;
-    const choice = engine_api.ForkchoiceState{ .head_block_hash = execution_head, .safe_block_hash = execution_head, .finalized_block_hash = execution_head };
     var infinity = [_]u8{0} ** 96;
     infinity[0] = 0xc0;
     const sync: fulu.SyncAggregate = .{ .sync_committee_bits = .{ .data = [_]bool{false} ** @import("consensus_preset").Config.SYNC_COMMITTEE_SIZE }, .sync_committee_signature = infinity };
+    var operation_store = try @import("operation_store.zig").Store.open(allocator, io, source_dir, "operations");
+    defer operation_store.deinit();
     var pool = pool_api.Pool.init(allocator);
     defer pool.deinit();
-    const signed = try proposer.propose(allocator, &state, slot, &key, &pool, engine.interface(), choice, sync, payload.fee_recipient, [_]u8{0} ** 32);
+    var source_sync = Coordinator{ .allocator = allocator, .io = io, .dir = source_dir, .store = &source, .columns = &source_columns, .settings = &settings, .engine = engine.interface(), .head = anchor_root, .next_slot = 1, .operation_store = &operation_store, .operation_pool = &pool };
+    var proposal_mutex: std.Io.Mutex = .init;
+    source_sync.proposal_mutex = &proposal_mutex;
+    try std.testing.expectError(error.OperationPoolUnavailable, source_sync.proposeBlock(slot, &key, sync, payload.fee_recipient, [_]u8{0} ** 32));
+    source_sync.operation_pool_ready = true;
+    const signed = try source_sync.proposeBlock(slot, &key, sync, payload.fee_recipient, [_]u8{0} ** 32);
     defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, signed);
+    operation_store.poisoned = true;
+    try std.testing.expectError(error.OperationPoolUnavailable, source_sync.proposeBlock(slot, &key, sync, payload.fee_recipient, [_]u8{0} ** 32));
+    operation_store.poisoned = false;
     const live_time = state.genesis_time + slot * preset.SECONDS_PER_SLOT + 1;
-    var source_sync = Coordinator{ .allocator = allocator, .io = io, .dir = source_dir, .store = &source, .columns = &source_columns, .settings = &settings, .engine = engine.interface(), .head = anchor_root, .next_slot = 1, .now_seconds = live_time };
+    source_sync.now_seconds = live_time;
     var target_sync = Coordinator{ .allocator = allocator, .io = io, .dir = target_dir, .store = &target, .columns = &target_columns, .settings = &settings, .engine = engine.interface(), .head = anchor_root, .next_slot = 1, .now_seconds = live_time };
     try snapshot.saveForkChoiceStore(allocator, io, target_dir, "fork-choice.bin", &target);
     try std.testing.expectEqual(@as(usize, 1), try source_sync.importBlocks(null, &.{signed}, slot, 1));
