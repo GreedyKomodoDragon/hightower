@@ -77,6 +77,33 @@ pub const Admission = struct {
         };
     }
 
+    /// Decode and validate proposer-slashing gossip before runtime admission.
+    pub fn receiveProposerSlashing(self: *Admission, peer_id: [32]u8, topic_digest: [4]u8, bytes: []const u8, validation: ingress.ProposerSlashingValidation) !void {
+        try self.requirePeer(peer_id);
+        ingress.receiveProposerSlashingGossip(self.allocator, self.config, topic_digest, bytes, validation) catch |err| {
+            if (isPeerFault(err)) self.noteInvalid(peer_id);
+            return err;
+        };
+    }
+
+    /// Decode and validate attester-slashing gossip before runtime admission.
+    pub fn receiveAttesterSlashing(self: *Admission, peer_id: [32]u8, topic_digest: [4]u8, bytes: []const u8, validation: ingress.AttesterSlashingValidation) !void {
+        try self.requirePeer(peer_id);
+        ingress.receiveAttesterSlashingGossip(self.allocator, self.config, topic_digest, bytes, validation) catch |err| {
+            if (isPeerFault(err)) self.noteInvalid(peer_id);
+            return err;
+        };
+    }
+
+    /// Decode and validate voluntary-exit gossip before runtime admission.
+    pub fn receiveVoluntaryExit(self: *Admission, peer_id: [32]u8, topic_digest: [4]u8, bytes: []const u8, validation: ingress.VoluntaryExitValidation) !void {
+        try self.requirePeer(peer_id);
+        ingress.receiveVoluntaryExitGossip(self.allocator, self.config, topic_digest, bytes, validation) catch |err| {
+            if (isPeerFault(err)) self.noteInvalid(peer_id);
+            return err;
+        };
+    }
+
     /// Verify a sidecar against its known block before scoring or storage.
     pub fn receiveColumn(self: *Admission, peer_id: [32]u8, topic_digest: [4]u8, subnet: u8, bytes: []const u8, store: *columns.Store, settings: *const kzg.Settings, lookup: ingress.ColumnLookup) !void {
         try self.requirePeer(peer_id);

@@ -1,6 +1,6 @@
 // Gossipsub subscriptions and publishes arrive as protobuf RPCs from
-// authenticated peers. Announce our block, aggregate, selected attestation,
-// and sampled data-column topics on each new stream, then parse envelopes before
+// authenticated peers. Announce our block, aggregate, validator-operation,
+// selected attestation, and sampled data-column topics on each new stream, then parse envelopes before
 // changing remote subscriptions or delivering SSZ objects. Valid duplicates
 // are suppressed; invalid messages
 // count toward the existing peer ban threshold.
@@ -56,8 +56,8 @@ const WireType = struct {
 
 const Publish = struct { topic: []const u8, data: []const u8 };
 const Subscription = struct { topic: []const u8, subscribe: bool };
-const RemoteSubscriptions = struct { block: bool = false, aggregate: bool = false, attestations: u64 = 0, columns: [2]u64 = .{ 0, 0 } };
-const TopicSelection = union(enum) { block, aggregate, attestation: u8, column: u8 };
+const RemoteSubscriptions = struct { block: bool = false, aggregate: bool = false, voluntary_exit: bool = false, proposer_slashing: bool = false, attester_slashing: bool = false, attestations: u64 = 0, columns: [2]u64 = .{ 0, 0 } };
+const TopicSelection = union(enum) { block, aggregate, voluntary_exit, proposer_slashing, attester_slashing, attestation: u8, column: u8 };
 const Parsed = struct {
     publishes: [max_publishes]Publish = std.mem.zeroes([max_publishes]Publish),
     publish_len: usize = 0,
@@ -77,12 +77,16 @@ pub const Service = struct {
     digest: [4]u8,
     block_topic: []u8,
     aggregate_topic: []u8,
+    voluntary_exit_topic: []u8,
+    proposer_slashing_topic: []u8,
+    attester_slashing_topic: []u8,
     attestation_topics: [64]?[]u8,
     column_topics: [columns.column_count]?[]u8,
     column_route: ?ColumnRoute,
     block_validation: ingress.BlockValidation,
     attestation_validation: ingress.AttestationValidation,
     aggregate_validation: ingress.AggregateValidation,
+    operation_validation: ?ingress.OperationsValidation = null,
     peers: admission.Admission,
     subscriptions: std.AutoHashMap([32]u8, RemoteSubscriptions),
     connection_counts: std.AutoHashMap([32]u8, u32),
@@ -102,6 +106,12 @@ pub const Service = struct {
         errdefer allocator.free(block_topic);
         const aggregate_topic = try wire.topicName(allocator, digest, .aggregate_attestation, null);
         errdefer allocator.free(aggregate_topic);
+        const voluntary_exit_topic = try wire.topicName(allocator, digest, .voluntary_exit, null);
+        errdefer allocator.free(voluntary_exit_topic);
+        const proposer_slashing_topic = try wire.topicName(allocator, digest, .proposer_slashing, null);
+        errdefer allocator.free(proposer_slashing_topic);
+        const attester_slashing_topic = try wire.topicName(allocator, digest, .attester_slashing, null);
+        errdefer allocator.free(attester_slashing_topic);
         var attestation_topics: [64]?[]u8 = .{null} ** 64;
         errdefer for (attestation_topics) |name| if (name) |owned| allocator.free(owned);
         for (subnets) |subnet| {
@@ -125,7 +135,7 @@ pub const Service = struct {
         var connection_counts = std.AutoHashMap([32]u8, u32).init(allocator);
         errdefer connection_counts.deinit();
         try connection_counts.ensureTotalCapacity(@intCast(max_peers));
-        return .{ .allocator = allocator, .digest = digest, .block_topic = block_topic, .aggregate_topic = aggregate_topic, .attestation_topics = attestation_topics, .column_topics = column_topics, .column_route = column_route, .block_validation = block_validation, .attestation_validation = attestation_validation, .aggregate_validation = aggregate_validation, .peers = peers, .subscriptions = subscriptions, .connection_counts = connection_counts, .seen = seen };
+        return .{ .allocator = allocator, .digest = digest, .block_topic = block_topic, .aggregate_topic = aggregate_topic, .voluntary_exit_topic = voluntary_exit_topic, .proposer_slashing_topic = proposer_slashing_topic, .attester_slashing_topic = attester_slashing_topic, .attestation_topics = attestation_topics, .column_topics = column_topics, .column_route = column_route, .block_validation = block_validation, .attestation_validation = attestation_validation, .aggregate_validation = aggregate_validation, .peers = peers, .subscriptions = subscriptions, .connection_counts = connection_counts, .seen = seen };
     }
 
     /// Release topic names, the bounded duplicate cache, and peer scores.
@@ -137,7 +147,15 @@ pub const Service = struct {
         for (self.attestation_topics) |name| if (name) |owned| self.allocator.free(owned);
         for (self.column_topics) |name| if (name) |owned| self.allocator.free(owned);
         self.allocator.free(self.aggregate_topic);
+        self.allocator.free(self.voluntary_exit_topic);
+        self.allocator.free(self.proposer_slashing_topic);
+        self.allocator.free(self.attester_slashing_topic);
         self.allocator.free(self.block_topic);
+    }
+
+    /// Enable the three global validator-operation topics with runtime validation callbacks.
+    pub fn setOperationValidation(self: *Service, validation: ingress.OperationsValidation) void {
+        self.operation_validation = validation;
     }
 
     /// Admit a transport-authenticated peer and count this gossip stream.
@@ -178,6 +196,9 @@ pub const Service = struct {
             const interested = switch (selected) {
                 .block => entry.value_ptr.block,
                 .aggregate => entry.value_ptr.aggregate,
+                .voluntary_exit => entry.value_ptr.voluntary_exit,
+                .proposer_slashing => entry.value_ptr.proposer_slashing,
+                .attester_slashing => entry.value_ptr.attester_slashing,
                 .attestation => |subnet| entry.value_ptr.attestations & (@as(u64, 1) << @intCast(subnet)) != 0,
                 .column => |subnet| entry.value_ptr.columns[subnet / 64] & (@as(u64, 1) << @intCast(subnet % 64)) != 0,
             };
@@ -202,7 +223,7 @@ pub const Service = struct {
         return remote.columns;
     }
 
-    /// Encode this node's block and selected attestation subscriptions as one
+    /// Encode this node's global operation and selected attestation subscriptions as one
     /// framed RPC to send when a peer's gossip stream opens or reconnects.
     pub fn localSubscriptionFrame(self: *const Service) ![]u8 {
         var rpc: std.ArrayList(u8) = .empty;
@@ -213,6 +234,14 @@ pub const Service = struct {
         try appendSubscription(self.allocator, &rpc, self.aggregate_topic, true);
         try appendGraft(self.allocator, &control, self.block_topic);
         try appendGraft(self.allocator, &control, self.aggregate_topic);
+        if (self.operation_validation != null) {
+            try appendSubscription(self.allocator, &rpc, self.voluntary_exit_topic, true);
+            try appendSubscription(self.allocator, &rpc, self.proposer_slashing_topic, true);
+            try appendSubscription(self.allocator, &rpc, self.attester_slashing_topic, true);
+            try appendGraft(self.allocator, &control, self.voluntary_exit_topic);
+            try appendGraft(self.allocator, &control, self.proposer_slashing_topic);
+            try appendGraft(self.allocator, &control, self.attester_slashing_topic);
+        }
         for (self.attestation_topics) |maybe_name| {
             const name = maybe_name orelse continue;
             try appendSubscription(self.allocator, &rpc, name, true);
@@ -241,6 +270,9 @@ pub const Service = struct {
             switch (selected) {
                 .block => remote.block = subscription.subscribe,
                 .aggregate => remote.aggregate = subscription.subscribe,
+                .voluntary_exit => remote.voluntary_exit = subscription.subscribe,
+                .proposer_slashing => remote.proposer_slashing = subscription.subscribe,
+                .attester_slashing => remote.attester_slashing = subscription.subscribe,
                 .attestation => |subnet| {
                     const mask = @as(u64, 1) << @intCast(subnet);
                     if (subscription.subscribe) remote.attestations |= mask else remote.attestations &= ~mask;
@@ -259,6 +291,9 @@ pub const Service = struct {
             switch (selected) {
                 .block => try self.peers.receiveBlock(peer_id, self.digest, publish.data, self.block_validation),
                 .aggregate => try self.peers.receiveAggregate(peer_id, self.digest, publish.data, self.aggregate_validation),
+                .voluntary_exit => try self.peers.receiveVoluntaryExit(peer_id, self.digest, publish.data, self.operation_validation.?.voluntary_exit),
+                .proposer_slashing => try self.peers.receiveProposerSlashing(peer_id, self.digest, publish.data, self.operation_validation.?.proposer_slashing),
+                .attester_slashing => try self.peers.receiveAttesterSlashing(peer_id, self.digest, publish.data, self.operation_validation.?.attester_slashing),
                 .attestation => try self.peers.receiveAttestation(peer_id, self.digest, publish.data, self.attestation_validation),
                 .column => |subnet| {
                     const route = self.column_route.?;
@@ -284,6 +319,11 @@ pub const Service = struct {
     fn classify(self: *const Service, name: []const u8) ?TopicSelection {
         if (std.mem.eql(u8, name, self.block_topic)) return .block;
         if (std.mem.eql(u8, name, self.aggregate_topic)) return .aggregate;
+        if (self.operation_validation != null) {
+            if (std.mem.eql(u8, name, self.voluntary_exit_topic)) return .voluntary_exit;
+            if (std.mem.eql(u8, name, self.proposer_slashing_topic)) return .proposer_slashing;
+            if (std.mem.eql(u8, name, self.attester_slashing_topic)) return .attester_slashing;
+        }
         for (self.attestation_topics, 0..) |maybe_name, subnet| {
             const topic_name = maybe_name orelse continue;
             if (std.mem.eql(u8, name, topic_name)) return .{ .attestation = @intCast(subnet) };
@@ -726,6 +766,28 @@ test "local subscriptions announce GRAFT and remote columns are tracked" {
     try std.testing.expectEqual(@as(usize, 2), topics.len);
     try std.testing.expectEqualStrings(service.block_topic, topics[0]);
     try std.testing.expectEqualStrings(service.aggregate_topic, topics[1]);
+    const operation_validation: ingress.OperationsValidation = .{
+        .proposer_slashing = .{ .context = &unused, .validate = struct {
+            fn accept(_: *anyopaque, _: *const fulu.ProposerSlashing) !void {}
+        }.accept },
+        .attester_slashing = .{ .context = &unused, .validate = struct {
+            fn accept(_: *anyopaque, _: *const fulu.AttesterSlashing) !void {}
+        }.accept },
+        .voluntary_exit = .{ .context = &unused, .validate = struct {
+            fn accept(_: *anyopaque, _: *const fulu.SignedVoluntaryExit) !void {}
+        }.accept },
+    };
+    var operation_service = try Service.init(allocator, config, .{ 1, 2, 3, 4 }, &.{}, 1, 3, block_gate, attestation_gate, aggregate_gate, null);
+    defer operation_service.deinit();
+    operation_service.setOperationValidation(operation_validation);
+    const operation_frame = try operation_service.localSubscriptionFrame();
+    defer allocator.free(operation_frame);
+    const operation_topics = try collectGraftTopics(allocator, operation_frame);
+    defer allocator.free(operation_topics);
+    try std.testing.expectEqual(@as(usize, 5), operation_topics.len);
+    try std.testing.expectEqualStrings(operation_service.voluntary_exit_topic, operation_topics[2]);
+    try std.testing.expectEqualStrings(operation_service.proposer_slashing_topic, operation_topics[3]);
+    try std.testing.expectEqualStrings(operation_service.attester_slashing_topic, operation_topics[4]);
 
     const peer_id = [_]u8{2} ** 32;
     try service.connect(peer_id);
@@ -1037,6 +1099,70 @@ test "gossip RPC validates blocks attestations and aggregates before delivery" {
     try local_error.connect(bad_peer);
     try std.testing.expectError(error.LocalUnavailable, local_error.receive(bad_peer, block_rpc));
     try std.testing.expectEqual(@as(u8, 0), local_error.peers.state(bad_peer).?.invalid_messages);
+}
+
+test "gossip RPC delivers validator operations through their topics" {
+    const fixture = @import("fixture_runner.zig");
+    const fulu = @import("fulu");
+    const allocator = std.testing.allocator;
+    const helpers = @import("helpers.zig");
+    const config = ingress.Config{ .genesis_validators_root = [_]u8{1} ** 32, .fulu_version = .{ 6, 0, 0, 0 }, .fulu_epoch = 0, .blob_schedule = &helpers.BLOB_SCHEDULE };
+    var calls: usize = 0;
+    const Gates = struct {
+        /// Ignore blocks in this operation routing test.
+        fn block(_: *anyopaque, _: *const fulu.SignedBeaconBlock) !void {}
+        /// Ignore attestations in this operation routing test.
+        fn attestation(_: *anyopaque, _: *const fulu.Attestation) !void {}
+        /// Ignore aggregates in this operation routing test.
+        fn aggregate(_: *anyopaque, _: *const fulu.SignedAggregateAndProof) !void {}
+        /// Count validator operations that pass ingress validation.
+        fn operation(context: *anyopaque) void {
+            const count: *usize = @ptrCast(@alignCast(context));
+            count.* += 1;
+        }
+    };
+    const block_gate = ingress.BlockValidation{ .context = &calls, .validate = Gates.block };
+    const attestation_gate = ingress.AttestationValidation{ .context = &calls, .validate = Gates.attestation };
+    const aggregate_gate = ingress.AggregateValidation{ .context = &calls, .validate = Gates.aggregate };
+    var service = try Service.init(allocator, config, try config.digestAtSlot(0), &.{}, 1, 3, block_gate, attestation_gate, aggregate_gate, null);
+    defer service.deinit();
+    service.setOperationValidation(.{
+        .proposer_slashing = .{ .context = &calls, .validate = struct {
+            /// Count a valid proposer slashing.
+            fn check(context: *anyopaque, _: *const fulu.ProposerSlashing) !void {
+                Gates.operation(context);
+            }
+        }.check },
+        .attester_slashing = .{ .context = &calls, .validate = struct {
+            /// Count a valid attester slashing.
+            fn check(context: *anyopaque, _: *const fulu.AttesterSlashing) !void {
+                Gates.operation(context);
+            }
+        }.check },
+        .voluntary_exit = .{ .context = &calls, .validate = struct {
+            /// Count a valid voluntary exit.
+            fn check(context: *anyopaque, _: *const fulu.SignedVoluntaryExit) !void {
+                Gates.operation(context);
+            }
+        }.check },
+    });
+    const peer = [_]u8{2} ** 32;
+    try service.connect(peer);
+    const operations = .{
+        .{ service.proposer_slashing_topic, @embedFile("fixtures/fulu_block_operations/proposer_slashing_valid/proposer_slashing.ssz_snappy") },
+        .{ service.attester_slashing_topic, @embedFile("fixtures/fulu_block_operations/attester_slashing_valid/attester_slashing.ssz_snappy") },
+        .{ service.voluntary_exit_topic, @embedFile("fixtures/fulu_block_operations/voluntary_exit_valid/voluntary_exit.ssz_snappy") },
+    };
+    inline for (operations) |operation| {
+        const raw = try fixture.decode(allocator, operation[1]);
+        defer allocator.free(raw);
+        const encoded = try wire.encodeGossip(allocator, raw, config.max_encoded_size);
+        defer allocator.free(encoded);
+        const rpc = try encodePublish(allocator, operation[0], encoded);
+        defer allocator.free(rpc);
+        try service.receive(peer, rpc);
+    }
+    try std.testing.expectEqual(@as(usize, 3), calls);
 }
 
 test "column gossip retains only verified selected sidecars" {
