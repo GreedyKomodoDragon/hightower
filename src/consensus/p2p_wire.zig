@@ -38,7 +38,7 @@ pub const Protocol = enum {
     }
 };
 
-pub const Topic = enum { block, attestation, aggregate_attestation, data_column };
+pub const Topic = enum { block, attestation, aggregate_attestation, voluntary_exit, proposer_slashing, attester_slashing, data_column };
 
 pub const ResponseCode = enum(u8) {
     success = 0,
@@ -219,6 +219,9 @@ pub fn topicName(allocator: std.mem.Allocator, digest: [4]u8, kind: Topic, subne
     return switch (kind) {
         .block => if (subnet == null) std.fmt.allocPrint(allocator, "/eth2/{s}/beacon_block/ssz_snappy", .{&hex}) else error.InvalidSubnet,
         .aggregate_attestation => if (subnet == null) std.fmt.allocPrint(allocator, "/eth2/{s}/beacon_aggregate_and_proof/ssz_snappy", .{&hex}) else error.InvalidSubnet,
+        .voluntary_exit => if (subnet == null) std.fmt.allocPrint(allocator, "/eth2/{s}/voluntary_exit/ssz_snappy", .{&hex}) else error.InvalidSubnet,
+        .proposer_slashing => if (subnet == null) std.fmt.allocPrint(allocator, "/eth2/{s}/proposer_slashing/ssz_snappy", .{&hex}) else error.InvalidSubnet,
+        .attester_slashing => if (subnet == null) std.fmt.allocPrint(allocator, "/eth2/{s}/attester_slashing/ssz_snappy", .{&hex}) else error.InvalidSubnet,
         .attestation => if (subnet) |index| if (index < 64) std.fmt.allocPrint(allocator, "/eth2/{s}/beacon_attestation_{d}/ssz_snappy", .{ &hex, index }) else error.InvalidSubnet else error.InvalidSubnet,
         .data_column => if (subnet) |index| if (index < 128) std.fmt.allocPrint(allocator, "/eth2/{s}/data_column_sidecar_{d}/ssz_snappy", .{ &hex, index }) else error.InvalidSubnet else error.InvalidSubnet,
     };
@@ -375,6 +378,16 @@ test "Fulu protocol IDs and gossip topic names use exact fork digest and bounds"
     const block = try topicName(allocator, digest, .block, null);
     defer allocator.free(block);
     try std.testing.expectEqualStrings("/eth2/1234abcd/beacon_block/ssz_snappy", block);
+    const exit = try topicName(allocator, digest, .voluntary_exit, null);
+    defer allocator.free(exit);
+    try std.testing.expectEqualStrings("/eth2/1234abcd/voluntary_exit/ssz_snappy", exit);
+    const proposer_slashing = try topicName(allocator, digest, .proposer_slashing, null);
+    defer allocator.free(proposer_slashing);
+    try std.testing.expectEqualStrings("/eth2/1234abcd/proposer_slashing/ssz_snappy", proposer_slashing);
+    const attester_slashing = try topicName(allocator, digest, .attester_slashing, null);
+    defer allocator.free(attester_slashing);
+    try std.testing.expectEqualStrings("/eth2/1234abcd/attester_slashing/ssz_snappy", attester_slashing);
+    try std.testing.expectError(error.InvalidSubnet, topicName(allocator, digest, .voluntary_exit, 0));
     const column = try topicName(allocator, digest, .data_column, 127);
     defer allocator.free(column);
     try std.testing.expectEqualStrings("/eth2/1234abcd/data_column_sidecar_127/ssz_snappy", column);

@@ -45,6 +45,27 @@ pub const AggregateValidation = struct {
     validate: *const fn (*anyopaque, *const fulu.SignedAggregateAndProof) anyerror!void,
 };
 
+pub const ProposerSlashingValidation = struct {
+    context: *anyopaque,
+    validate: *const fn (*anyopaque, *const fulu.ProposerSlashing) anyerror!void,
+};
+
+pub const AttesterSlashingValidation = struct {
+    context: *anyopaque,
+    validate: *const fn (*anyopaque, *const fulu.AttesterSlashing) anyerror!void,
+};
+
+pub const VoluntaryExitValidation = struct {
+    context: *anyopaque,
+    validate: *const fn (*anyopaque, *const fulu.SignedVoluntaryExit) anyerror!void,
+};
+
+pub const OperationsValidation = struct {
+    proposer_slashing: ProposerSlashingValidation,
+    attester_slashing: AttesterSlashingValidation,
+    voluntary_exit: VoluntaryExitValidation,
+};
+
 pub const ColumnBlock = struct {
     block: *const fulu.BeaconBlock,
     parent_state: *const fulu.BeaconState,
@@ -90,6 +111,43 @@ pub fn receiveAggregateGossip(allocator: std.mem.Allocator, config: Config, topi
     const expected = try config.digestAtSlot(aggregate.message.aggregate.data.slot);
     if (!std.mem.eql(u8, &topic_digest, &expected)) return error.InvalidForkContext;
     try validation.validate(validation.context, &aggregate);
+}
+
+/// Decode proposer-slashing gossip and bind its topic to the signed header fork.
+pub fn receiveProposerSlashingGossip(allocator: std.mem.Allocator, config: Config, topic_digest: [4]u8, encoded: []const u8, validation: ProposerSlashingValidation) !void {
+    const bytes = try wire.decodeGossip(allocator, encoded, config.max_encoded_size);
+    defer allocator.free(bytes);
+    var reader: std.Io.Reader = .fixed(bytes);
+    const value = try ssz.deserialize(allocator, fulu.ProposerSlashing, &reader);
+    defer ssz.freeDecoded(allocator, fulu.ProposerSlashing, value);
+    const expected = try config.digestAtSlot(value.signed_header_1.message.slot);
+    if (!std.mem.eql(u8, &topic_digest, &expected)) return error.InvalidForkContext;
+    try validation.validate(validation.context, &value);
+}
+
+/// Decode attester-slashing gossip and bind its topic to the attestation fork.
+pub fn receiveAttesterSlashingGossip(allocator: std.mem.Allocator, config: Config, topic_digest: [4]u8, encoded: []const u8, validation: AttesterSlashingValidation) !void {
+    const bytes = try wire.decodeGossip(allocator, encoded, config.max_encoded_size);
+    defer allocator.free(bytes);
+    var reader: std.Io.Reader = .fixed(bytes);
+    const value = try ssz.deserialize(allocator, fulu.AttesterSlashing, &reader);
+    defer ssz.freeDecoded(allocator, fulu.AttesterSlashing, value);
+    const expected = try config.digestAtSlot(value.attestation_1.data.slot);
+    if (!std.mem.eql(u8, &topic_digest, &expected)) return error.InvalidForkContext;
+    try validation.validate(validation.context, &value);
+}
+
+/// Decode voluntary-exit gossip and bind its topic to the exit epoch fork.
+pub fn receiveVoluntaryExitGossip(allocator: std.mem.Allocator, config: Config, topic_digest: [4]u8, encoded: []const u8, validation: VoluntaryExitValidation) !void {
+    const bytes = try wire.decodeGossip(allocator, encoded, config.max_encoded_size);
+    defer allocator.free(bytes);
+    var reader: std.Io.Reader = .fixed(bytes);
+    const value = try ssz.deserialize(allocator, fulu.SignedVoluntaryExit, &reader);
+    defer ssz.freeDecoded(allocator, fulu.SignedVoluntaryExit, value);
+    const slot = try std.math.mul(u64, value.message.epoch, helpers.SLOTS_PER_EPOCH);
+    const expected = try config.digestAtSlot(slot);
+    if (!std.mem.eql(u8, &topic_digest, &expected)) return error.InvalidForkContext;
+    try validation.validate(validation.context, &value);
 }
 
 /// Verify column gossip against the known block and parent state before retention.
@@ -178,6 +236,54 @@ test "gossip and response gates reject wrong fork before callbacks" {
     const decoded = try decodeBlockResponse(allocator, config, &.{ .code = .success, .fork_digest = digest, .payload = raw });
     defer ssz.freeDecoded(allocator, fulu.SignedBeaconBlock, decoded);
     try std.testing.expectEqual(block.message.slot, decoded.message.slot);
+}
+
+test "validator-operation gossip decodes, checks fork context, and invokes admission gates" {
+    const allocator = std.testing.allocator;
+    const fixture = @import("fixture_runner.zig");
+    var calls: usize = 0;
+    const validation = OperationsValidation{
+        .proposer_slashing = .{ .context = &calls, .validate = struct {
+            fn check(context: *anyopaque, _: *const fulu.ProposerSlashing) !void {
+                const count: *usize = @ptrCast(@alignCast(context));
+                count.* += 1;
+            }
+        }.check },
+        .attester_slashing = .{ .context = &calls, .validate = struct {
+            fn check(context: *anyopaque, _: *const fulu.AttesterSlashing) !void {
+                const count: *usize = @ptrCast(@alignCast(context));
+                count.* += 1;
+            }
+        }.check },
+        .voluntary_exit = .{ .context = &calls, .validate = struct {
+            fn check(context: *anyopaque, _: *const fulu.SignedVoluntaryExit) !void {
+                const count: *usize = @ptrCast(@alignCast(context));
+                count.* += 1;
+            }
+        }.check },
+    };
+    const config = Config{ .genesis_validators_root = [_]u8{1} ** 32, .fulu_version = .{ 6, 0, 0, 0 }, .fulu_epoch = 0, .blob_schedule = &helpers.BLOB_SCHEDULE };
+    const digest = try config.digestAtSlot(0);
+    const proposer = try fixture.decode(allocator, @embedFile("fixtures/fulu_block_operations/proposer_slashing_valid/proposer_slashing.ssz_snappy"));
+    defer allocator.free(proposer);
+    const proposer_gossip = try wire.encodeGossip(allocator, proposer, config.max_encoded_size);
+    defer allocator.free(proposer_gossip);
+    try receiveProposerSlashingGossip(allocator, config, digest, proposer_gossip, validation.proposer_slashing);
+    const attester = try fixture.decode(allocator, @embedFile("fixtures/fulu_block_operations/attester_slashing_valid/attester_slashing.ssz_snappy"));
+    defer allocator.free(attester);
+    const attester_gossip = try wire.encodeGossip(allocator, attester, config.max_encoded_size);
+    defer allocator.free(attester_gossip);
+    try receiveAttesterSlashingGossip(allocator, config, digest, attester_gossip, validation.attester_slashing);
+    const exit = try fixture.decode(allocator, @embedFile("fixtures/fulu_block_operations/voluntary_exit_valid/voluntary_exit.ssz_snappy"));
+    defer allocator.free(exit);
+    const exit_gossip = try wire.encodeGossip(allocator, exit, config.max_encoded_size);
+    defer allocator.free(exit_gossip);
+    try receiveVoluntaryExitGossip(allocator, config, digest, exit_gossip, validation.voluntary_exit);
+    try std.testing.expectEqual(@as(usize, 3), calls);
+    var wrong = digest;
+    wrong[0] ^= 1;
+    try std.testing.expectError(error.InvalidForkContext, receiveVoluntaryExitGossip(allocator, config, wrong, exit_gossip, validation.voluntary_exit));
+    try std.testing.expectEqual(@as(usize, 3), calls);
 }
 
 test "attestation gossip and official column sidecar cross validation gates" {

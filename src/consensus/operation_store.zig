@@ -10,6 +10,7 @@ const ssz = @import("ssz");
 const merkle = @import("merkle");
 const lsm = @import("storage");
 const preset = @import("consensus_preset").Config;
+const helpers = @import("helpers.zig");
 const pool_api = @import("operation_pool.zig");
 
 const prefix = "operations/v1/";
@@ -125,6 +126,93 @@ pub const Store = struct {
         }
     }
 
+    /// Remove block-included operations durably before dropping their pool entries.
+    pub fn accepted(self: *Store, pool: *pool_api.Pool, body: fulu.BeaconBlockBody) !void {
+        var keys: std.ArrayList([prefix.len + 33]u8) = .empty;
+        defer keys.deinit(self.allocator);
+        inline for (.{ "proposer_slashings", "attester_slashings", "attestations", "voluntary_exits", "bls_to_execution_changes" }) |field| {
+            for (@field(body, field).data) |value| {
+                const value_kind: Kind = if (comptime std.mem.eql(u8, field, "proposer_slashings")) .proposer_slashing else if (comptime std.mem.eql(u8, field, "attester_slashings")) .attester_slashing else if (comptime std.mem.eql(u8, field, "attestations")) .attestation else if (comptime std.mem.eql(u8, field, "voluntary_exits")) .voluntary_exit else .bls_change;
+                const root = try merkle.HashTreeRoot(self.allocator, value);
+                try keys.append(self.allocator, recordKey(value_kind, &root));
+            }
+        }
+        try self.delete(keys.items);
+        try pool.accepted(body);
+    }
+
+    /// Persist a detached-branch operation before validating and publishing it again.
+    pub fn readmit(self: *Store, pool: *pool_api.Pool, state: *const fulu.BeaconState, value: Value) !void {
+        if (value == .attestation) {
+            pool.addAttestationDurable(state, value.attestation, self, commitAttestation) catch |err| {
+                if (err == error.OutOfMemory or err == error.DurableWriteFailed) return err;
+            };
+            return;
+        }
+        self.put(value) catch |err| {
+            if (err == error.PoolFull) return;
+            return err;
+        };
+        const admitted = switch (value) {
+            .attestation => |item| pool.addAttestation(state, item),
+            .proposer_slashing => |item| pool.addProposerSlashing(state, item),
+            .attester_slashing => |item| pool.addAttesterSlashing(state, item),
+            .voluntary_exit => |item| pool.addVoluntaryExit(state, item),
+            .bls_change => |item| pool.addBlsChange(state, item),
+        };
+        admitted catch |err| {
+            if (err == error.DuplicateOperation) return;
+            const bytes = try encode(self.allocator, value);
+            defer self.allocator.free(bytes);
+            try self.delete(&.{recordKey(kind(value), bytes[2..34])});
+            if (err == error.OutOfMemory) return err;
+        };
+    }
+
+    /// Commit an operation before pool publication, rolling back rejected admissions.
+    pub fn admit(self: *Store, pool: *pool_api.Pool, state: *const fulu.BeaconState, value: Value) !void {
+        if (value == .attestation) {
+            pool.addAttestationDurable(state, value.attestation, self, commitAttestation) catch |err| {
+                if (err == error.DuplicateOperation) return;
+                return err;
+            };
+            return;
+        }
+        self.put(value) catch |err| {
+            if (err == error.PoolFull) return err;
+            return error.DurableWriteFailed;
+        };
+        const admitted = switch (value) {
+            .attestation => |item| pool.addAttestation(state, item),
+            .proposer_slashing => |item| pool.addProposerSlashing(state, item),
+            .attester_slashing => |item| pool.addAttesterSlashing(state, item),
+            .voluntary_exit => |item| pool.addVoluntaryExit(state, item),
+            .bls_change => |item| pool.addBlsChange(state, item),
+        };
+        admitted catch |err| {
+            if (err == error.DuplicateOperation) return;
+            const bytes = try encode(self.allocator, value);
+            defer self.allocator.free(bytes);
+            self.delete(&.{recordKey(kind(value), bytes[2..34])}) catch return error.DurableWriteFailed;
+            return err;
+        };
+    }
+
+    /// Write a new attestation or atomically replace its merged predecessor.
+    fn commitAttestation(context: *Store, old_root: ?fulu.Root, value: fulu.Attestation) !void {
+        if (old_root) |root| {
+            context.mergeAttestations(root, value) catch |err| {
+                if (err == error.PoolFull) return err;
+                return error.DurableWriteFailed;
+            };
+            return;
+        }
+        context.put(.{ .attestation = value }) catch |err| {
+            if (err == error.PoolFull) return err;
+            return error.DurableWriteFailed;
+        };
+    }
+
     /// Load all records through bounded pages, rejecting corruption without returning partial data.
     pub fn recover(self: *Store, allocator: std.mem.Allocator) ![]Record {
         const lower = prefix ++ [_]u8{0};
@@ -174,6 +262,13 @@ pub const Store = struct {
         var invalid: std.ArrayList([prefix.len + 33]u8) = .empty;
         defer invalid.deinit(allocator);
         for (records) |record| {
+            if (record.value == .attestation) {
+                const slot = record.value.attestation.data.slot;
+                if (slot > state.slot or state.slot - slot > helpers.SLOTS_PER_EPOCH) {
+                    try invalid.append(allocator, record.key);
+                    continue;
+                }
+            }
             const admitted = switch (record.value) {
                 .attestation => |value| pool.addAttestation(state, value),
                 .proposer_slashing => |value| pool.addProposerSlashing(state, value),
@@ -440,6 +535,8 @@ test "operation record codec rejects wrong key and malformed lengths" {
     defer allocator.free(malformed);
     malformed[34] +%= 1;
     try std.testing.expectError(error.InvalidRecord, decode(allocator, &key, malformed));
+    malformed[0] = 2;
+    try std.testing.expectError(error.InvalidRecord, decode(allocator, &key, malformed));
 }
 
 test "operation store syncs, recovers, and deletes typed records" {
@@ -467,13 +564,117 @@ test "operation store syncs, recovers, and deletes typed records" {
     store.deinit();
 }
 
+test "corrupt durable records abort recovery without exposing a partial pool" {
+    const allocator = std.testing.allocator;
+    const fixtures = @import("fixture_runner.zig");
+    var state = try fixtures.decodeState(allocator, fixtures.fork_choice_anchor_state);
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try Store.open(allocator, std.testing.io, tmp.dir, "operations");
+    defer store.deinit();
+    try store.put(.{ .voluntary_exit = .{ .message = .{ .epoch = 2, .validator_index = 3 }, .signature = [_]u8{0} ** 96 } });
+    var corrupt_key = [_]u8{0} ** (prefix.len + 33);
+    @memcpy(corrupt_key[0..prefix.len], prefix);
+    corrupt_key[prefix.len] = @intFromEnum(Kind.voluntary_exit);
+    try store.database.put(&corrupt_key, &.{1});
+    try std.testing.expectError(error.InvalidRecord, store.recoverPool(allocator, &state));
+}
+
+test "accepted block operations are deleted from durable storage" {
+    const allocator = std.testing.allocator;
+    const fixtures = @import("fixture_runner.zig");
+    var state = try fixtures.decodeState(allocator, @embedFile("fixtures/fulu_block_operations/voluntary_exit_valid/pre.ssz_snappy"));
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
+    const input = try fixtures.decode(allocator, @embedFile("fixtures/fulu_block_operations/voluntary_exit_valid/voluntary_exit.ssz_snappy"));
+    defer allocator.free(input);
+    var reader: std.Io.Reader = .fixed(input);
+    const exit = try ssz.deserialize(allocator, fulu.SignedVoluntaryExit, &reader);
+    defer ssz.freeDecoded(allocator, fulu.SignedVoluntaryExit, exit);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try Store.open(allocator, std.testing.io, tmp.dir, "operations");
+    defer store.deinit();
+    var pool = pool_api.Pool.init(allocator);
+    defer pool.deinit();
+    try store.admit(&pool, &state, .{ .voluntary_exit = exit });
+    try std.testing.expectEqual(@as(usize, 1), pool.voluntary_exits.items.len);
+    var body = std.mem.zeroes(fulu.BeaconBlockBody);
+    body.voluntary_exits.data = &.{exit};
+    store.poisoned = true;
+    try std.testing.expectError(error.DatabaseNeedsReopen, store.accepted(&pool, body));
+    try std.testing.expectEqual(@as(usize, 1), pool.voluntary_exits.items.len);
+    store.poisoned = false;
+    try store.accepted(&pool, body);
+    try std.testing.expectEqual(@as(usize, 0), pool.voluntary_exits.items.len);
+    const records = try store.recover(allocator);
+    defer Store.freeRecords(allocator, records);
+    try std.testing.expectEqual(@as(usize, 0), records.len);
+}
+
+test "uncertain durable admission does not publish into the operation pool" {
+    const allocator = std.testing.allocator;
+    const fixtures = @import("fixture_runner.zig");
+    var state = try fixtures.decodeState(allocator, fixtures.fork_choice_anchor_state);
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try Store.open(allocator, std.testing.io, tmp.dir, "operations");
+    defer store.deinit();
+    store.poisoned = true;
+    var pool = pool_api.Pool.init(allocator);
+    defer pool.deinit();
+    try std.testing.expectError(error.DurableWriteFailed, store.admit(&pool, &state, .{ .voluntary_exit = .{ .message = .{ .epoch = 0, .validator_index = 0 }, .signature = [_]u8{0} ** 96 } }));
+    try std.testing.expectEqual(@as(usize, 0), pool.voluntary_exits.items.len);
+}
+
+test "reorg readmission drops operations invalid on the new state" {
+    const allocator = std.testing.allocator;
+    const fixtures = @import("fixture_runner.zig");
+    var state = try fixtures.decodeState(allocator, fixtures.fork_choice_anchor_state);
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try Store.open(allocator, std.testing.io, tmp.dir, "operations");
+    defer store.deinit();
+    var pool = pool_api.Pool.init(allocator);
+    defer pool.deinit();
+    try store.readmit(&pool, &state, .{ .voluntary_exit = .{ .message = .{ .epoch = 0, .validator_index = 0 }, .signature = [_]u8{0} ** 96 } });
+    const records = try store.recover(allocator);
+    defer Store.freeRecords(allocator, records);
+    try std.testing.expectEqual(@as(usize, 0), records.len);
+    try std.testing.expectEqual(@as(usize, 0), pool.voluntary_exits.items.len);
+}
+
+test "reorg readmission persists a valid operation through normal admission" {
+    const allocator = std.testing.allocator;
+    const fixtures = @import("fixture_runner.zig");
+    var state = try fixtures.decodeState(allocator, @embedFile("fixtures/fulu_block_operations/voluntary_exit_valid/pre.ssz_snappy"));
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
+    const input = try fixtures.decode(allocator, @embedFile("fixtures/fulu_block_operations/voluntary_exit_valid/voluntary_exit.ssz_snappy"));
+    defer allocator.free(input);
+    var reader: std.Io.Reader = .fixed(input);
+    const value = try ssz.deserialize(allocator, fulu.SignedVoluntaryExit, &reader);
+    defer ssz.freeDecoded(allocator, fulu.SignedVoluntaryExit, value);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try Store.open(allocator, std.testing.io, tmp.dir, "operations");
+    defer store.deinit();
+    var pool = pool_api.Pool.init(allocator);
+    defer pool.deinit();
+    try store.readmit(&pool, &state, .{ .voluntary_exit = value });
+    try std.testing.expectEqual(@as(usize, 1), pool.voluntary_exits.items.len);
+    const records = try store.recover(allocator);
+    defer Store.freeRecords(allocator, records);
+    try std.testing.expectEqual(@as(usize, 1), records.len);
+}
+
 test "recovery persists merged attestation under its final root" {
     const allocator = std.testing.allocator;
     const fixtures = @import("fixture_runner.zig");
     const blst = @import("blst");
     const bls = @import("bls.zig");
     const domains = @import("domains.zig");
-    const helpers = @import("helpers.zig");
     const operations = @import("block_operations.zig");
     var state = try fixtures.decodeState(allocator, @embedFile("fixtures/fulu_block_operations/attestation_valid/pre.ssz_snappy"));
     defer ssz.freeDecoded(allocator, fulu.BeaconState, state);
@@ -504,6 +705,29 @@ test "recovery persists merged attestation under its final root" {
     defer for (votes) |vote| allocator.free(vote.aggregation_bits.data);
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    var live_store = try Store.open(allocator, std.testing.io, tmp.dir, "live-operations");
+    defer live_store.deinit();
+    var live_pool = pool_api.Pool.init(allocator);
+    defer live_pool.deinit();
+    try live_store.admit(&live_pool, &state, .{ .attestation = votes[0] });
+    try live_store.admit(&live_pool, &state, .{ .attestation = votes[1] });
+    try std.testing.expectEqual(@as(usize, 1), live_pool.attestations.items.len);
+    var live_records = try live_store.recover(allocator);
+    defer Store.freeRecords(allocator, live_records);
+    try std.testing.expectEqual(@as(usize, 1), live_records.len);
+    try std.testing.expectEqual(live_pool.attestations.items[0].root, live_records[0].key[prefix.len + 1 ..][0..32].*);
+    var stale_store = try Store.open(allocator, std.testing.io, tmp.dir, "stale-operations");
+    defer stale_store.deinit();
+    try stale_store.put(.{ .attestation = votes[0] });
+    var stale_state = try pool_api.copyValue(allocator, fulu.BeaconState, state);
+    defer ssz.freeDecoded(allocator, fulu.BeaconState, stale_state);
+    stale_state.slot = votes[0].data.slot + helpers.SLOTS_PER_EPOCH + 1;
+    var stale_pool = try stale_store.recoverPool(allocator, &stale_state);
+    defer stale_pool.deinit();
+    try std.testing.expectEqual(@as(usize, 0), stale_pool.attestations.items.len);
+    const stale_records = try stale_store.recover(allocator);
+    defer Store.freeRecords(allocator, stale_records);
+    try std.testing.expectEqual(@as(usize, 0), stale_records.len);
     var store = try Store.open(allocator, std.testing.io, tmp.dir, "operations");
     try store.put(.{ .attestation = votes[0] });
     try store.put(.{ .attestation = votes[1] });

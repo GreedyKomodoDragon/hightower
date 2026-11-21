@@ -148,15 +148,28 @@ fn runRuntime(init: std.process.Init) !void {
     try hightower.consensus.PeerSync.confirmExecutionHead(&store, engine.interface());
     // Recovery needs a durable anchor before the first peer can mutate fork choice.
     try hightower.consensus.saveForkChoiceStore(allocator, init.io, dir, "fork-choice.bin", &store);
+    var operation_store = try hightower.consensus.OperationStore.open(allocator, init.io, dir, "operations");
+    defer operation_store.deinit();
+    const initial_head = try hightower.consensus.getForkChoiceHeadCached(&store);
+    var operation_pool = try recoverOperationPool(allocator, &operation_store, store.block_states.getPtr(initial_head).?, store.currentSlot());
+    defer operation_pool.deinit();
+    var retained_blocks = store.blocks.valueIterator();
+    while (retained_blocks.next()) |accepted| try operation_store.accepted(&operation_pool, accepted.body);
     const identity = try nodeId(allocator, key);
     var columns = try hightower.consensus.DataColumns.Store.open(allocator, init.io, dir, "columns", state.genesis_validators_root, identity, 128);
     defer columns.deinit();
     const head = try hightower.consensus.getForkChoiceHeadCached(&store);
-    var coordinator = hightower.consensus.PeerSync.Coordinator{ .allocator = allocator, .io = init.io, .dir = dir, .store = &store, .columns = &columns, .settings = &kzg, .engine = engine.interface(), .head = head, .next_slot = try std.math.add(u64, store.blocks.get(head).?.slot, 1) };
+    var coordinator = hightower.consensus.PeerSync.Coordinator{ .allocator = allocator, .io = init.io, .dir = dir, .store = &store, .columns = &columns, .settings = &kzg, .engine = engine.interface(), .head = head, .next_slot = try std.math.add(u64, store.blocks.get(head).?.slot, 1), .operation_store = &operation_store, .operation_pool = &operation_pool, .operation_slot = store.currentSlot(), .operation_pool_ready = true };
     var mutex: std.Io.Mutex = .init;
+    coordinator.proposal_mutex = &mutex;
     var announcements = Announcements{ .coordinator = &coordinator, .mutex = &mutex, .slot = store.blocks.get(head).?.slot };
     var gossip = try hightower.consensus.P2PGossip.Service.init(allocator, ingress, digest, &.{}, 16, 3, .{ .context = &announcements, .validate = Announcements.block }, .{ .context = &announcements, .validate = Announcements.attestation }, .{ .context = &announcements, .validate = Announcements.aggregate }, null);
     defer gossip.deinit();
+    gossip.setOperationValidation(.{
+        .proposer_slashing = .{ .context = &announcements, .validate = Announcements.proposerSlashing },
+        .attester_slashing = .{ .context = &announcements, .validate = Announcements.attesterSlashing },
+        .voluntary_exit = .{ .context = &announcements, .validate = Announcements.voluntaryExit },
+    });
     var fork_id = [_]u8{0} ** 16;
     @memcpy(fork_id[0..4], &digest);
     const local = hightower.consensus.ENR.Local{ .sequence = try nextEnrSequence(allocator, init.io, dir), .ip = config.address.ip4.bytes, .udp_port = 0, .tcp_port = 0, .fork_id = fork_id, .next_fork_digest = .{0} ** 4, .custody_group_count = 128 };
@@ -236,6 +249,17 @@ fn tickRuntime(io: std.Io, store: *hightower.consensus.ForkChoiceStore, coordina
     if (now <= store.time) return;
     try hightower.consensus.onForkChoiceTick(store, now);
     const selected = try hightower.consensus.getForkChoiceHeadCached(store);
+    const current_slot = store.currentSlot();
+    if (coordinator.operation_pool) |pool| if (coordinator.operation_store) |operations| {
+        if (coordinator.operation_slot == null or coordinator.operation_slot.? < current_slot or !std.mem.eql(u8, &selected, &coordinator.head)) {
+            const state = store.block_states.getPtr(selected) orelse return error.UnknownHead;
+            const recovered_pool = try recoverOperationPool(coordinator.allocator, operations, state, current_slot);
+            pool.deinit();
+            pool.* = recovered_pool;
+            coordinator.operation_slot = current_slot;
+            coordinator.operation_pool_ready = true;
+        }
+    };
     if (std.mem.eql(u8, &selected, &coordinator.head)) {
         try hightower.consensus.saveForkChoiceStoreAt(coordinator.allocator, io, coordinator.dir, "fork-choice.bin", store, selected);
         return;
@@ -244,6 +268,27 @@ fn tickRuntime(io: std.Io, store: *hightower.consensus.ForkChoiceStore, coordina
     try hightower.consensus.saveForkChoiceStoreAt(coordinator.allocator, io, coordinator.dir, "fork-choice.bin", store, selected);
     coordinator.head = selected;
     coordinator.next_slot = try std.math.add(u64, store.blocks.get(selected).?.slot, 1);
+}
+
+/// Revalidate durable operations against the current head state advanced to the store slot.
+fn recoverOperationPool(allocator: std.mem.Allocator, operations: *hightower.consensus.OperationStore, head_state: *const hightower.fulu.BeaconState, slot: u64) !hightower.consensus.OperationPool {
+    const records = try operations.recover(allocator);
+    defer hightower.consensus.OperationStore.freeRecords(allocator, records);
+    if (records.len == 0) return hightower.consensus.OperationPool.init(allocator);
+    var state = try advancedBeaconState(allocator, head_state, slot);
+    defer ssz.freeDecoded(allocator, hightower.fulu.BeaconState, state);
+    return operations.recoverPool(allocator, &state);
+}
+
+/// Clone a retained head state and apply every slot transition through the target slot.
+fn advancedBeaconState(allocator: std.mem.Allocator, head_state: *const hightower.fulu.BeaconState, slot: u64) !hightower.fulu.BeaconState {
+    const bytes = try ssz.serializeAlloc(allocator, head_state.*);
+    defer allocator.free(bytes);
+    var reader: std.Io.Reader = .fixed(bytes);
+    var state = try ssz.deserialize(allocator, hightower.fulu.BeaconState, &reader);
+    errdefer ssz.freeDecoded(allocator, hightower.fulu.BeaconState, state);
+    try hightower.consensus.processSlots(allocator, &state, slot, hightower.consensus.processEpoch);
+    return state;
 }
 
 /// Keep the original read-only fixture mode for existing minimal configs.
@@ -301,10 +346,36 @@ const Announcements = struct {
         hightower.consensus.saveForkChoiceStoreAt(self.coordinator.allocator, self.coordinator.io, self.coordinator.dir, "fork-choice.bin", self.coordinator.store, selected) catch return error.ImportCommitFailed;
         self.coordinator.head = selected;
         self.coordinator.next_slot = try std.math.add(u64, self.coordinator.store.blocks.get(selected).?.slot, 1);
+        self.coordinator.admitOperationLocked(.{ .attestation = value.* }) catch |err| {
+            if (err == error.DurableWriteFailed or err == error.OperationPoolUnavailable) return error.ImportCommitFailed;
+            return err;
+        };
     }
     /// Apply an aggregate's attestation through the same gate.
     fn aggregate(context: *anyopaque, value: *const hightower.fulu.SignedAggregateAndProof) !void {
         return attestation(context, &value.message.aggregate);
+    }
+    /// Admit a checked proposer slashing through the durable runtime pool.
+    fn proposerSlashing(context: *anyopaque, value: *const hightower.fulu.ProposerSlashing) !void {
+        const self: *Announcements = @ptrCast(@alignCast(context));
+        return admitOperation(self, .{ .proposer_slashing = value.* });
+    }
+    /// Admit a checked attester slashing through the durable runtime pool.
+    fn attesterSlashing(context: *anyopaque, value: *const hightower.fulu.AttesterSlashing) !void {
+        const self: *Announcements = @ptrCast(@alignCast(context));
+        return admitOperation(self, .{ .attester_slashing = value.* });
+    }
+    /// Admit a checked voluntary exit through the durable runtime pool.
+    fn voluntaryExit(context: *anyopaque, value: *const hightower.fulu.SignedVoluntaryExit) !void {
+        const self: *Announcements = @ptrCast(@alignCast(context));
+        return admitOperation(self, .{ .voluntary_exit = value.* });
+    }
+    /// Map uncertain storage failures to the runtime's proposal-blocking error.
+    fn admitOperation(self: *Announcements, value: hightower.consensus.ConsensusOperation) !void {
+        self.coordinator.admitOperation(value) catch |err| {
+            if (err == error.DurableWriteFailed or err == error.OperationPoolUnavailable) return error.ImportCommitFailed;
+            return err;
+        };
     }
 };
 
