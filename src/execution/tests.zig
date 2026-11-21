@@ -1888,8 +1888,12 @@ test "signed local token deployment, transfer, and revert commit through block a
     }, &chain.records.items[0].world.?);
     const alternative_hash = chain.records.items[2].hash;
     const alternative_path = try chain.path(a, alternative_hash);
-    chain.canonical.deinit(a);
-    chain.canonical = alternative_path;
+    var previous_path = try chain.replaceCanonical(alternative_path);
+    previous_path.deinit(a);
+    try testing.expect(chain.byHash(alternative_hash) != null);
+    try testing.expect(chain.canonicalByHash(alternative_hash) != null);
+    try testing.expect(chain.canonicalByHash(chain.records.items[1].hash) == null);
+    try testing.expectEqualSlices(u8, &alternative_hash, &chain.byNumber(alternative.number).?.hash);
     const alternative_world = try chain.latest().world.?.clone(a);
     world.deinit();
     world = alternative_world;

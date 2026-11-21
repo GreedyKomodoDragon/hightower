@@ -31,6 +31,8 @@ pub const Record = struct {
     }
 };
 
+const TransactionLocation = struct { record: usize, index: usize };
+
 /// Owns validated blocks and a canonical path through them in memory.
 pub const Chain = struct {
     allocator: std.mem.Allocator,
@@ -38,6 +40,10 @@ pub const Chain = struct {
     fork: transition.Fork,
     records: std.ArrayList(Record) = .empty,
     canonical: std.ArrayList(usize) = .empty,
+    record_by_hash: std.AutoHashMap(execution.Hash, usize),
+    canonical_by_hash: std.AutoHashMap(execution.Hash, usize),
+    canonical_by_number: std.AutoHashMap(u64, usize),
+    canonical_transactions: std.AutoHashMap(execution.Hash, TransactionLocation),
     safe_hash: execution.Hash = [_]u8{0} ** 32,
     finalized_hash: execution.Hash = [_]u8{0} ** 32,
     history_floor: u64 = 0,
@@ -49,10 +55,11 @@ pub const Chain = struct {
 
     /// Takes a snapshot of genesis state and its already validated header.
     pub fn init(allocator: std.mem.Allocator, chain_id: u256, fork: transition.Fork, genesis: execution.Header, world: *const execution.state.State) !Chain {
-        var chain: Chain = .{ .allocator = allocator, .chain_id = chain_id, .fork = fork };
+        var chain: Chain = .{ .allocator = allocator, .chain_id = chain_id, .fork = fork, .record_by_hash = .init(allocator), .canonical_by_hash = .init(allocator), .canonical_by_number = .init(allocator), .canonical_transactions = .init(allocator) };
         errdefer chain.deinit();
         try chain.records.append(allocator, try chain.copyRecord(genesis, &.{}, &.{}, null, world));
         try chain.canonical.append(allocator, 0);
+        try chain.rebuildIndexes();
         return chain;
     }
 
@@ -61,6 +68,10 @@ pub const Chain = struct {
         for (self.records.items) |*record| record.deinit(self.allocator);
         self.records.deinit(self.allocator);
         self.canonical.deinit(self.allocator);
+        self.record_by_hash.deinit();
+        self.canonical_by_hash.deinit();
+        self.canonical_by_number.deinit();
+        self.canonical_transactions.deinit();
         self.* = undefined;
     }
 
@@ -84,14 +95,32 @@ pub const Chain = struct {
         result_owned = false;
         var record_owned = true;
         errdefer if (record_owned) record.deinit(self.allocator);
+        try self.reserveIndexes(record);
+        try self.records.ensureUnusedCapacity(self.allocator, 1);
+        try self.canonical.ensureUnusedCapacity(self.allocator, 1);
         try self.records.append(self.allocator, record);
         record_owned = false;
+        const index = self.records.items.len - 1;
+        self.record_by_hash.putAssumeCapacity(self.records.items[index].hash, index);
+        try self.canonical.append(self.allocator, index);
         errdefer {
+            const added = &self.records.items[index];
+            if (self.record_by_hash.get(added.hash) == index) _ = self.record_by_hash.remove(added.hash);
+            if (self.canonical_by_hash.get(added.hash) == index) _ = self.canonical_by_hash.remove(added.hash);
+            if (self.canonical_by_number.get(added.header.number) == index) _ = self.canonical_by_number.remove(added.header.number);
+            for (added.transactions, 0..) |raw, tx_index| {
+                // SAFETY: Keccak writes all 32 output bytes before the hash is read.
+                var hash: execution.Hash = undefined;
+                std.crypto.hash.sha3.Keccak256.hash(raw, &hash, .{});
+                if (self.canonical_transactions.get(hash)) |location| {
+                    if (location.record == index and location.index == tx_index) _ = self.canonical_transactions.remove(hash);
+                }
+            }
+            _ = self.canonical.pop();
             var removed = self.records.pop().?;
             removed.deinit(self.allocator);
         }
-        try self.canonical.append(self.allocator, self.records.items.len - 1);
-        errdefer _ = self.canonical.pop();
+        try self.indexCanonicalRecord(index);
         try world.commit(snap);
         open = false;
     }
@@ -104,26 +133,20 @@ pub const Chain = struct {
     /// Resolves a canonical number or block tag.
     pub fn byNumber(self: *const Chain, number: u64) ?*const Record {
         if (number < self.history_floor and number != self.records.items[0].header.number) return null;
-        for (self.canonical.items) |index| {
-            const record = &self.records.items[index];
-            if (record.header.number == number) return record;
-        }
-        return null;
+        const index = self.canonical_by_number.get(number) orelse return null;
+        return &self.records.items[index];
     }
 
     /// Resolves a validated block hash for Engine ancestry and branch execution.
     pub fn byHash(self: *const Chain, hash: execution.Hash) ?*const Record {
-        for (self.records.items) |*record| if (std.mem.eql(u8, &record.hash, &hash)) return record;
-        return null;
+        const index = self.record_by_hash.get(hash) orelse return null;
+        return &self.records.items[index];
     }
 
     /// Resolves a block hash only when it belongs to the selected canonical path.
     pub fn canonicalByHash(self: *const Chain, hash: execution.Hash) ?*const Record {
-        for (self.canonical.items) |index| {
-            const record = &self.records.items[index];
-            if (std.mem.eql(u8, &record.hash, &hash)) return record;
-        }
-        return null;
+        const index = self.canonical_by_hash.get(hash) orelse return null;
+        return &self.records.items[index];
     }
 
     /// Returns an owned post-state from RAM or durable checkpoint and delta data.
@@ -141,12 +164,7 @@ pub const Chain = struct {
         errdefer reverse.deinit(allocator);
         var current = head;
         while (true) {
-            var found: ?usize = null;
-            for (self.records.items, 0..) |record, index| if (std.mem.eql(u8, &record.hash, &current)) {
-                found = index;
-                break;
-            };
-            const index = found orelse return error.UnknownBlock;
+            const index = self.record_by_hash.get(current) orelse return error.UnknownBlock;
             try reverse.append(allocator, index);
             if (index == 0 or self.records.items[index].header.number == self.history_floor) break;
             current = self.records.items[index].header.parent_hash;
@@ -164,8 +182,11 @@ pub const Chain = struct {
     pub fn retain(self: *Chain, header: execution.Header, transactions: []const []const u8, withdrawals: []const execution.Withdrawal, result: transition.BlockResult, world: *const execution.state.State) !void {
         var record = try self.copyRecord(header, transactions, withdrawals, null, world);
         errdefer record.deinit(self.allocator);
+        try self.reserveIndexes(record);
         try self.records.append(self.allocator, record);
+        const index = self.records.items.len - 1;
         self.records.items[self.records.items.len - 1].result = result;
+        self.record_by_hash.putAssumeCapacity(self.records.items[index].hash, index);
     }
 
     /// Frees excluded records and remaps the canonical indexes.
@@ -184,19 +205,27 @@ pub const Chain = struct {
             count += 1;
         };
         try retained.ensureTotalCapacity(self.allocator, count);
-        for (self.records.items, 0..) |*record, index| {
-            if (!keep[index]) {
-                record.deinit(self.allocator);
-                continue;
-            }
+        for (self.records.items, 0..) |*record, index| if (keep[index]) {
             positions[index] = retained.items.len;
             retained.appendAssumeCapacity(record.*);
-        }
+        };
         for (self.canonical.items) |index| if (keep[index]) canonical.appendAssumeCapacity(positions[index]);
-        self.records.deinit(self.allocator);
-        self.canonical.deinit(self.allocator);
+        var old_records = self.records;
+        var old_canonical = self.canonical;
         self.records = retained;
         self.canonical = canonical;
+        self.rebuildIndexes() catch |err| {
+            self.records = old_records;
+            self.canonical = old_canonical;
+            retained.deinit(self.allocator);
+            canonical.deinit(self.allocator);
+            retained = .empty;
+            canonical = .empty;
+            return err;
+        };
+        for (old_records.items, 0..) |*record, index| if (!keep[index]) record.deinit(self.allocator);
+        old_records.deinit(self.allocator);
+        old_canonical.deinit(self.allocator);
     }
 
     /// Copies up to 255 canonical ancestors before the current head, newest first.
@@ -219,14 +248,75 @@ pub const Chain = struct {
 
     /// Locates a transaction and its zero-based index in canonical history.
     pub fn transaction(self: *const Chain, hash: execution.Hash) ?struct { record: *const Record, index: usize } {
-        for (self.canonical.items) |record_index| for (self.records.items[record_index].transactions, 0..) |raw, index| {
-            if (self.records.items[record_index].header.number < self.history_floor) continue;
-            // SAFETY: This value is fully initialized before any read.
-            var candidate: execution.Hash = undefined;
-            std.crypto.hash.sha3.Keccak256.hash(raw, &candidate, .{});
-            if (std.mem.eql(u8, &candidate, &hash)) return .{ .record = &self.records.items[record_index], .index = index };
+        const found = self.canonical_transactions.get(hash) orelse return null;
+        if (self.records.items[found.record].header.number < self.history_floor) return null;
+        return .{ .record = &self.records.items[found.record], .index = found.index };
+    }
+
+    /// Reserves capacity before a record is published into the chain.
+    fn reserveIndexes(self: *Chain, record: Record) !void {
+        try self.record_by_hash.ensureUnusedCapacity(1);
+        try self.canonical_by_hash.ensureUnusedCapacity(1);
+        try self.canonical_by_number.ensureUnusedCapacity(1);
+        try self.canonical_transactions.ensureUnusedCapacity(@intCast(record.transactions.len));
+    }
+
+    /// Adds one canonical record and its transactions to derived indexes.
+    fn indexCanonicalRecord(self: *Chain, index: usize) !void {
+        const record = &self.records.items[index];
+        try self.canonical_by_hash.put(record.hash, index);
+        try self.canonical_by_number.put(record.header.number, index);
+        if (record.header.number < self.history_floor) return;
+        for (record.transactions, 0..) |raw, tx_index| {
+            // SAFETY: Keccak writes all 32 output bytes before the hash is read.
+            var hash: execution.Hash = undefined;
+            std.crypto.hash.sha3.Keccak256.hash(raw, &hash, .{});
+            if (!self.canonical_transactions.contains(hash)) try self.canonical_transactions.put(hash, .{ .record = index, .index = tx_index });
+        }
+    }
+
+    /// Rebuilds derived lookup maps from retained records and the selected path.
+    pub fn rebuildIndexes(self: *Chain) !void {
+        var records: std.AutoHashMap(execution.Hash, usize) = .init(self.allocator);
+        errdefer records.deinit();
+        var hashes: std.AutoHashMap(execution.Hash, usize) = .init(self.allocator);
+        errdefer hashes.deinit();
+        var numbers: std.AutoHashMap(u64, usize) = .init(self.allocator);
+        errdefer numbers.deinit();
+        var transactions: std.AutoHashMap(execution.Hash, TransactionLocation) = .init(self.allocator);
+        errdefer transactions.deinit();
+        for (self.records.items, 0..) |record, index| try records.put(record.hash, index);
+        for (self.canonical.items) |index| {
+            const record = &self.records.items[index];
+            try hashes.put(record.hash, index);
+            try numbers.put(record.header.number, index);
+            if (record.header.number < self.history_floor) continue;
+            for (record.transactions, 0..) |raw, tx_index| {
+                // SAFETY: Keccak writes all 32 output bytes before the hash is read.
+                var hash: execution.Hash = undefined;
+                std.crypto.hash.sha3.Keccak256.hash(raw, &hash, .{});
+                if (!transactions.contains(hash)) try transactions.put(hash, .{ .record = index, .index = tx_index });
+            }
+        }
+        self.record_by_hash.deinit();
+        self.canonical_by_hash.deinit();
+        self.canonical_by_number.deinit();
+        self.canonical_transactions.deinit();
+        self.record_by_hash = records;
+        self.canonical_by_hash = hashes;
+        self.canonical_by_number = numbers;
+        self.canonical_transactions = transactions;
+    }
+
+    /// Selects a validated path and rebuilds indexes before releasing the old path.
+    pub fn replaceCanonical(self: *Chain, new_path: std.ArrayList(usize)) !std.ArrayList(usize) {
+        const old = self.canonical;
+        self.canonical = new_path;
+        self.rebuildIndexes() catch |err| {
+            self.canonical = old;
+            return err;
         };
-        return null;
+        return old;
     }
 
     /// Copies a block header, canonical transaction bytes, and post-state.

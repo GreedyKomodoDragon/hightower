@@ -245,8 +245,8 @@ pub const Store = struct {
         var path = try chain.path(self.allocator, head);
         errdefer path.deinit(self.allocator);
         if (!isAncestor(chain, head, safe) or !isAncestor(chain, safe, finalized)) return error.CorruptExecutionChoice;
-        chain.canonical.deinit(self.allocator);
-        chain.canonical = path;
+        var previous_path = try chain.replaceCanonical(path);
+        previous_path.deinit(self.allocator);
         path = .empty;
         chain.safe_hash = safe;
         chain.finalized_hash = finalized;
@@ -580,6 +580,9 @@ test "durable execution recovers selected head and a selectable side branch" {
     try std.testing.expectEqualSlices(u8, &hash_a, &recovered.latest().hash);
     try std.testing.expectEqualSlices(u8, &header_a.state_root, &(try world.stateRoot()));
     try std.testing.expect(recovered.byHash(hash_b) != null);
+    try std.testing.expect(recovered.canonicalByHash(hash_a) != null);
+    try std.testing.expect(recovered.canonicalByHash(hash_b) == null);
+    try std.testing.expectEqualSlices(u8, &hash_a, &recovered.byNumber(1).?.hash);
     try reopened.commit(hash_b, genesis_hash, genesis_hash);
     recovered.deinit();
     reopened.close();
@@ -667,8 +670,8 @@ test "periodic execution checkpoint reconstructs state without older deltas" {
     const old_delta = try blobKey(a, "delta", first_hash, 0);
     defer a.free(old_delta);
     const path = try chain.path(a, parent_hash);
-    chain.canonical.deinit(a);
-    chain.canonical = path;
+    var previous_path = try chain.replaceCanonical(path);
+    previous_path.deinit(a);
     chain.finalized_hash = chain.records.items[0].hash;
     try store.prune(&chain);
     const unfinalized_delta = try store.db.get(a, old_delta);
