@@ -117,12 +117,13 @@ const Candidate = struct {
     requests: []const []const u8,
     header: execution.Header,
     world: execution.state.State,
+    world_owned: bool = true,
     result: ?execution.transition.BlockResult,
 
     /// Frees staged payload fields and their blob hashes.
     fn deinit(self: *Candidate) void {
         if (self.result) |*result| result.deinit();
-        self.world.deinit();
+        if (self.world_owned) self.world.deinit();
         self.arena.deinit();
     }
 };
@@ -397,7 +398,7 @@ pub const Server = struct {
         for (self.staged.items) |candidate| if (std.mem.eql(u8, &candidate.payload.block_hash, &payload.block_hash)) return status(a, "VALID", payload.block_hash);
         if (self.store) |store| {
             try store.stage(self.chain.fork, header, txs, withdrawals, result.receipts, parent_world, &trial);
-            try self.chain.retain(header, txs, withdrawals, result, &trial);
+            retained_trial = try self.chain.retainOwned(header, txs, withdrawals, result, &trial);
             retained_result = true;
             if (!self.retrying_pending) self.retryPending() catch |err| std.log.err("pending payload retry failed: {s}", .{@errorName(err)});
             return status(a, "VALID", payload.block_hash);
@@ -555,7 +556,7 @@ pub const Server = struct {
             for (p.transactions.data, txs) |raw, *out| out.* = raw.data;
             const withdrawals = try a.alloc(execution.Withdrawal, p.withdrawals.data.len);
             for (p.withdrawals.data, withdrawals) |w, *out| out.* = .{ .index = w.index, .validator_index = w.validator_index, .address = w.address, .amount = w.amount };
-            try self.chain.retain(candidate.header, txs, withdrawals, candidate.result.?, &candidate.world);
+            candidate.world_owned = !(try self.chain.retainOwned(candidate.header, txs, withdrawals, candidate.result.?, &candidate.world));
             candidate.result = null;
         }
         var path = try self.chain.path(self.allocator, head);

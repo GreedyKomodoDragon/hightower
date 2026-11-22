@@ -277,7 +277,8 @@ pub const Store = struct {
         const parent = chain.byHash(block.header.parent_hash);
         if (!anchored and (parent == null or number != parent.?.header.number + 1)) return error.CorruptExecutionAncestry;
         var restored = if (anchored) execution.state.State.init(self.allocator) else try chain.loadWorld(self.allocator, parent.?.hash);
-        defer restored.deinit();
+        var restored_owned = true;
+        defer if (restored_owned) restored.deinit();
         if (anchored) {
             if (marker.checkpoint.len == 0) return error.MissingExecutionCheckpoint;
             const checkpoint = try self.readBlob("checkpoint", hash, marker.checkpoint);
@@ -325,7 +326,7 @@ pub const Store = struct {
         };
         if (gas_used != block.header.gas_used) return error.CorruptExecutionReceipt;
         const result: execution.transition.BlockResult = .{ .arena = result_arena, .receipts = receipts, .state_root = block.header.state_root, .transactions_root = block.header.transactions_root, .receipts_root = block.header.receipts_root, .withdrawals_root = block.header.withdrawals_root, .logs_bloom = block.header.logs_bloom, .gas_used = gas_used };
-        try chain.retain(block.header, raw_txs, block.withdrawals, result, &restored);
+        restored_owned = !(try chain.retainOwned(block.header, raw_txs, block.withdrawals, result, &restored));
         result_owned = false;
     }
 

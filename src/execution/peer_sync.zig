@@ -28,7 +28,8 @@ pub fn importBlock(allocator: std.mem.Allocator, chain: *chain_mod.Chain, store:
     var parent_world = try chain.loadWorld(allocator, parent.hash);
     defer parent_world.deinit();
     var world = try parent_world.clone(allocator);
-    defer world.deinit();
+    var world_owned = true;
+    defer if (world_owned) world.deinit();
     const ancestors = try chain.ancestorHashes(allocator, parent.hash);
     defer allocator.free(ancestors);
     const transactions = try allocator.alloc([]const u8, block.transactions.len);
@@ -59,5 +60,5 @@ pub fn importBlock(allocator: std.mem.Allocator, chain: *chain_mod.Chain, store:
     }, parent.header, block.header, transactions, block.withdrawals);
     errdefer result.deinit();
     if (store) |db| try db.stage(chain.fork, block.header, transactions, block.withdrawals, result.receipts, &parent_world, &world);
-    try chain.retain(block.header, transactions, block.withdrawals, result, &world);
+    world_owned = !(try chain.retainOwned(block.header, transactions, block.withdrawals, result, &world));
 }

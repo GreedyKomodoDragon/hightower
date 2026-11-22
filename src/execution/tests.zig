@@ -10,6 +10,43 @@ test {
     _ = execution.durable;
 }
 
+test "owned execution retention moves the post-state and preserves its parent" {
+    const a = std.testing.allocator;
+    var parent = execution.state.State.init(a);
+    defer parent.deinit();
+    const address: execution.Address = .{0x31} ** 20;
+    try parent.setBalance(address, 1);
+    const parent_root = try parent.stateRoot();
+    var genesis = std.mem.zeroes(execution.Header);
+    genesis.gas_limit = 30_000_000;
+    genesis.state_root = parent_root;
+    var chain = try execution.chain.Chain.init(a, 1, .paris, genesis, &parent);
+    defer chain.deinit();
+
+    var post = try parent.clone(a);
+    try post.setBalance(address, 2);
+    var header = genesis;
+    header.parent_hash = chain.latest().hash;
+    header.number = 1;
+    header.state_root = try post.stateRoot();
+    var result_arena = std.heap.ArenaAllocator.init(a);
+    errdefer result_arena.deinit();
+    const result: execution.transition.BlockResult = .{
+        .arena = result_arena,
+        .receipts = try result_arena.allocator().alloc(execution.Receipt, 0),
+        .state_root = header.state_root,
+        .transactions_root = genesis.transactions_root,
+        .receipts_root = genesis.receipts_root,
+        .withdrawals_root = null,
+        .logs_bloom = genesis.logs_bloom,
+        .gas_used = 0,
+    };
+    try testing.expect(try chain.retainOwned(header, &.{}, &.{}, result, &post));
+    try testing.expectEqual(@as(u256, 1), parent.getBalance(address));
+    const retained = chain.byHash(try execution.transition.headerHash(a, .paris, header)).?;
+    try testing.expectEqual(@as(u256, 2), retained.world.?.getBalance(address));
+}
+
 test "trusted execution checkpoint verifies its header and complete fixture state" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
