@@ -2,7 +2,9 @@
 
 ## Pinned source and normal test runner
 
-Use the minimal Fulu tests from consensus-specs v1.6.1, pinned in [FULU-SPEC-LOCK.md](../FULU-SPEC-LOCK.md). The archive and extracted cases stay in ignored `testdata/`; ordinary Zig tests use only the selected, decompressed `.ssz` files checked in under `src/ssz/fixtures/fulu_static/`. Static inputs use Snappy block compression in `serialized.ssz_snappy` and a sibling `roots.yaml` oracle. Current Zig fixtures check decode, hash-tree-root, and byte-identical re-encoding. PySpec transition cases use compressed `pre.ssz_snappy`, `blocks_N.ssz_snappy`, and `post.ssz_snappy`, with `meta.yaml` or `slots.yaml` describing the scenario. No PySpec runner is wired into Zig yet.
+Use the minimal Fulu tests from consensus-specs v1.6.1, pinned in [FULU-SPEC-LOCK.md](../FULU-SPEC-LOCK.md). The archive and extracted cases stay in ignored `testdata/`; ordinary Zig tests use only the selected, decompressed `.ssz` files checked in under `src/ssz/fixtures/fulu_minimal/`. Static inputs use Snappy block compression in `serialized.ssz_snappy` and a sibling `roots.yaml` oracle. Current Zig fixtures check decode, hash-tree-root, and byte-identical re-encoding. PySpec transition cases use compressed `pre.ssz_snappy`, `blocks_N.ssz_snappy`, and `post.ssz_snappy`, with `meta.yaml` or `slots.yaml` describing the scenario. No PySpec runner is wired into Zig yet.
+
+The complete 295-case mainnet Fulu `ssz_static` tree from `ethereum/consensus-spec-tests` commit `bc5c1a7fb2a8871aaffd4b16ee4dd9c72bb81908` is mirrored under `src/ssz/fixtures/fulu_mainnet/ssz_static/`. `zig build -Dpreset=mainnet test` checks all five random cases for each of the 37 schemas currently declared in `fulu.zig` against mainnet roots and round trips.
 
 ## Selected static SSZ and hash-root cases
 

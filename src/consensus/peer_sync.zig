@@ -1,13 +1,13 @@
 // Peer sync imports ordered ranges and missing ancestors from authenticated peers. A block names its
 // parent by root, and fork choice stores the post-state only after transition
-// and data availability checks pass. The snapshot is replaced after each
-// accepted block, so recovery starts from the last durable head. Store time
-// follows the wall clock; only a block at the wall-clock slot has a known live
-// arrival, so historical range and checkpoint imports stay untimely.
+// and data availability checks pass. Each accepted import is checksummed and
+// synced to the fork-choice log before the coordinator publishes its head.
+// Store time follows the wall clock; only a block at the wall-clock slot has a
+// known live arrival, so historical range and checkpoint imports stay untimely.
 //
-//   known ancestor -> blocks by root -> verified columns -> transition -> Engine -> snapshot
+//   known ancestor -> verified columns -> transition -> Engine -> synced delta -> published head
 // Range requests are capped at 16 slots by the runtime. Each imported side
-// branch remains in the snapshot even when fork choice keeps the current head.
+// branch remains retained even when fork choice keeps the current head.
 const std = @import("std");
 const fulu = @import("fulu");
 const merkle = @import("merkle");

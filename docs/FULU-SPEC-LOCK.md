@@ -9,6 +9,8 @@
 | Test bundle | [`minimal.tar.gz` from the same v1.6.1 release](https://github.com/ethereum/consensus-specs/releases/download/v1.6.1/minimal.tar.gz) |
 | Bundle size | 467,646,726 bytes |
 | Published SHA-256 | `e1d0c9dc3d09fb74a98b324c40b2587a17dc555e6149d3f9741601fffcf43901` |
+| Supplementary mainnet SSZ fixtures | [`ethereum/consensus-spec-tests` commit `bc5c1a7fb2a8871aaffd4b16ee4dd9c72bb81908`](https://github.com/ethereum/consensus-spec-tests/tree/bc5c1a7fb2a8871aaffd4b16ee4dd9c72bb81908/tests/mainnet/fulu/ssz_static) |
+| Mainnet Fulu SSZ static cases | 295 cases, 885 files, mirrored under `src/ssz/fixtures/fulu_mainnet/ssz_static/` |
 
 The fork implementation uses the pinned [Fulu fork rules](https://github.com/ethereum/consensus-specs/blob/v1.6.1/specs/fulu/fork.md): an Electra state at an epoch boundary is copied, its fork metadata changes to Fulu, and proposer indices for the current and following epoch are stored in the new window. The minimal preset retains the disabled fork epoch from its pinned configuration for automatic activation; fork fixture tests invoke the upgrade explicitly. Mainnet uses fork epoch `411392` and version `0x06000000`.
 

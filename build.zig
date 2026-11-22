@@ -33,6 +33,16 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "build_options", .module = preset_options_mod }},
     });
+    // Pinned Fulu SSZ fixtures use minimal preset dimensions in every build.
+    const minimal_preset_options = b.addOptions();
+    minimal_preset_options.addOption([]const u8, "preset", "minimal");
+    const minimal_preset_options_mod = minimal_preset_options.createModule();
+    const minimal_consensus_preset_mod = b.createModule(.{
+        .root_source_file = b.path("src/consensus/preset.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "build_options", .module = minimal_preset_options_mod }},
+    });
     const blst_dep = b.dependency("blst", .{});
     const blst = blst_dep.module("blst");
     const ckzg_dep = b.dependency("ckzg", .{});
@@ -290,6 +300,15 @@ pub fn build(b: *std.Build) void {
             .{ .name = "consensus_preset", .module = consensus_preset_mod },
         },
     });
+    const minimal_fulu_mod = b.createModule(.{
+        .root_source_file = b.path("src/types/fulu.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "types", .module = types_mod },
+            .{ .name = "consensus_preset", .module = minimal_consensus_preset_mod },
+        },
+    });
     mod.addImport("fulu", fulu_mod);
     mod.addImport("blst", blst);
     const descriptor_mod = b.createModule(.{
@@ -311,6 +330,12 @@ pub fn build(b: *std.Build) void {
             .{ .name = "type_descriptor", .module = descriptor_mod },
             .{ .name = "ssz_errors", .module = ssz_errors_mod },
         },
+    });
+    const snappy_mod = b.createModule(.{
+        .root_source_file = b.path("src/consensus/snappy.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "consensus_preset", .module = consensus_preset_mod }},
     });
     const merkle_mod = b.createModule(.{
         .root_source_file = b.path("src/merkle/chunking.zig"),
@@ -535,7 +560,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "ssz", .module = ssz_mod },
                 .{ .name = "types", .module = types_mod },
                 .{ .name = "type_descriptor", .module = descriptor_mod },
-                .{ .name = "fulu", .module = fulu_mod },
+                .{ .name = "fulu", .module = minimal_fulu_mod },
                 .{ .name = "merkle", .module = merkle_mod },
             },
         }),
@@ -645,6 +670,22 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(proxy_test_step);
     test_step.dependOn(&run_tests.step);
+    if (std.mem.eql(u8, preset_name, "mainnet")) {
+        const mainnet_ssz_fixture_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/ssz/fulu_mainnet_fixture_test.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "fulu", .module = fulu_mod },
+                    .{ .name = "ssz", .module = ssz_mod },
+                    .{ .name = "merkle", .module = merkle_mod },
+                    .{ .name = "snappy", .module = snappy_mod },
+                },
+            }),
+        });
+        test_step.dependOn(&b.addRunArtifact(mainnet_ssz_fixture_tests).step);
+    }
     test_step.dependOn(&run_storage_tests.step);
     const storage_test_step = b.step("test-storage", "Run durable key-value storage tests");
     storage_test_step.dependOn(&run_storage_tests.step);

@@ -1,25 +1,35 @@
 # Fork-choice recovery and Beacon API
 
-`saveForkChoiceStore(allocator, io, dir, path, store)` writes the first local
-snapshot format. `loadForkChoiceStore` returns a new, independently owned store;
-the caller must call `deinit`. The caller must hold a stable store while saving
-or serving requests. The node runtime in FULU-028 will own that coordination.
+`saveForkChoiceStore(allocator, io, dir, path, store)` writes a version 3
+snapshot and appends subsequent changes to `<path>.log`. `loadForkChoiceStore`
+returns a new, independently owned store; the caller must call `deinit`. The
+caller must hold a stable store while saving or serving requests.
 
-The file begins with ASCII `HTFC0001`, a little-endian 64-bit payload length,
+The file begins with ASCII `HTFC0003`, a little-endian 64-bit payload length,
 and a SHA-256 checksum of the payload. The payload contains timing, four
 checkpoints, proposer boost, the derived head, then length-prefixed maps of
 blocks, post-states, checkpoint states, timeliness, validator latest messages,
 equivocating indices, and unrealized justifications. Blocks and states use SSZ.
-The format is local to Hightower and is not network wire SSZ. A file is limited
-to 256 MiB and each map to 4096 entries.
+The format is local to Hightower and is not network wire SSZ. The snapshot is
+limited to 8 GiB; map counts are bounded by that payload size rather than a
+block-count retention cap. Only version 3 is accepted.
 
-Saving writes an atomic temporary file, syncs it, and replaces the destination.
-An interrupted save leaves the prior destination loadable. Loading rejects an
-unsupported header, truncated or oversized data, checksum failure, malformed
-SSZ, duplicate records, invalid block and state roots, dangling references,
-and a head different from the recorded head. Failure frees decoded records and
-never returns a partial store. The caller should preserve a failed snapshot for
-diagnostics and recover from an earlier backup or trusted chain anchor.
+The log begins with `HTFLOG01`, the base snapshot checksum, and a checksum of
+that header. Each `HTFREC01` frame contains one fork-choice commit's metadata
+and only the changed map keys, including tombstones for finality-pruned data.
+Every frame has a length and SHA-256 checksum and is synced before save returns.
+The log is bounded to 8 GiB and is compacted into a synced atomic snapshot at
+256 MiB. If a crash occurs after snapshot replacement but before log reset, the
+old log's base checksum differs and startup ignores that stale generation.
+
+Loading validates the snapshot and replays every matching log frame in order,
+checking checksums, roots, references, and the selected head after each frame.
+It rejects unsupported versions, truncated or oversized files, corrupt
+checksums, malformed SSZ, inconsistent records, and never returns a partial
+store. Fork choice retains the finalized anchor and descendants; when finality
+advances, pruned blocks, states, votes, signatures, and checkpoints are written
+as tombstones and removed during replay. Preserve failed files for diagnostics
+and recover from a trusted chain anchor.
 
 The standalone read-only service accepts a caller-supplied stable store plus
 sync status and genesis fork version. The selected response shapes follow the
