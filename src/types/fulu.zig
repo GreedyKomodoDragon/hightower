@@ -134,7 +134,7 @@ pub const PendingConsolidation = struct {
 };
 
 pub const Attestation = struct {
-    aggregation_bits: types.BitList(preset.MAX_VALIDATORS_PER_COMMITTEE),
+    aggregation_bits: types.BitList(preset.MAX_VALIDATORS_PER_COMMITTEE * preset.MAX_COMMITTEES_PER_SLOT),
     data: AttestationData,
     signature: BLSSignature,
     committee_bits: types.BitVector(preset.MAX_COMMITTEES_PER_SLOT),
@@ -154,7 +154,7 @@ pub const SignedAggregateAndProof = struct {
 };
 
 pub const IndexedAttestation = struct {
-    attesting_indices: types.List(ValidatorIndex, preset.MAX_VALIDATORS_PER_COMMITTEE),
+    attesting_indices: types.List(ValidatorIndex, preset.MAX_VALIDATORS_PER_COMMITTEE * preset.MAX_COMMITTEES_PER_SLOT),
     data: AttestationData,
     signature: BLSSignature,
 };

@@ -36,6 +36,43 @@ const PulledUpCheckpoints = struct {
 const ChildMap = std.AutoHashMap(fulu.Root, std.ArrayListUnmanaged(fulu.Root));
 const WeightMap = std.AutoHashMap(fulu.Root, u128);
 
+const PersistenceChanges = struct {
+    blocks: std.AutoHashMapUnmanaged(fulu.Root, void) = .empty,
+    signatures: std.AutoHashMapUnmanaged(fulu.Root, void) = .empty,
+    states: std.AutoHashMapUnmanaged(fulu.Root, void) = .empty,
+    checkpoint_states: std.AutoHashMapUnmanaged(fulu.Checkpoint, void) = .empty,
+    timeliness: std.AutoHashMapUnmanaged(fulu.Root, void) = .empty,
+    messages: std.AutoHashMapUnmanaged(fulu.ValidatorIndex, void) = .empty,
+    equivocators: std.AutoHashMapUnmanaged(fulu.ValidatorIndex, void) = .empty,
+    justifications: std.AutoHashMapUnmanaged(fulu.Root, void) = .empty,
+    complete: bool = true,
+
+    /// Release every tracked-key set.
+    fn deinit(self: *PersistenceChanges, allocator: std.mem.Allocator) void {
+        self.blocks.deinit(allocator);
+        self.signatures.deinit(allocator);
+        self.states.deinit(allocator);
+        self.checkpoint_states.deinit(allocator);
+        self.timeliness.deinit(allocator);
+        self.messages.deinit(allocator);
+        self.equivocators.deinit(allocator);
+        self.justifications.deinit(allocator);
+    }
+
+    /// Reset tracked keys after their durable commit.
+    pub fn clear(self: *PersistenceChanges) void {
+        self.blocks.clearRetainingCapacity();
+        self.signatures.clearRetainingCapacity();
+        self.states.clearRetainingCapacity();
+        self.checkpoint_states.clearRetainingCapacity();
+        self.timeliness.clearRetainingCapacity();
+        self.messages.clearRetainingCapacity();
+        self.equivocators.clearRetainingCapacity();
+        self.justifications.clearRetainingCapacity();
+        self.complete = true;
+    }
+};
+
 /// Snapshot of the mutable fields that affect child and weight caches.
 const CacheKey = struct {
     version: u64,
@@ -82,6 +119,7 @@ pub const Store = struct {
     checkpoint_states: std.AutoHashMap(fulu.Checkpoint, fulu.BeaconState),
     latest_messages: std.AutoHashMap(fulu.ValidatorIndex, LatestMessage),
     unrealized_justifications: std.AutoHashMap(fulu.Root, fulu.Checkpoint),
+    persistence_changes: PersistenceChanges = .{},
     cache_version: u64 = 0,
     cache_key: ?CacheKey = null,
     children_cache: ?ChildMap = null,
@@ -106,6 +144,7 @@ pub const Store = struct {
         self.checkpoint_states.deinit();
         self.latest_messages.deinit();
         self.unrealized_justifications.deinit();
+        self.persistence_changes.deinit(allocator);
     }
 
     /// Return the slot represented by the store's explicit timestamp.
@@ -114,9 +153,16 @@ pub const Store = struct {
     }
 
     /// Invalidate cached children, weights, and head after any store mutation.
-    fn markDirty(self: *Store) void {
+    pub fn markDirty(self: *Store) void {
         self.cache_version +%= 1;
         self.clearCache();
+    }
+
+    /// Track a changed map key; failed tracking forces persistence to compact a full snapshot.
+    pub fn trackChange(self: *Store, set: anytype, key: anytype) void {
+        set.put(self.allocator, key, {}) catch {
+            self.persistence_changes.complete = false;
+        };
     }
 
     /// Release any cached fork-choice adjacency, weight, or head result.
@@ -195,6 +241,7 @@ pub fn initStore(
     try putState(&store, anchor_root, anchor_state.*);
     try putCheckpointState(&store, checkpoint, anchor_state.*);
     try store.unrealized_justifications.put(anchor_root, checkpoint);
+    store.trackChange(&store.persistence_changes.justifications, anchor_root);
     return store;
 }
 
@@ -264,6 +311,11 @@ fn pruneToFinalized(store: *Store) void {
         removed.append(store.allocator, entry.key_ptr.*) catch return;
     }
     for (removed.items) |root| {
+        store.trackChange(&store.persistence_changes.blocks, root);
+        store.trackChange(&store.persistence_changes.states, root);
+        store.trackChange(&store.persistence_changes.signatures, root);
+        store.trackChange(&store.persistence_changes.timeliness, root);
+        store.trackChange(&store.persistence_changes.justifications, root);
         if (store.blocks.fetchRemove(root)) |entry| ssz.freeDecoded(store.allocator, fulu.BeaconBlock, entry.value);
         if (store.block_states.fetchRemove(root)) |entry| ssz.freeDecoded(store.allocator, fulu.BeaconState, entry.value);
         _ = store.signed_block_signatures.remove(root);
@@ -277,6 +329,7 @@ fn pruneToFinalized(store: *Store) void {
         if (!store.blocks.contains(checkpoint.root)) checkpoints.append(store.allocator, checkpoint.*) catch return;
     }
     for (checkpoints.items) |checkpoint| {
+        store.trackChange(&store.persistence_changes.checkpoint_states, checkpoint);
         if (store.checkpoint_states.fetchRemove(checkpoint)) |entry| ssz.freeDecoded(store.allocator, fulu.BeaconState, entry.value);
     }
     var messages = std.ArrayListUnmanaged(fulu.ValidatorIndex).empty;
@@ -285,7 +338,10 @@ fn pruneToFinalized(store: *Store) void {
     while (latest_messages.next()) |entry| {
         if (!store.blocks.contains(entry.value_ptr.root)) messages.append(store.allocator, entry.key_ptr.*) catch return;
     }
-    for (messages.items) |index| _ = store.latest_messages.remove(index);
+    for (messages.items) |index| {
+        store.trackChange(&store.persistence_changes.messages, index);
+        _ = store.latest_messages.remove(index);
+    }
 }
 
 /// Return the ancestor at or before the first slot of an epoch.
@@ -360,6 +416,7 @@ pub fn onBlockAt(store: *Store, signed_block: fulu.SignedBeaconBlock, engine: en
     store.markDirty();
     // Roll back each owned insertion if a later allocation fails.
     try putBlock(store, block_root, block);
+    store.trackChange(&store.persistence_changes.signatures, block_root);
     errdefer if (store.blocks.fetchRemove(block_root)) |entry| ssz.freeDecoded(store.allocator, fulu.BeaconBlock, entry.value);
     try store.signed_block_signatures.put(block_root, signed_block.signature);
     errdefer _ = store.signed_block_signatures.remove(block_root);
@@ -367,8 +424,10 @@ pub fn onBlockAt(store: *Store, signed_block: fulu.SignedBeaconBlock, engine: en
     try putStateOwned(store, block_root, state);
     errdefer if (store.block_states.fetchRemove(block_root)) |entry| ssz.freeDecoded(store.allocator, fulu.BeaconState, entry.value);
     const timely = isBlockTimely(store, block.slot, arrival_time);
+    store.trackChange(&store.persistence_changes.timeliness, block_root);
     try store.block_timeliness.put(block_root, timely);
     errdefer _ = store.block_timeliness.remove(block_root);
+    store.trackChange(&store.persistence_changes.justifications, block_root);
     try store.unrealized_justifications.put(block_root, pulled.justified);
     errdefer _ = store.unrealized_justifications.remove(block_root);
     const past_epoch = helpers.computeEpochAtSlot(block.slot) < helpers.computeEpochAtSlot(store.currentSlot());
@@ -448,6 +507,7 @@ fn putBlock(store: *Store, root: fulu.Root, block: fulu.BeaconBlock) !void {
         ssz.freeDecoded(store.allocator, fulu.BeaconBlock, copy);
         return err;
     };
+    store.trackChange(&store.persistence_changes.blocks, root);
 }
 
 /// Take ownership of a block's post-state under its root.
@@ -457,6 +517,7 @@ fn putStateOwned(store: *Store, root: fulu.Root, state: fulu.BeaconState) !void 
         ssz.freeDecoded(store.allocator, fulu.BeaconState, state);
         return err;
     };
+    store.trackChange(&store.persistence_changes.states, root);
 }
 
 /// Insert an owned copy of a block's post-state.
@@ -471,6 +532,7 @@ fn putCheckpointStateOwned(store: *Store, checkpoint: fulu.Checkpoint, state: fu
         ssz.freeDecoded(store.allocator, fulu.BeaconState, state);
         return err;
     };
+    store.trackChange(&store.persistence_changes.checkpoint_states, checkpoint);
 }
 
 /// Insert an owned state snapshot for a checkpoint.
@@ -533,6 +595,7 @@ pub fn onAttestation(store: *Store, attestation: fulu.Attestation, is_from_block
     for (indices) |index| {
         if (store.equivocating_indices.contains(index)) continue;
         if (store.latest_messages.get(index)) |old| if (old.epoch >= data.target.epoch) continue;
+        store.trackChange(&store.persistence_changes.messages, index);
         store.latest_messages.putAssumeCapacity(index, .{ .epoch = data.target.epoch, .root = data.beacon_block_root });
     }
 }
@@ -557,6 +620,7 @@ pub fn onAttesterSlashing(store: *Store, slashing: fulu.AttesterSlashing) !void 
         } else if (b < a) {
             j += 1;
         } else {
+            store.trackChange(&store.persistence_changes.equivocators, a);
             store.equivocating_indices.putAssumeCapacity(a, {});
             i += 1;
             j += 1;
@@ -1203,4 +1267,8 @@ test "finality prunes non-descendant blocks, states, checkpoints, and votes" {
     try std.testing.expect(!store.checkpoint_states.contains(stale_checkpoint));
     try std.testing.expect(!store.latest_messages.contains(0));
     try std.testing.expect(store.latest_messages.contains(1));
+    try std.testing.expect(store.persistence_changes.blocks.contains(stale));
+    try std.testing.expect(store.persistence_changes.states.contains(stale));
+    try std.testing.expect(store.persistence_changes.checkpoint_states.contains(stale_checkpoint));
+    try std.testing.expect(store.persistence_changes.messages.contains(0));
 }

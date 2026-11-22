@@ -307,7 +307,7 @@ fn combineAttestations(allocator: std.mem.Allocator, state: *const fulu.BeaconSt
         if (first.committee_bits.data[committee_index]) a_offset += committee.len;
         if (second.committee_bits.data[committee_index]) b_offset += committee.len;
     }
-    if (bits.items.len > preset.MAX_VALIDATORS_PER_COMMITTEE) return null;
+    if (bits.items.len > preset.MAX_VALIDATORS_PER_COMMITTEE * preset.MAX_COMMITTEES_PER_SLOT) return null;
     result.aggregation_bits.data = try bits.toOwnedSlice(allocator);
     errdefer allocator.free(result.aggregation_bits.data);
     result.signature = try bls.aggregateSignatures(first.signature, second.signature);
