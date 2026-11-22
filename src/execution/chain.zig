@@ -189,6 +189,25 @@ pub const Chain = struct {
         self.record_by_hash.putAssumeCapacity(self.records.items[index].hash, index);
     }
 
+    /// Retains an executed post-state by moving it into the record after all fallible preparation succeeds.
+    pub fn retainOwned(self: *Chain, header: execution.Header, transactions: []const []const u8, withdrawals: []const execution.Withdrawal, result: transition.BlockResult, world: *execution.state.State) !bool {
+        var record = try self.copyRecord(header, transactions, withdrawals, null, null);
+        errdefer record.deinit(self.allocator);
+        try self.reserveIndexes(record);
+        try self.records.ensureUnusedCapacity(self.allocator, 1);
+        const consumed = self.state_loader == null;
+        if (consumed) {
+            record.world = world.*;
+            // SAFETY: Ownership moved into the record; callers must not deinitialize the source.
+            world.* = undefined;
+        }
+        self.records.appendAssumeCapacity(record);
+        const index = self.records.items.len - 1;
+        self.records.items[index].result = result;
+        self.record_by_hash.putAssumeCapacity(self.records.items[index].hash, index);
+        return consumed;
+    }
+
     /// Frees excluded records and remaps the canonical indexes.
     pub fn retainOnly(self: *Chain, keep: []const bool) !void {
         if (keep.len != self.records.items.len) return error.InvalidPruneMask;
@@ -320,7 +339,7 @@ pub const Chain = struct {
     }
 
     /// Copies a block header, canonical transaction bytes, and post-state.
-    fn copyRecord(self: *Chain, header: execution.Header, transactions: []const []const u8, withdrawals: []const execution.Withdrawal, result: ?transition.BlockResult, world: *const execution.state.State) !Record {
+    fn copyRecord(self: *Chain, header: execution.Header, transactions: []const []const u8, withdrawals: []const execution.Withdrawal, result: ?transition.BlockResult, world: ?*const execution.state.State) !Record {
         var owned_header = header;
         owned_header.extra_data = try self.allocator.dupe(u8, header.extra_data);
         errdefer self.allocator.free(owned_header.extra_data);
@@ -332,7 +351,7 @@ pub const Chain = struct {
             raws[i] = try self.allocator.dupe(u8, raw);
             copied += 1;
         }
-        var snapshot: ?execution.state.State = if (self.state_loader == null) try world.clone(self.allocator) else null;
+        var snapshot: ?execution.state.State = if (self.state_loader == null and world != null) try world.?.clone(self.allocator) else null;
         errdefer if (snapshot) |*state| state.deinit();
         const copied_withdrawals = try self.allocator.dupe(execution.Withdrawal, withdrawals);
         errdefer self.allocator.free(copied_withdrawals);
