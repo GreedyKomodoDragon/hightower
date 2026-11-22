@@ -171,7 +171,7 @@ def beacon_ssz(port_number, slot, path):
 def saved_head(path):
     """Read the selected root from the checked snapshot's fixed header fields."""
     snapshot = path.read_bytes()
-    assert snapshot[:8] == b"HTFC0002"
+    assert snapshot[:8] == b"HTFC0003"
     assert int.from_bytes(snapshot[8:16], "little") == len(snapshot) - 48
     assert hashlib.sha256(snapshot[48:]).digest() == snapshot[16:48]
     # Header, two times, four checkpoints, and proposer boost precede the head.

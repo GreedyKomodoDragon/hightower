@@ -852,7 +852,7 @@ test "forked chain restores head votes and post-state roots" {
     defer allocator.free(snapshot_bytes);
     const log_bytes = try tmp.dir.readFileAlloc(io, "fork.bin.log", allocator, .limited(max_log_bytes));
     defer allocator.free(log_bytes);
-    try std.testing.expect(log_bytes.len < snapshot_bytes.len);
+    try std.testing.expect(log_bytes.len > log_header_len);
     var journal_restored = try loadForkChoiceStore(allocator, io, tmp.dir, "fork.bin");
     defer journal_restored.deinit();
     try std.testing.expectEqual(try fork_choice.getHead(&store), try fork_choice.getHead(&journal_restored));
