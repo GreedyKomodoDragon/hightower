@@ -261,7 +261,7 @@ fn readSnapshot(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path:
         try store.unrealized_justifications.put(root, cp);
     }
     if (cursor.offset != payload.len) return error.InconsistentSnapshot;
-    try validate(allocator, &store, expected_head);
+    try validate(allocator, &store, expected_head, true);
     return store;
 }
 
@@ -301,10 +301,11 @@ pub fn loadForkChoiceStore(allocator: std.mem.Allocator, io: std.Io, dir: std.Io
         hashFrame(sequence, payload, &digest);
         if (!std.mem.eql(u8, &digest, header[frame_magic.len + 16 ..][0..32])) return error.CorruptLog;
         expected_head = try applyDelta(allocator, &store, payload);
-        try validate(allocator, &store, expected_head);
+        try validate(allocator, &store, expected_head, false);
         offset += payload.len;
         expected_sequence += 1;
     }
+    try validate(allocator, &store, expected_head, true);
     store.persistence_changes.clear();
     return store;
 }
@@ -389,8 +390,8 @@ fn hashFrame(sequence: u64, payload: []const u8, digest: *[32]u8) void {
     hasher.final(digest);
 }
 
-/// Verify roots and every relationship needed to safely derive the chain head.
-fn validate(allocator: std.mem.Allocator, store: *const fork_choice.Store, expected_head: fulu.Root) !void {
+/// Validate store relationships and optionally hash every retained block and state.
+fn validate(allocator: std.mem.Allocator, store: *const fork_choice.Store, expected_head: fulu.Root, verify_roots: bool) !void {
     if (store.time < store.genesis_time or store.blocks.count() == 0 or store.blocks.count() != store.block_states.count()) return error.InconsistentSnapshot;
     const checkpoints = [_]fulu.Checkpoint{ store.justified_checkpoint, store.finalized_checkpoint, store.unrealized_justified_checkpoint, store.unrealized_finalized_checkpoint };
     for (checkpoints) |cp| if (!store.blocks.contains(cp.root)) return error.InconsistentSnapshot;
@@ -399,9 +400,9 @@ fn validate(allocator: std.mem.Allocator, store: *const fork_choice.Store, expec
     var anchors: usize = 0;
     while (roots.next()) |entry| {
         const root = entry.key_ptr.*;
-        if (!std.mem.eql(u8, &root, &(try merkle.HashTreeRoot(allocator, entry.value_ptr.*)))) return error.InconsistentSnapshot;
+        if (verify_roots and !std.mem.eql(u8, &root, &(try merkle.HashTreeRoot(allocator, entry.value_ptr.*)))) return error.InconsistentSnapshot;
         const state = store.block_states.get(root) orelse return error.InconsistentSnapshot;
-        if (!std.mem.eql(u8, &entry.value_ptr.state_root, &(try merkle.HashTreeRoot(allocator, state)))) return error.InconsistentSnapshot;
+        if (verify_roots and !std.mem.eql(u8, &entry.value_ptr.state_root, &(try merkle.HashTreeRoot(allocator, state)))) return error.InconsistentSnapshot;
         if (store.blocks.contains(entry.value_ptr.parent_root)) {
             var current = root;
             for (0..store.blocks.count()) |_| {
