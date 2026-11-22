@@ -282,7 +282,7 @@ pub fn loadForkChoiceStore(allocator: std.mem.Allocator, io: std.Io, dir: std.Io
     std.crypto.hash.sha2.Sha256.hash(bytes[0 .. log_magic.len + 32], &log_header_digest, .{});
     if (!std.mem.eql(u8, &log_header_digest, bytes[log_magic.len + 32 .. log_header_len])) return error.CorruptLog;
     const base_hash = try snapshotChecksum(io, dir, path);
-    if (!std.mem.eql(u8, bytes[log_magic.len..log_header_len], &base_hash)) return store;
+    if (!std.mem.eql(u8, bytes[log_magic.len..][0..32], &base_hash)) return store;
     var offset: usize = log_header_len;
     var expected_head = try fork_choice.getHead(&store);
     var expected_sequence: u64 = 1;
