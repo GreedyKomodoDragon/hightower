@@ -1140,6 +1140,103 @@ test "execution state creates updates and deletes accounts and storage" {
     try testing.expectEqualSlices(u8, &empty_root, &(try state.stateRoot()));
 }
 
+test "execution state root cache survives no-op calls and tracks small mutations" {
+    var state = execution.state.State.init(testing.allocator);
+    defer state.deinit();
+    const first = try state.stateRoot();
+    try testing.expectEqualSlices(u8, &first, &(try state.stateRoot()));
+
+    const address = [_]u8{0x44} ** 20;
+    try state.setBalance(address, 7);
+    const changed = try state.stateRoot();
+    try state.setBalance(address, 7);
+    try testing.expectEqualSlices(u8, &changed, &(try state.stateRoot()));
+
+    const snapshot = try state.snapshot();
+    try state.setStorage(address, 9, 10);
+    _ = try state.stateRoot();
+    try state.revert(snapshot);
+    try testing.expectEqualSlices(u8, &changed, &(try state.stateRoot()));
+}
+
+test "execution state serializes concurrent root cache reads" {
+    const Worker = struct {
+        fn run(state: *execution.state.State, root: *execution.state.Hash) void {
+            root.* = state.stateRoot() catch unreachable;
+        }
+    };
+    var state = execution.state.State.init(testing.allocator);
+    defer state.deinit();
+    for (0..128) |i| {
+        var address: execution.state.Address = .{0} ** 20;
+        address[19] = @truncate(i);
+        try state.setBalance(address, @intCast(i + 1));
+    }
+    var roots: [4]execution.state.Hash = undefined;
+    var threads: [4]std.Thread = undefined;
+    var started: usize = 0;
+    errdefer for (threads[0..started]) |thread| thread.join();
+    for (&roots, 0..) |*root, i| {
+        threads[i] = try std.Thread.spawn(.{}, Worker.run, .{ &state, root });
+        started += 1;
+    }
+    for (threads) |thread| thread.join();
+    for (roots[1..]) |root| try testing.expectEqualSlices(u8, &roots[0], &root);
+}
+
+test "execution state rebuilds trie paths for small updates and matches checkpoints" {
+    var state = execution.state.State.init(testing.allocator);
+    defer state.deinit();
+    var address: execution.state.Address = undefined;
+    for (0..128) |i| {
+        address = .{0} ** 20;
+        address[18] = @truncate(i >> 8);
+        address[19] = @truncate(i);
+        try state.setBalance(address, @intCast(i + 1));
+    }
+    address = .{0x77} ** 20;
+    for (0..128) |slot| try state.setStorage(address, @intCast(slot), @intCast(slot + 1));
+    _ = try state.stateRoot();
+    const initial_work = state.trieNodeBuilds();
+
+    try state.setBalance(address, 999);
+    const account_root = try state.stateRoot();
+    const account_work = state.trieNodeBuilds() - initial_work;
+    try testing.expect(account_work < 128);
+
+    const before_storage_work = state.trieNodeBuilds();
+    try state.setStorage(address, 63, 1000);
+    const incremental_root = try state.stateRoot();
+    const storage_work = state.trieNodeBuilds() - before_storage_work;
+    try testing.expect(storage_work < 128);
+
+    const checkpoint = try state.checkpointBytes(testing.allocator);
+    defer testing.allocator.free(checkpoint);
+    var rebuilt = execution.state.State.init(testing.allocator);
+    defer rebuilt.deinit();
+    try rebuilt.applyStateBytes(checkpoint);
+    try testing.expectEqualSlices(u8, &incremental_root, &(try rebuilt.stateRoot()));
+    try testing.expect(!std.mem.eql(u8, &account_root, &incremental_root));
+}
+
+test "cached trie roots retain valid proofs across updates" {
+    var trie = execution.trie.Trie.init(testing.allocator, false);
+    defer trie.deinit();
+    try trie.put(&.{0x10}, "first value with a long enough payload to hash the child node");
+    try trie.put(&.{0x20}, "second");
+    const original_root = try trie.root();
+    var original_proof = try trie.prove(&.{0x10});
+    defer original_proof.deinit();
+    try testing.expect(execution.trie.verifyProof(testing.allocator, original_root, &.{0x10}, "first value with a long enough payload to hash the child node", original_proof.nodes, false));
+
+    try trie.put(&.{0x20}, "updated");
+    const updated_root = try trie.root();
+    try testing.expect(!std.mem.eql(u8, &original_root, &updated_root));
+    var updated_proof = try trie.prove(&.{0x10});
+    defer updated_proof.deinit();
+    try testing.expect(execution.trie.verifyProof(testing.allocator, updated_root, &.{0x10}, "first value with a long enough payload to hash the child node", updated_proof.nodes, false));
+}
+
 // Nested journal snapshots restore roots, and committing an inner snapshot keeps parent history.
 test "execution state snapshots revert and commit in LIFO order" {
     var state = execution.state.State.init(testing.allocator);
