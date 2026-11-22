@@ -23,6 +23,11 @@ GETH = os.environ.get("GETH_BIN") or shutil.which("geth") or "/tmp/hightower-int
 PRYSM = Path(os.environ.get("PRYSM_BIN_DIR", "/tmp/hightower-interop-bins"))
 FIXTURE = ROOT / "zig-out/bin/hightower-runtime-fixture"
 KEYS = ROOT / "zig-out/bin/hightower-p2p-interop-keys"
+SNAPSHOT_HEADER_SIZE = 48
+SNAPSHOT_HEAD_OFFSET = 256
+LOG_HEADER_SIZE = 72
+FRAME_HEADER_SIZE = 56
+DELTA_HEAD_OFFSET = 208
 CHAIN = """CONFIG_NAME: hightower-interop
 PRESET_BASE: mainnet
 TERMINAL_BLOCK_HASH: 0x0000000000000000000000000000000000000000000000000000000000000000
@@ -169,13 +174,39 @@ def beacon_ssz(port_number, slot, path):
 
 
 def saved_head(path):
-    """Read the selected root from the checked snapshot's fixed header fields."""
+    """Read the selected root from the snapshot and its checked journal records."""
     snapshot = path.read_bytes()
     assert snapshot[:8] == b"HTFC0003"
-    assert int.from_bytes(snapshot[8:16], "little") == len(snapshot) - 48
-    assert hashlib.sha256(snapshot[48:]).digest() == snapshot[16:48]
-    # Header, two times, four checkpoints, and proposer boost precede the head.
-    return "0x" + snapshot[256:288].hex()
+    assert int.from_bytes(snapshot[8:16], "little") == len(snapshot) - SNAPSHOT_HEADER_SIZE
+    snapshot_hash = hashlib.sha256(snapshot[SNAPSHOT_HEADER_SIZE:]).digest()
+    assert snapshot_hash == snapshot[16:SNAPSHOT_HEADER_SIZE]
+    head = snapshot[SNAPSHOT_HEAD_OFFSET : SNAPSHOT_HEAD_OFFSET + 32]
+    log_path = path.with_name(path.name + ".log")
+    if not log_path.exists():
+        return "0x" + head.hex()
+    log = log_path.read_bytes()
+    assert log[:8] == b"HTFLOG01" and len(log) >= LOG_HEADER_SIZE
+    assert hashlib.sha256(log[:40]).digest() == log[40:LOG_HEADER_SIZE]
+    if log[8:40] != snapshot_hash:
+        return "0x" + head.hex()
+    offset = LOG_HEADER_SIZE
+    expected_sequence = 1
+    while offset < len(log):
+        frame = log[offset : offset + FRAME_HEADER_SIZE]
+        assert len(frame) == FRAME_HEADER_SIZE and frame[:8] == b"HTFREC01"
+        sequence = int.from_bytes(frame[8:16], "little")
+        payload_length = int.from_bytes(frame[16:24], "little")
+        assert sequence == expected_sequence
+        payload_start = offset + FRAME_HEADER_SIZE
+        payload_end = payload_start + payload_length
+        payload = log[payload_start:payload_end]
+        assert len(payload) == payload_length
+        assert hashlib.sha256(frame[8:16] + payload).digest() == frame[24:56]
+        assert len(payload) >= DELTA_HEAD_OFFSET + 32
+        head = payload[DELTA_HEAD_OFFSET : DELTA_HEAD_OFFSET + 32]
+        offset = payload_end
+        expected_sequence += 1
+    return "0x" + head.hex()
 
 
 def run_recovery_case(work, processes, base, enr, secret, genesis_hash, expected, expected_execution, slot_one_hash, slot_one_root, anchor_root, name, method, match, action):
