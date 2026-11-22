@@ -2,8 +2,8 @@
 // branch nodes. Keys are optionally Keccak-hashed for state/storage tries;
 // transaction and receipt tries use RLP-encoded indexes without key hashing.
 // Updates replace a key's value and deletions remove it, so operation order
-// matters when keys repeat. This implementation rebuilds nodes in memory and
-// does not persist nodes or retain historical roots.
+// matters when keys repeat. Encoded subtrees remain cached in memory; nodes are
+// not persisted and historical roots are not retained.
 //
 // entries -> nibble paths -> compact RLP nodes -> Keccak root
 //                            └── proof path: root → selected leaf
@@ -15,10 +15,11 @@ const decode = rlp.decode;
 pub const Hash = [32]u8;
 pub const Error = error{ KeyNotFound, KeyCollision };
 
-const Entry = struct { key: []u8, value: []u8 };
-const Prepared = struct { nibbles: []u8, value: []const u8 };
-const Item = union(enum) { string: []const u8, raw: []const u8 };
-const Built = struct { bytes: []u8, includes_key: bool };
+const Entry = struct { key: []u8, nibbles: []u8, value: []u8 };
+const Prepared = struct { nibbles: []u8, value: []const u8, index: usize };
+const Item = union(enum) { string: []const u8, raw: []const u8, hash: Hash };
+const Built = struct { bytes: []u8, hash: Hash, includes_key: bool };
+const CachedNode = struct { prefix: []u8, bytes: []u8, hash: Hash };
 const CompactPath = struct { nibbles: []u8, leaf: bool };
 
 /// An owned proof containing the encoded trie nodes on one included-key path.
@@ -39,6 +40,12 @@ pub const Trie = struct {
     allocator: std.mem.Allocator,
     secure: bool,
     entries: std.ArrayList(Entry) = .empty,
+    entry_index: std.StringHashMapUnmanaged(usize) = .empty,
+    sorted_indices: ?[]usize = null,
+    nodes: std.StringHashMapUnmanaged(CachedNode) = .empty,
+    cached_root: ?Hash = null,
+    root_node_builds: usize = 0,
+    root_cache_lock: std.atomic.Mutex = .unlocked,
 
     /// Creates an empty trie; the caller chooses secure or raw-key semantics.
     pub fn init(allocator: std.mem.Allocator, secure: bool) Trie {
@@ -49,9 +56,18 @@ pub const Trie = struct {
     pub fn deinit(self: *Trie) void {
         for (self.entries.items) |entry| {
             self.allocator.free(entry.key);
+            self.allocator.free(entry.nibbles);
             self.allocator.free(entry.value);
         }
         self.entries.deinit(self.allocator);
+        self.entry_index.deinit(self.allocator);
+        if (self.sorted_indices) |indices| self.allocator.free(indices);
+        var node_iterator = self.nodes.iterator();
+        while (node_iterator.next()) |node| {
+            self.allocator.free(node.value_ptr.prefix);
+            self.allocator.free(node.value_ptr.bytes);
+        }
+        self.nodes.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -61,43 +77,65 @@ pub const Trie = struct {
             self.delete(key);
             return;
         }
-        for (self.entries.items) |*entry| {
-            if (!std.mem.eql(u8, entry.key, key)) continue;
+        if (self.entry_index.get(key)) |index| {
+            const entry = &self.entries.items[index];
+            if (std.mem.eql(u8, entry.value, value)) return;
             const new_value = try self.allocator.dupe(u8, value);
             self.allocator.free(entry.value);
             entry.value = new_value;
+            self.invalidate(entry.nibbles);
             return;
         }
+        try self.entries.ensureUnusedCapacity(self.allocator, 1);
+        try self.entry_index.ensureUnusedCapacity(self.allocator, 1);
         const owned_key = try self.allocator.dupe(u8, key);
         errdefer self.allocator.free(owned_key);
+        const owned_nibbles = try keyNibbles(self.allocator, key, self.secure);
+        errdefer self.allocator.free(owned_nibbles);
         const owned_value = try self.allocator.dupe(u8, value);
         errdefer self.allocator.free(owned_value);
-        try self.entries.append(self.allocator, .{ .key = owned_key, .value = owned_value });
+        const index = self.entries.items.len;
+        self.entries.appendAssumeCapacity(.{ .key = owned_key, .nibbles = owned_nibbles, .value = owned_value });
+        self.entry_index.putAssumeCapacity(owned_key, index);
+        self.invalidateSortedIndices();
+        self.invalidate(owned_nibbles);
     }
 
     /// Deletes a key if present; deleting an absent key is a no-op.
     pub fn delete(self: *Trie, key: []const u8) void {
-        for (self.entries.items, 0..) |entry, i| {
-            if (!std.mem.eql(u8, entry.key, key)) continue;
-            const removed = self.entries.orderedRemove(i);
-            self.allocator.free(removed.key);
-            self.allocator.free(removed.value);
-            return;
-        }
+        const index = self.entry_index.fetchRemove(key) orelse return;
+        const removed = self.entries.swapRemove(index.value);
+        if (index.value < self.entries.items.len) self.entry_index.getPtr(self.entries.items[index.value].key).?.* = index.value;
+        self.invalidateSortedIndices();
+        self.allocator.free(removed.key);
+        self.invalidate(removed.nibbles);
+        self.allocator.free(removed.nibbles);
+        self.allocator.free(removed.value);
     }
 
-    /// Computes the Keccak-256 root; the empty trie root hashes the RLP empty string.
-    pub fn root(self: *const Trie) !Hash {
-        if (self.entries.items.len == 0) return keccak(&.{0x80});
+    /// Computes the root; root and proof reads are serialized, while mutations require exclusive access.
+    pub fn root(self: *Trie) !Hash {
+        while (!self.root_cache_lock.tryLock()) std.atomic.spinLoopHint();
+        defer self.root_cache_lock.unlock();
+        if (self.cached_root) |root_hash| return root_hash;
+        if (self.entries.items.len == 0) {
+            const root_hash = keccak(&.{0x80});
+            self.cached_root = root_hash;
+            return root_hash;
+        }
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const prepared = try self.prepare(arena.allocator());
-        const built = try buildNode(arena.allocator(), prepared, 0, null, null);
-        return keccak(built.bytes);
+        const built = try buildNode(arena.allocator(), prepared, 0, null, null, self);
+        const root_hash = built.hash;
+        self.cached_root = root_hash;
+        return root_hash;
     }
 
     /// Builds and owns the encoded node path for an included key.
-    pub fn prove(self: *const Trie, key: []const u8) !Proof {
+    pub fn prove(self: *Trie, key: []const u8) !Proof {
+        while (!self.root_cache_lock.tryLock()) std.atomic.spinLoopHint();
+        defer self.root_cache_lock.unlock();
         if (self.entries.items.len == 0) return error.KeyNotFound;
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
@@ -106,7 +144,7 @@ pub const Trie = struct {
         const path = try keyNibbles(allocator, key, self.secure);
         var reverse_nodes: std.ArrayList([]u8) = .empty;
         defer reverse_nodes.deinit(allocator);
-        const built = try buildNode(allocator, prepared, 0, path, &reverse_nodes);
+        const built = try buildNode(allocator, prepared, 0, path, &reverse_nodes, null);
         if (!built.includes_key) return error.KeyNotFound;
 
         const nodes = try self.allocator.alloc([]u8, reverse_nodes.items.len);
@@ -124,16 +162,43 @@ pub const Trie = struct {
     }
 
     /// Converts owned entries into compact nibble paths, hashing keys when secure mode is enabled.
-    fn prepare(self: *const Trie, allocator: std.mem.Allocator) ![]Prepared {
+    fn prepare(self: *Trie, allocator: std.mem.Allocator) ![]Prepared {
         const prepared = try allocator.alloc(Prepared, self.entries.items.len);
-        for (self.entries.items, 0..) |entry, i| {
-            prepared[i] = .{ .nibbles = try keyNibbles(allocator, entry.key, self.secure), .value = entry.value };
+        if (self.sorted_indices) |indices| {
+            for (indices, 0..) |index, i| {
+                const entry = self.entries.items[index];
+                prepared[i] = .{ .nibbles = entry.nibbles, .value = entry.value, .index = index };
+            }
+        } else {
+            for (self.entries.items, 0..) |entry, i| {
+                prepared[i] = .{ .nibbles = entry.nibbles, .value = entry.value, .index = i };
+            }
+            std.mem.sort(Prepared, prepared, {}, lessPrepared);
+            const indices = try self.allocator.alloc(usize, prepared.len);
+            for (prepared, 0..) |entry, i| indices[i] = entry.index;
+            self.sorted_indices = indices;
         }
-        std.mem.sort(Prepared, prepared, {}, lessPrepared);
         for (1..prepared.len) |i| {
             if (std.mem.eql(u8, prepared[i - 1].nibbles, prepared[i].nibbles)) return error.KeyCollision;
         }
         return prepared;
+    }
+
+    /// Drops key ordering after an insertion or deletion changes trie membership.
+    fn invalidateSortedIndices(self: *Trie) void {
+        if (self.sorted_indices) |indices| self.allocator.free(indices);
+        self.sorted_indices = null;
+    }
+
+    /// Removes cached subtrees from the root through one changed nibble path.
+    fn invalidate(self: *Trie, nibbles: []const u8) void {
+        self.cached_root = null;
+        for (0..nibbles.len + 1) |depth| {
+            if (self.nodes.fetchRemove(nibbles[0..depth])) |removed| {
+                self.allocator.free(removed.value.prefix);
+                self.allocator.free(removed.value.bytes);
+            }
+        }
     }
 };
 
@@ -201,26 +266,43 @@ pub fn verifyProof(allocator: std.mem.Allocator, root_hash: Hash, key: []const u
 }
 
 /// Recursively creates a leaf, extension, or branch node and records a matching proof path in reverse.
-fn buildNode(allocator: std.mem.Allocator, entries: []const Prepared, depth: usize, target: ?[]const u8, proof_nodes: ?*std.ArrayList([]u8)) !Built {
+fn buildNode(allocator: std.mem.Allocator, entries: []const Prepared, depth: usize, target: ?[]const u8, proof_nodes: ?*std.ArrayList([]u8), cache: ?*Trie) anyerror!Built {
+    const prefix = entries[0].nibbles[0..depth];
+    if (cache) |trie| if (trie.nodes.get(prefix)) |node| return .{ .bytes = node.bytes, .hash = node.hash, .includes_key = false };
+    const built = try buildNodeUncached(allocator, entries, depth, target, proof_nodes, cache);
+    if (cache) |trie| {
+        try trie.nodes.ensureUnusedCapacity(trie.allocator, 1);
+        const owned_prefix = try trie.allocator.dupe(u8, prefix);
+        errdefer trie.allocator.free(owned_prefix);
+        const owned_bytes = try trie.allocator.dupe(u8, built.bytes);
+        errdefer trie.allocator.free(owned_bytes);
+        trie.nodes.putAssumeCapacity(owned_prefix, .{ .prefix = owned_prefix, .bytes = owned_bytes, .hash = built.hash });
+        trie.root_node_builds += 1;
+    }
+    return built;
+}
+
+/// Creates a trie node after its unchanged descendants have been reused.
+fn buildNodeUncached(allocator: std.mem.Allocator, entries: []const Prepared, depth: usize, target: ?[]const u8, proof_nodes: ?*std.ArrayList([]u8), cache: ?*Trie) anyerror!Built {
     if (entries.len == 1) {
         const entry = entries[0];
         const compact = try compactEncode(allocator, entry.nibbles[depth..], true);
         const node = try encodeList(allocator, &.{ .{ .string = compact }, .{ .string = entry.value } });
         const includes = if (target) |path| std.mem.eql(u8, path, entry.nibbles) else false;
         if (includes) try recordProofNode(allocator, proof_nodes, node);
-        return .{ .bytes = node, .includes_key = includes };
+        return .{ .bytes = node, .hash = keccak(node), .includes_key = includes };
     }
 
     var common = depth;
     const shortest = minKeyLength(entries);
     while (common < shortest and allNibble(entries, common, entries[0].nibbles[common])) : (common += 1) {}
     if (common > depth) {
-        const child = try buildNode(allocator, entries, common, target, proof_nodes);
+        const child = try buildNode(allocator, entries, common, target, proof_nodes, cache);
         const compact = try compactEncode(allocator, entries[0].nibbles[depth..common], false);
-        const reference = childReference(allocator, child.bytes) catch return error.OutOfMemory;
+        const reference = childReference(child);
         const node = try encodeList(allocator, &.{ .{ .string = compact }, reference });
         if (child.includes_key) try recordProofNode(allocator, proof_nodes, node);
-        return .{ .bytes = node, .includes_key = child.includes_key };
+        return .{ .bytes = node, .hash = keccak(node), .includes_key = child.includes_key };
     }
 
     var items: [17]Item = [_]Item{.{ .string = "" }} ** 17;
@@ -238,13 +320,13 @@ fn buildNode(allocator: std.mem.Allocator, entries: []const Prepared, depth: usi
         const start = cursor;
         cursor += 1;
         while (cursor < entries.len and entries[cursor].nibbles.len > depth and entries[cursor].nibbles[depth] == nibble) : (cursor += 1) {}
-        const child = try buildNode(allocator, entries[start..cursor], depth + 1, target, proof_nodes);
-        items[nibble] = try childReference(allocator, child.bytes);
+        const child = try buildNode(allocator, entries[start..cursor], depth + 1, target, proof_nodes, cache);
+        items[nibble] = childReference(child);
         includes = includes or child.includes_key;
     }
     const node = try encodeList(allocator, &items);
     if (includes) try recordProofNode(allocator, proof_nodes, node);
-    return .{ .bytes = node, .includes_key = includes };
+    return .{ .bytes = node, .hash = keccak(node), .includes_key = includes };
 }
 
 /// Encodes list items, preserving child nodes inline when their reference is raw RLP.
@@ -254,6 +336,7 @@ fn encodeList(allocator: std.mem.Allocator, items: []const Item) ![]u8 {
     for (items) |item| switch (item) {
         .string => |bytes| try encoding.encodeString(&payload.writer, bytes),
         .raw => |bytes| try payload.writer.writeAll(bytes),
+        .hash => |hash| try encoding.encodeString(&payload.writer, &hash),
     };
     const contents = try payload.toOwnedSlice();
     defer allocator.free(contents);
@@ -265,9 +348,9 @@ fn encodeList(allocator: std.mem.Allocator, items: []const Item) ![]u8 {
 }
 
 /// Chooses the canonical inline-node or hashed-node reference.
-fn childReference(allocator: std.mem.Allocator, child: []const u8) !Item {
-    if (child.len < 32) return .{ .raw = child };
-    return .{ .string = try allocator.dupe(u8, &keccak(child)) };
+fn childReference(child: Built) Item {
+    if (child.bytes.len < 32) return .{ .raw = child.bytes };
+    return .{ .hash = child.hash };
 }
 
 /// Encodes the hex-prefix compact path and leaf/extension flags.

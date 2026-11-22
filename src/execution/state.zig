@@ -9,7 +9,7 @@
 // address / slot → Keccak key → raw trie ─┐
 // code bytes → Keccak code hash ──────────┼→ RLP account → state root
 //                                         └── snapshot journal → revert/commit
-// shortcut: account lookups scan arrays and journal records copy account slots; use indexed maps and slot-level undo if profiling shows this in-memory path is costly.
+// shortcut: journal records copy account slots; use slot-level undo if profiling shows this in-memory path is costly.
 const std = @import("std");
 const rlp = @import("rlp");
 const trie = @import("trie.zig");
@@ -93,6 +93,8 @@ const AccountEntry = struct {
     balance: u256 = 0,
     code_hash: Hash = EMPTY_CODE_HASH,
     storage: std.ArrayList(StorageEntry) = .empty,
+    cached_storage_root: ?Hash = null,
+    cached_account_value: ?[]u8 = null,
 };
 const CodeEntry = struct { hash: Hash, bytes: []u8 };
 const AccountFields = struct { nonce: u64, balance: u256, code_hash: Hash };
@@ -115,9 +117,13 @@ pub const State = struct {
     codes: std.ArrayList(CodeEntry) = .empty,
     code_index: std.AutoHashMap(Hash, usize),
     storage_index: std.AutoHashMap(StorageKey, usize),
+    storage_tries: std.AutoHashMap(Hash, trie.Trie),
     journal: std.ArrayList(Undo) = .empty,
     snapshots: std.ArrayList(SnapshotMarker) = .empty,
     next_snapshot_id: u64 = 1,
+    cached_state_root: ?Hash = null,
+    state_trie: trie.Trie,
+    root_cache_lock: std.atomic.Mutex = .unlocked,
 
     /// Creates an empty state using the supplied allocator for all owned data.
     pub fn init(allocator: std.mem.Allocator) State {
@@ -126,6 +132,8 @@ pub const State = struct {
             .account_index = .init(allocator),
             .code_index = .init(allocator),
             .storage_index = .init(allocator),
+            .storage_tries = .init(allocator),
+            .state_trie = trie.Trie.init(allocator, false),
         };
     }
 
@@ -138,9 +146,13 @@ pub const State = struct {
         self.codes.deinit(self.allocator);
         self.code_index.deinit();
         self.storage_index.deinit();
+        var storage_iterator = self.storage_tries.iterator();
+        while (storage_iterator.next()) |entry| entry.value_ptr.deinit();
+        self.storage_tries.deinit();
         self.clearJournal();
         self.journal.deinit(self.allocator);
         self.snapshots.deinit(self.allocator);
+        self.state_trie.deinit();
         self.* = undefined;
     }
 
@@ -268,6 +280,7 @@ pub const State = struct {
     /// Creates an explicit empty account; creating an existing account is a no-op.
     pub fn createAccount(self: *State, address: Address) !void {
         if (self.findAccount(address) != null) return;
+        self.cached_state_root = null;
         _ = try self.appendNewAccount(.{ .address = address, .key = keccak(&address) });
     }
 
@@ -279,6 +292,9 @@ pub const State = struct {
     /// Removes an account by its hashed trie key, preserving snapshot undo.
     fn deleteAccountByKey(self: *State, key: Hash) !void {
         const index = self.account_index.get(key) orelse return;
+        self.cached_state_root = null;
+        self.state_trie.delete(&key);
+        self.removeStorageTrie(key);
         try self.recordDeleteByKey(key);
         var removed = self.accounts.swapRemove(index);
         self.removeStorageIndex(&removed);
@@ -291,8 +307,11 @@ pub const State = struct {
     }
 
     /// Returns account fields with a freshly computed storage root, or null if absent.
-    pub fn getAccount(self: *const State, address: Address) !?Account {
-        const entry = self.findAccountConst(address) orelse return null;
+    pub fn getAccount(self: *State, address: Address) !?Account {
+        self.lockRootCache();
+        defer self.root_cache_lock.unlock();
+        const index = self.findAccount(address) orelse return null;
+        const entry = &self.accounts.items[index];
         return .{
             .nonce = entry.nonce,
             .balance = entry.balance,
@@ -316,12 +335,18 @@ pub const State = struct {
     /// Sets a nonce and creates an account only for a nonzero value.
     pub fn setNonce(self: *State, address: Address, nonce: u64) !void {
         const entry = try self.writableAccount(address, nonce != 0) orelse return;
+        if (entry.nonce == nonce) return;
+        self.cached_state_root = null;
+        self.clearAccountValue(entry);
         entry.nonce = nonce;
     }
 
     /// Sets a balance and creates an account only for a nonzero value.
     pub fn setBalance(self: *State, address: Address, balance: u256) !void {
         const entry = try self.writableAccount(address, balance != 0) orelse return;
+        if (entry.balance == balance) return;
+        self.cached_state_root = null;
+        self.clearAccountValue(entry);
         entry.balance = balance;
     }
 
@@ -344,6 +369,9 @@ pub const State = struct {
         const hash = keccak(bytes);
         if (bytes.len != 0) try self.storeCode(hash, bytes);
         const entry = try self.writableAccount(address, bytes.len != 0) orelse return hash;
+        if (std.mem.eql(u8, &entry.code_hash, &hash)) return hash;
+        self.cached_state_root = null;
+        self.clearAccountValue(entry);
         entry.code_hash = hash;
         return hash;
     }
@@ -365,7 +393,15 @@ pub const State = struct {
             const entry = &self.accounts.items[account_index];
             if (self.storage_index.get(key)) |slot_index| {
                 if (value == 0) {
+                    const journal_len = self.journal.items.len;
                     try self.recordStorage(address, slot, entry.storage.items[slot_index].value);
+                    self.updateStorageTrie(account_key, slot_key, value) catch |err| {
+                        if (self.journal.items.len > journal_len) self.cancelLastUndo();
+                        return err;
+                    };
+                    self.cached_state_root = null;
+                    entry.cached_storage_root = null;
+                    self.clearAccountValue(entry);
                     _ = entry.storage.swapRemove(slot_index);
                     _ = self.storage_index.remove(key);
                     if (slot_index < entry.storage.items.len) {
@@ -373,41 +409,80 @@ pub const State = struct {
                         self.storage_index.getPtr(.{ .address = account_key, .slot = moved.key }).?.* = slot_index;
                     }
                 } else {
+                    if (entry.storage.items[slot_index].value == value) return;
+                    const journal_len = self.journal.items.len;
                     try self.recordStorage(address, slot, entry.storage.items[slot_index].value);
+                    self.updateStorageTrie(account_key, slot_key, value) catch |err| {
+                        if (self.journal.items.len > journal_len) self.cancelLastUndo();
+                        return err;
+                    };
+                    self.cached_state_root = null;
+                    entry.cached_storage_root = null;
+                    self.clearAccountValue(entry);
                     entry.storage.items[slot_index].value = value;
                 }
                 return;
             }
             if (value == 0) return;
+            const journal_len = self.journal.items.len;
             try self.recordStorage(address, slot, null);
             try self.storage_index.ensureUnusedCapacity(1);
-            try entry.storage.append(self.allocator, .{ .key = slot_key, .value = value });
+            try entry.storage.ensureUnusedCapacity(self.allocator, 1);
+            self.updateStorageTrie(account_key, slot_key, value) catch |err| {
+                if (self.journal.items.len > journal_len) self.cancelLastUndo();
+                return err;
+            };
+            self.cached_state_root = null;
+            entry.cached_storage_root = null;
+            self.clearAccountValue(entry);
+            entry.storage.appendAssumeCapacity(.{ .key = slot_key, .value = value });
             self.storage_index.putAssumeCapacity(key, entry.storage.items.len - 1);
             return;
         }
         if (value == 0) return;
+        self.cached_state_root = null;
         var entry = AccountEntry{ .address = address, .key = account_key };
         errdefer self.deinitAccount(&entry);
         try entry.storage.append(self.allocator, .{ .key = slot_key, .value = value });
         _ = try self.appendNewAccount(entry);
     }
 
-    /// Computes the secure global state trie root from current account values.
-    pub fn stateRoot(self: *const State) !Hash {
-        var state_trie = trie.Trie.init(self.allocator, false);
-        defer state_trie.deinit();
-        for (self.accounts.items) |entry| {
-            const storage_root = try self.storageRoot(&entry);
-            const account_bytes = try encodeAccount(self.allocator, .{
-                .nonce = entry.nonce,
-                .balance = entry.balance,
-                .storage_root = storage_root,
-                .code_hash = entry.code_hash,
-            });
-            defer self.allocator.free(account_bytes);
-            try state_trie.put(&entry.key, account_bytes);
+    /// Computes the secure root; simultaneous root reads are serialized, while mutations require exclusive access.
+    pub fn stateRoot(self: *State) !Hash {
+        self.lockRootCache();
+        defer self.root_cache_lock.unlock();
+        if (self.cached_state_root) |root_hash| return root_hash;
+        for (self.accounts.items) |*entry| {
+            if (entry.cached_account_value == null) {
+                const storage_root = try self.storageRoot(entry);
+                const encoded = try encodeAccount(self.allocator, .{
+                    .nonce = entry.nonce,
+                    .balance = entry.balance,
+                    .storage_root = storage_root,
+                    .code_hash = entry.code_hash,
+                });
+                entry.cached_account_value = encoded;
+            }
+            try self.state_trie.put(&entry.key, entry.cached_account_value.?);
         }
-        return state_trie.root();
+        const root_hash = try self.state_trie.root();
+        self.cached_state_root = root_hash;
+        return root_hash;
+    }
+
+    /// Serializes derived-root reads so concurrent readers cannot mutate caches together.
+    fn lockRootCache(self: *State) void {
+        while (!self.root_cache_lock.tryLock()) std.atomic.spinLoopHint();
+    }
+
+    /// Sums rebuilt nodes retained in current trie caches for benchmark comparisons.
+    pub fn trieNodeBuilds(self: *State) usize {
+        self.lockRootCache();
+        defer self.root_cache_lock.unlock();
+        var builds = self.state_trie.root_node_builds;
+        var iterator = self.storage_tries.iterator();
+        while (iterator.next()) |entry| builds += entry.value_ptr.root_node_builds;
+        return builds;
     }
 
     /// Opens a nested journal snapshot and returns its LIFO handle.
@@ -455,6 +530,7 @@ pub const State = struct {
         try self.recordCreate(entry.key);
         errdefer if (self.journal.items.len > journal_len) self.cancelLastUndo();
         try self.accounts.append(self.allocator, entry);
+        self.cached_state_root = null;
         const index = self.accounts.items.len - 1;
         self.account_index.putAssumeCapacity(entry.key, index);
         for (entry.storage.items, 0..) |stored, slot_index| {
@@ -509,6 +585,7 @@ pub const State = struct {
     fn cloneAccount(self: *const State, entry: AccountEntry) !AccountEntry {
         var copy = entry;
         copy.storage = .empty;
+        copy.cached_account_value = null;
         errdefer copy.storage.deinit(self.allocator);
         try copy.storage.appendSlice(self.allocator, entry.storage.items);
         return copy;
@@ -516,6 +593,7 @@ pub const State = struct {
 
     /// Restore one delta without allocation by reusing retained list capacity.
     fn applyUndo(self: *State, undo: Undo) void {
+        self.cached_state_root = null;
         switch (undo) {
             .fields => |fields| {
                 if (self.findAccount(fields.address)) |index| {
@@ -523,6 +601,7 @@ pub const State = struct {
                     entry.nonce = fields.previous.nonce;
                     entry.balance = fields.previous.balance;
                     entry.code_hash = fields.previous.code_hash;
+                    self.clearAccountValue(entry);
                 }
             },
             .storage => |storage| self.undoStorage(storage.address, storage.slot, storage.previous),
@@ -535,6 +614,9 @@ pub const State = struct {
     fn undoStorage(self: *State, address: Address, slot: u256, previous: ?u256) void {
         const account_index = self.findAccount(address) orelse return;
         const entry = &self.accounts.items[account_index];
+        self.removeStorageTrie(entry.key);
+        entry.cached_storage_root = null;
+        self.clearAccountValue(entry);
         const key = StorageKey{ .address = keccak(&address), .slot = slotHash(slot) };
         if (previous) |value| {
             if (self.storage_index.get(key)) |slot_index| {
@@ -555,6 +637,7 @@ pub const State = struct {
 
     /// Insert one restored account after its deletion.
     fn restoreAccount(self: *State, previous: AccountEntry) void {
+        self.cached_state_root = null;
         self.accounts.appendAssumeCapacity(previous);
         const index = self.accounts.items.len - 1;
         self.account_index.putAssumeCapacity(previous.key, index);
@@ -566,6 +649,9 @@ pub const State = struct {
     /// Remove one account and all of its index entries.
     fn removeAccount(self: *State, key: Hash) void {
         const index = self.account_index.get(key) orelse return;
+        self.cached_state_root = null;
+        self.state_trie.delete(&key);
+        self.removeStorageTrie(key);
         var removed = self.accounts.swapRemove(index);
         self.removeStorageIndex(&removed);
         _ = self.account_index.remove(key);
@@ -612,15 +698,45 @@ pub const State = struct {
     }
 
     /// Computes one account's secure storage trie root.
-    fn storageRoot(self: *const State, account: *const AccountEntry) !Hash {
-        var storage_trie = trie.Trie.init(self.allocator, false);
-        defer storage_trie.deinit();
+    fn storageRoot(self: *State, account: *AccountEntry) !Hash {
+        if (account.cached_storage_root) |root_hash| return root_hash;
+        const storage_trie = try self.getStorageTrie(account.key);
         for (account.storage.items) |stored| {
             const value = try encodeValue(self.allocator, stored.value);
             defer self.allocator.free(value);
             try storage_trie.put(&stored.key, value);
         }
-        return storage_trie.root();
+        const root_hash = try storage_trie.root();
+        account.cached_storage_root = root_hash;
+        return root_hash;
+    }
+
+    /// Returns an existing per-account trie or creates an empty one.
+    fn getStorageTrie(self: *State, key: Hash) !*trie.Trie {
+        if (self.storage_tries.getPtr(key)) |storage_trie| return storage_trie;
+        try self.storage_tries.ensureUnusedCapacity(1);
+        self.storage_tries.putAssumeCapacity(key, trie.Trie.init(self.allocator, false));
+        return self.storage_tries.getPtr(key).?;
+    }
+
+    /// Updates a materialized account storage trie for one slot mutation.
+    fn updateStorageTrie(self: *State, key: Hash, slot_key: Hash, value: u256) !void {
+        const storage_trie = self.storage_tries.getPtr(key) orelse return;
+        if (value == 0) {
+            storage_trie.delete(&slot_key);
+            return;
+        }
+        const encoded = try encodeValue(self.allocator, value);
+        defer self.allocator.free(encoded);
+        try storage_trie.put(&slot_key, encoded);
+    }
+
+    /// Removes and frees one account's cached storage trie before deletion or rollback.
+    fn removeStorageTrie(self: *State, key: Hash) void {
+        if (self.storage_tries.fetchRemove(key)) |removed| {
+            var storage_trie = removed.value;
+            storage_trie.deinit();
+        }
     }
 
     /// Stores code once by hash; code content is immutable for this State lifetime.
@@ -636,8 +752,15 @@ pub const State = struct {
     /// Frees one account entry and its storage list.
     fn deinitAccount(self: *const State, entry: *AccountEntry) void {
         entry.storage.deinit(self.allocator);
+        if (entry.cached_account_value) |value| self.allocator.free(value);
         // SAFETY: This value is fully initialized before any read.
         entry.* = undefined;
+    }
+
+    /// Frees the encoded account value after one consensus field changes.
+    fn clearAccountValue(self: *const State, entry: *AccountEntry) void {
+        if (entry.cached_account_value) |value| self.allocator.free(value);
+        entry.cached_account_value = null;
     }
 };
 

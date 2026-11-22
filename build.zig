@@ -749,6 +749,19 @@ pub fn build(b: *std.Build) void {
     const execution_bench_step = b.step("bench-execution-chain", "Benchmark execution chain indexes with 4096 retained blocks");
     execution_bench_step.dependOn(&run_execution_bench.step);
 
+    const execution_state_bench = b.addExecutable(.{
+        .name = "hightower-execution-state-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/execution/state_bench.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "execution", .module = execution_mod }},
+        }),
+    });
+    const run_execution_state_bench = b.addRunArtifact(execution_state_bench);
+    const execution_state_bench_step = b.step("bench-execution-state", "Compare full rebuild and incremental execution state roots");
+    execution_state_bench_step.dependOn(&run_execution_state_bench.step);
+
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
     // The Zig build system is entirely implemented in userland, which means
