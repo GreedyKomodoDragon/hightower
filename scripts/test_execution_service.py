@@ -106,9 +106,9 @@ def measure_archive_history(temporary, config, secret, block_count=130):
     try:
         wait_ready(process, rpc_port)
         initial_bytes = database_bytes(temporary / "archive-data")
-        bearer = token(secret)
         parent = request(rpc_port, "eth_getBlockByNumber", ["latest", False])
         for _ in range(block_count):
+            bearer = token(secret)
             timestamp = int(parent["timestamp"], 16) + 1
             choice = {"headBlockHash": parent["hash"], "safeBlockHash": parent["hash"], "finalizedBlockHash": parent["hash"]}
             attributes = {"timestamp": hex(timestamp), "prevRandao": ZERO, "suggestedFeeRecipient": "0x" + "00" * 20, "withdrawals": [], "parentBeaconBlockRoot": ZERO}
