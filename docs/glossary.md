@@ -125,6 +125,7 @@ Chain:      [Block 0] ───────────────────�
 | Proposer lookahead | The two-epoch list of validators assigned to propose upcoming Fulu slots. |
 | Blob bundle | The blobs, commitments, and proofs returned by an execution payload builder for blob transactions. |
 | Execution receipt | The status, gas tally, bloom, and logs produced by a transaction. |
+| Execution peer | Another Hightower execution service listed in `execution_peers`; nodes exchange at most 256 transactions and 3 MiB of network transaction bytes per 10 MiB response, and three invalid submissions disconnect a peer worker while duplicates carry no penalty. |
 | Execution account | An address's nonce, balance, storage root, and code hash, encoded into the execution state trie. |
 | Ethereum Virtual Machine (EVM) | The execution engine that runs a contract's bytecode one instruction at a time. |
 | Opcode | A one-byte EVM instruction that operates on stack, memory, or state and consumes gas. |

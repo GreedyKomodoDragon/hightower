@@ -452,6 +452,12 @@ pub fn build(b: *std.Build) void {
     });
     const engine_test_server_step = b.step("engine-test-server", "Build the loopback Engine API test server");
     engine_test_server_step.dependOn(&b.addInstallArtifact(engine_test_server, .{}).step);
+    const peer_gossip_mod = b.createModule(.{
+        .root_source_file = b.path("src/peer_gossip.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "execution", .module = execution_mod }},
+    });
     const execution_service = b.addExecutable(.{
         .name = "hightower-execution",
         .root_module = b.createModule(.{
@@ -461,6 +467,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "execution", .module = execution_mod },
                 .{ .name = "engine_server", .module = engine_server_mod },
+                .{ .name = "peer_gossip", .module = peer_gossip_mod },
             },
         }),
     });
