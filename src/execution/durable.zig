@@ -12,7 +12,7 @@ const storage = @import("storage");
 
 const chunk_size = 4 * 1024 * 1024;
 const checkpoint_interval = 128;
-const retained_canonical_blocks = 4096;
+pub const default_retained_canonical_blocks = 4096;
 const marker_size = 8 + 4 * (4 + 32);
 
 const BlobInfo = struct { len: u32, hash: execution.Hash };
@@ -28,6 +28,8 @@ const Marker = struct {
 pub const Store = struct {
     allocator: std.mem.Allocator,
     db: storage.Database,
+    archive: bool = false,
+    retained_canonical_blocks: u64 = default_retained_canonical_blocks,
 
     /// Opens storage and restores the checked genesis state into world.
     pub fn open(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8, fork: execution.transition.Fork, genesis: execution.Header, world: *execution.state.State) !Store {
@@ -133,7 +135,8 @@ pub const Store = struct {
     /// Removes finalized canonical bodies older than the retained checkpoint floor.
     pub fn prune(self: *Store, chain: *chain_mod.Chain) !void {
         try self.pruneSides(chain);
-        try self.pruneRetained(chain, retained_canonical_blocks);
+        if (self.archive) return;
+        try self.pruneRetained(chain, self.retained_canonical_blocks);
     }
 
     /// Removes branches that cannot descend from the finalized block.
@@ -680,7 +683,13 @@ test "periodic execution checkpoint reconstructs state without older deltas" {
     try std.testing.expect(unfinalized_delta != null);
     chain.finalized_hash = parent_hash;
     try store.commit(parent_hash, parent_hash, parent_hash);
-    try store.pruneRetained(&chain, 1);
+    store.archive = true;
+    try store.prune(&chain);
+    try std.testing.expectEqual(@as(u64, 0), chain.history_floor);
+    try std.testing.expectEqual(@as(usize, checkpoint_interval + 3), chain.records.items.len);
+    store.archive = false;
+    store.retained_canonical_blocks = 1;
+    try store.prune(&chain);
     try std.testing.expectEqual(@as(u64, checkpoint_interval), chain.history_floor);
     try std.testing.expectEqual(@as(usize, 4), chain.records.items.len);
     const ancestors = try chain.ancestorHashes(a, parent_hash);

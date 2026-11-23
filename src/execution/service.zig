@@ -18,6 +18,8 @@ const Config = struct {
     engine_bind: []const u8,
     rpc_bind: []const u8,
     transfer_contract: ?[]const u8 = null,
+    archive: bool = false,
+    retained_canonical_blocks: u64 = execution.durable.default_retained_canonical_blocks,
 };
 
 /// Parses a required IPv4 host:port listener address.
@@ -86,6 +88,8 @@ pub fn main(init: std.process.Init) !void {
         anchor = try execution.checkpoint.load(a, init.io, path, config.checkpoint_state.?, trusted_hash, &world);
     }
     var store = try execution.durable.Store.open(a, init.io, std.Io.Dir.cwd(), config.data_dir, .osaka, anchor, &world);
+    store.archive = config.archive;
+    store.retained_canonical_blocks = config.retained_canonical_blocks;
     defer store.close();
     try store.checkIdentity(genesis.chain_id, .osaka);
     var chain = try execution.chain.Chain.init(a, genesis.chain_id, .osaka, anchor, &world);
@@ -130,7 +134,13 @@ test "service config validates separate IPv4 listeners" {
     const a = arena.allocator();
     const valid = try std.json.Stringify.valueAlloc(a, Config{ .genesis = "g", .data_dir = "d", .jwt_secret = "j", .trusted_setup = "k", .engine_bind = "127.0.0.1:18551", .rpc_bind = "127.0.0.1:18545" }, .{});
     defer a.free(valid);
-    _ = try parseConfig(a, valid);
+    const default_config = (try parseConfig(a, valid)).value;
+    try std.testing.expect(!default_config.archive);
+    try std.testing.expectEqual(execution.durable.default_retained_canonical_blocks, default_config.retained_canonical_blocks);
+    const configured = try std.json.Stringify.valueAlloc(a, Config{ .genesis = "g", .data_dir = "d", .jwt_secret = "j", .trusted_setup = "k", .engine_bind = "127.0.0.1:18551", .rpc_bind = "127.0.0.1:18545", .archive = true, .retained_canonical_blocks = 512 }, .{});
+    const configured_value = (try parseConfig(a, configured)).value;
+    try std.testing.expect(configured_value.archive);
+    try std.testing.expectEqual(@as(u64, 512), configured_value.retained_canonical_blocks);
     const partial = try std.json.Stringify.valueAlloc(a, Config{ .genesis = "g", .checkpoint_header = "header.rlp", .data_dir = "d", .jwt_secret = "j", .trusted_setup = "k", .engine_bind = "127.0.0.1:18551", .rpc_bind = "127.0.0.1:18545" }, .{});
     try std.testing.expectError(error.MissingCheckpoint, parseConfig(a, partial));
     const invalid = try std.json.Stringify.valueAlloc(a, Config{ .genesis = "g", .checkpoint_header = "header.rlp", .checkpoint_state = "state.bin", .checkpoint_hash = "0xnot-a-hash", .data_dir = "d", .jwt_secret = "j", .trusted_setup = "k", .engine_bind = "127.0.0.1:18551", .rpc_bind = "127.0.0.1:18545" }, .{});
