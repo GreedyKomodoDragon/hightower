@@ -15,6 +15,7 @@ import signal
 import tempfile
 import threading
 import time
+import statistics
 import urllib.error
 import urllib.request
 
@@ -65,6 +66,87 @@ def get(port_number, path):
         return response.status, response.read().decode()
 
 
+def database_bytes(path):
+    """Return allocated file lengths for the execution database directory."""
+    return sum(file.stat().st_size for file in path.rglob("*") if file.is_file())
+
+
+def median_rpc_latency(port_number, calls):
+    """Measure median local RPC round-trip time for a small fixed sample."""
+    samples = []
+    for _ in range(20):
+        for method, params in calls:
+            started = time.perf_counter_ns()
+            request(port_number, method, params)
+            samples.append(time.perf_counter_ns() - started)
+    return statistics.median(samples) / 1_000
+
+
+def measure_archive_history(temporary, config, secret, block_count=130):
+    """Import and restart an archive node, then measure retained history."""
+    archive_config = dict(config)
+    archive_config.update(
+        data_dir=str(temporary / "archive-data"),
+        engine_bind=f"127.0.0.1:{port()}",
+        rpc_bind=f"127.0.0.1:{port()}",
+        archive=True,
+        retained_canonical_blocks=16,
+    )
+    archive_config.pop("transfer_contract", None)
+    config_path = temporary / "archive-config.json"
+    config_path.write_text(json.dumps(archive_config))
+    engine_port = int(archive_config["engine_bind"].split(":")[-1])
+    rpc_port = int(archive_config["rpc_bind"].split(":")[-1])
+    process = subprocess.Popen(
+        [str(ROOT / "zig-out/bin/hightower-execution"), "--config", str(config_path)],
+        cwd=ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        wait_ready(process, rpc_port)
+        initial_bytes = database_bytes(temporary / "archive-data")
+        parent = request(rpc_port, "eth_getBlockByNumber", ["latest", False])
+        for _ in range(block_count):
+            bearer = token(secret)
+            timestamp = int(parent["timestamp"], 16) + 1
+            choice = {"headBlockHash": parent["hash"], "safeBlockHash": parent["hash"], "finalizedBlockHash": parent["hash"]}
+            attributes = {"timestamp": hex(timestamp), "prevRandao": ZERO, "suggestedFeeRecipient": "0x" + "00" * 20, "withdrawals": [], "parentBeaconBlockRoot": ZERO}
+            update = request(engine_port, "engine_forkchoiceUpdatedV3", [choice, attributes], bearer)
+            built = request(engine_port, "engine_getPayloadV5", [update["payloadId"]], bearer)
+            payload = built["executionPayload"]
+            assert request(engine_port, "engine_newPayloadV4", [payload, [], ZERO, built["executionRequests"]], bearer)["status"] == "VALID"
+            selected = {"headBlockHash": payload["blockHash"], "safeBlockHash": parent["hash"], "finalizedBlockHash": parent["hash"]}
+            assert request(engine_port, "engine_forkchoiceUpdatedV3", [selected, None], bearer)["payloadStatus"]["status"] == "VALID"
+            parent = {"hash": payload["blockHash"], "timestamp": payload["timestamp"]}
+
+        calls = (
+            ("eth_getBalance", [SENDER, "0x1"]),
+            ("eth_getCode", [SENDER, "0x1"]),
+            ("eth_getStorageAt", [SENDER, "0x0", "0x1"]),
+            ("eth_call", [{"to": SENDER}, "0x1"]),
+        )
+        results = [request(rpc_port, method, params) for method, params in calls]
+        assert request(rpc_port, "eth_getBlockByNumber", ["0x1", False]) is not None
+        growth = database_bytes(temporary / "archive-data") - initial_bytes
+        latency_us = median_rpc_latency(rpc_port, calls)
+        stop(process, secret)
+        process = None
+        process = subprocess.Popen(
+            [str(ROOT / "zig-out/bin/hightower-execution"), "--config", str(config_path)],
+            cwd=ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        wait_ready(process, rpc_port, attempts=1_200)
+        assert request(rpc_port, "eth_getBlockByNumber", ["0x1", False]) is not None
+        assert [request(rpc_port, method, params) for method, params in calls] == results
+        print(f"execution archive sample: {block_count} blocks, database +{growth} bytes, historical RPC median {latency_us:.1f} us over 80 calls")
+    finally:
+        if process and not process.stderr.closed:
+            stop(process, secret)
+
+
 def stop(process, secret):
     """Stop a child and reject any stderr disclosure of its JWT secret."""
     if process.poll() is None:
@@ -75,9 +157,9 @@ def stop(process, secret):
     assert secret.hex().encode() not in logs, logs
 
 
-def wait_ready(process, port_number):
+def wait_ready(process, port_number, attempts=100):
     """Wait until the public listener accepts TCP connections."""
-    for _ in range(100):
+    for _ in range(attempts):
         assert process.poll() is None, "execution service exited during startup"
         try:
             with socket.create_connection(("127.0.0.1", port_number), timeout=0.1):
@@ -310,6 +392,7 @@ def run(geth_bin=None, peer_bin=None):
         process = None
         try:
             process = start()
+            initial_database_bytes = database_bytes(temporary / "data")
             status, health = get(rpc_port, "/health")
             assert status == 200 and health == "ok\n", (status, health)
             assert request(rpc_port, "eth_syncing", []) is False
@@ -405,6 +488,15 @@ def run(geth_bin=None, peer_bin=None):
             assert transfer_trace["output"].endswith("01") and "error" not in transfer_trace
             reverted_trace = request(rpc_port, "debug_traceTransaction", [hashes[2], {"tracer": "callTracer"}])
             assert reverted_trace["error"] == "execution reverted" and reverted_trace["output"].startswith("0x08c379a0")
+            historical_calls = (
+                ("eth_getBalance", [SENDER, "0x1"]),
+                ("eth_getCode", [CONTRACT, "0x1"]),
+                ("eth_getStorageAt", [CONTRACT, "0x0", "0x1"]),
+                ("eth_call", [{"to": CONTRACT, "data": balance_call}, "0x1"]),
+            )
+            historical_results = [request(rpc_port, method, params) for method, params in historical_calls]
+            historical_latency_us = median_rpc_latency(rpc_port, historical_calls)
+            retained_database_bytes = database_bytes(temporary / "data")
             metrics = get(rpc_port, "/metrics")[1]
             assert "hightower_execution_rpc_errors_total 0\n" in metrics, metrics
             stop(process, secret)
@@ -428,6 +520,11 @@ def run(geth_bin=None, peer_bin=None):
             assert request(rpc_port, "eth_blockNumber", []) == "0x2"
             assert request(rpc_port, "eth_getBlockByHash", [head, False])["number"] == "0x2"
             assert request(rpc_port, "eth_getLogs", [{"fromBlock": "0x1"}]) == logs
+            assert [request(rpc_port, method, params) for method, params in historical_calls] == historical_results
+            print(
+                f"execution history sample: 2 blocks, database +{retained_database_bytes - initial_database_bytes} bytes, "
+                f"historical RPC median {historical_latency_us:.1f} us over 80 calls"
+            )
             assert request(rpc_port, "eth_getTransactionReceipt", [hashes[1]])["status"] == "0x1"
             assert request(rpc_port, "debug_traceTransaction", [hashes[1], {"tracer": "callTracer"}])["output"] == transfer_trace["output"]
             assert len((temporary / "events.jsonl").read_text().splitlines()) == (0 if geth_process else 2)
@@ -498,6 +595,7 @@ def run(geth_bin=None, peer_bin=None):
             )
             assert failed.returncode != 0 and b"NotDir" in failed.stderr, failed.stderr
             assert secret.hex().encode() not in failed.stderr
+            measure_archive_history(temporary, config, secret)
             if hasattr(resource, "prlimit") and hasattr(signal, "SIGXFSZ"):
                 process = start(ignore_file_size_signal=True)
                 latest = request(rpc_port, "eth_getBlockByNumber", ["latest", False])
