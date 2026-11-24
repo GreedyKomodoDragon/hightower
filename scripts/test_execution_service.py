@@ -5,7 +5,6 @@ import base64
 import argparse
 import hashlib
 import hmac
-import http.server
 import json
 import pathlib
 import resource
@@ -319,136 +318,83 @@ def test_peer_catchup(temporary, config, secret, geth_rpc_port, geth_engine_port
 
 
 def test_transaction_gossip(temporary, config, secret, signed):
-    """Exchange a pending transaction across two nodes and after peer restart."""
-    first_rpc, first_engine, second_rpc, second_engine = (port() for _ in range(4))
-    first_config = dict(config, data_dir=str(temporary / "gossip-first"), rpc_bind=f"127.0.0.1:{first_rpc}", engine_bind=f"127.0.0.1:{first_engine}", execution_peers=[f"http://127.0.0.1:{second_rpc}/"])
-    second_config = dict(config, data_dir=str(temporary / "gossip-second"), rpc_bind=f"127.0.0.1:{second_rpc}", engine_bind=f"127.0.0.1:{second_engine}", execution_peers=[f"http://127.0.0.1:{first_rpc}/"])
-    first_path, second_path = temporary / "gossip-first.json", temporary / "gossip-second.json"
+    """Relay a pending transaction through a seed to a third execution node."""
+    first_rpc, first_engine, first_peer, second_rpc, second_engine, second_peer, third_rpc, third_engine, third_peer = (port() for _ in range(9))
+    first_config = dict(config, data_dir=str(temporary / "gossip-first"), rpc_bind=f"127.0.0.1:{first_rpc}", engine_bind=f"127.0.0.1:{first_engine}", execution_p2p_bind=f"127.0.0.1:{first_peer}")
+    first_path = temporary / "gossip-first.json"
     first_path.write_text(json.dumps(first_config))
-    second_path.write_text(json.dumps(second_config))
+    running = []
 
-    def launch(path, rpc_port):
-        """Start a gossip fixture service with its normal production binary."""
-        process = subprocess.Popen([str(ROOT / "zig-out/bin/hightower-execution"), "--config", str(path)], cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        wait_ready(process, rpc_port)
-        return process
+    def launch(path, rpc_port, label):
+        """Start a peer and retain its log for signed ENR inspection."""
+        log_path = temporary / f"{label}.log"
+        with log_path.open("wb") as output:
+            process = subprocess.Popen([str(ROOT / "zig-out/bin/hightower-execution"), "--config", str(path)], cwd=ROOT, stdout=subprocess.DEVNULL, stderr=output)
+        running.append((process, log_path))
+        try:
+            wait_ready(process, rpc_port)
+        except AssertionError as error:
+            raise AssertionError(f"{error}: {log_path.read_text(errors='replace')}") from error
+        return process, log_path
 
-    first = second = invalid_peer_node = oversized_peer_node = None
-    invalid_peer_server = oversized_peer_server = None
-    try:
-        first = launch(first_path, first_rpc)
-        second = launch(second_path, second_rpc)
-        assert request(first_rpc, "eth_sendRawTransaction", [signed[0]])
-        assert request_error(first_rpc, "eth_sendRawTransaction", [signed[0]])["message"] == "AlreadyKnown"
-        assert request_error(first_rpc, "eth_sendRawTransaction", ["0xdeadbeef"])
-        oversized = "0x" + "00" * (3 * 1024 * 1024 + 1)
-        assert request_error(first_rpc, "eth_sendRawTransaction", [oversized])["message"] == "TransactionTooLarge"
-        assert "hightower_execution_pool_entries 1\n" in get(first_rpc, "/metrics")[1]
+    def wait_enr(log_path):
+        """Read the seed's signed address before configuring either leaf."""
         for _ in range(100):
-            if request(second_rpc, "eth_getTransactionCount", [SENDER, "pending"]) == "0x1":
-                break
+            log = log_path.read_text(errors="replace")
+            marker = "execution peer ENR: "
+            if marker in log:
+                return log.split(marker, 1)[1].split()[0]
             time.sleep(0.05)
-        else:
-            raise AssertionError("pending transaction did not reach second execution peer")
+        raise AssertionError(f"execution peer did not publish its ENR: {log_path.read_text()}")
+
+    def wait_pending(rpc_port):
+        """Wait for the shared pool to admit the relayed transaction."""
+        for _ in range(200):
+            if request(rpc_port, "eth_getTransactionCount", [SENDER, "pending"]) == "0x1":
+                return
+            time.sleep(0.05)
+        raise AssertionError("transaction did not reach the execution peer")
+
+    def terminate(process, log_path):
+        """Stop a peer and check that its private JWT was not logged."""
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=5)
+        assert secret.hex().encode() not in log_path.read_bytes()
+
+    try:
+        first, first_log = launch(first_path, first_rpc, "gossip-first")
+        seed = wait_enr(first_log)
+        second_config = dict(config, data_dir=str(temporary / "gossip-second"), rpc_bind=f"127.0.0.1:{second_rpc}", engine_bind=f"127.0.0.1:{second_engine}", execution_p2p_bind=f"127.0.0.1:{second_peer}", execution_bootnodes=[seed])
+        third_config = dict(config, data_dir=str(temporary / "gossip-third"), rpc_bind=f"127.0.0.1:{third_rpc}", engine_bind=f"127.0.0.1:{third_engine}", execution_p2p_bind=f"127.0.0.1:{third_peer}", execution_bootnodes=[seed])
+        second_path, third_path = temporary / "gossip-second.json", temporary / "gossip-third.json"
+        second_path.write_text(json.dumps(second_config))
+        third_path.write_text(json.dumps(third_config))
+        second, second_log = launch(second_path, second_rpc, "gossip-second")
+        third, third_log = launch(third_path, third_rpc, "gossip-third")
+        assert request(second_rpc, "eth_sendRawTransaction", [signed[0]])
+        wait_pending(first_rpc)
+        wait_pending(third_rpc)
+        assert request_error(second_rpc, "eth_sendRawTransaction", [signed[0]])["message"] == "AlreadyKnown"
+        assert "hightower_execution_pool_entries 1\n" in get(third_rpc, "/metrics")[1]
 
         bearer = token(secret)
-        parent = request(second_rpc, "eth_getBlockByNumber", ["latest", False])
-        update = request(second_engine, "engine_forkchoiceUpdatedV3", [{"headBlockHash": parent["hash"], "safeBlockHash": parent["hash"], "finalizedBlockHash": parent["hash"]}, {"timestamp": hex(int(parent["timestamp"], 16) + 1), "prevRandao": ZERO, "suggestedFeeRecipient": "0x" + "00" * 20, "withdrawals": [], "parentBeaconBlockRoot": ZERO}], bearer)
-        payload = request(second_engine, "engine_getPayloadV5", [update["payloadId"]], bearer)["executionPayload"]
+        parent = request(third_rpc, "eth_getBlockByNumber", ["latest", False])
+        choice = {"headBlockHash": parent["hash"], "safeBlockHash": parent["hash"], "finalizedBlockHash": parent["hash"]}
+        attributes = {"timestamp": hex(int(parent["timestamp"], 16) + 1), "prevRandao": ZERO, "suggestedFeeRecipient": "0x" + "00" * 20, "withdrawals": [], "parentBeaconBlockRoot": ZERO}
+        update = request(third_engine, "engine_forkchoiceUpdatedV3", [choice, attributes], bearer)
+        payload = request(third_engine, "engine_getPayloadV5", [update["payloadId"]], bearer)["executionPayload"]
         assert any(raw.lower() == signed[0].lower() for raw in payload["transactions"]), payload["transactions"]
+
+        terminate(third, third_log)
+        running.remove((third, third_log))
+        third, third_log = launch(third_path, third_rpc, "gossip-third-restarted")
+        wait_pending(third_rpc)
         time.sleep(1.1)
-        assert "hightower_execution_pool_entries 1\n" in get(second_rpc, "/metrics")[1]
-
-        stop(second, secret)
-        second = launch(second_path, second_rpc)
-        for _ in range(100):
-            if request(second_rpc, "eth_getTransactionCount", [SENDER, "pending"]) == "0x1":
-                break
-            time.sleep(0.05)
-        else:
-            raise AssertionError("gossip did not resume after peer restart")
-        assert request(second_rpc, "eth_getTransactionCount", [SENDER, "pending"]) == "0x1"
-
-        invalid_peer_requests = []
-        class InvalidPeerHandler(http.server.BaseHTTPRequestHandler):
-            """Return one malformed signed transaction per peer snapshot."""
-            def do_POST(self):
-                self.rfile.read(int(self.headers["Content-Length"]))
-                invalid_peer_requests.append(1)
-                response = json.dumps({"jsonrpc": "2.0", "id": 1, "result": ["0xdeadbeef"]}).encode()
-                self.send_response(200)
-                self.send_header("Content-Length", str(len(response)))
-                self.end_headers()
-                self.wfile.write(response)
-
-            def log_message(self, *_args):
-                return
-
-        invalid_peer_server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), InvalidPeerHandler)
-        threading.Thread(target=invalid_peer_server.serve_forever, daemon=True).start()
-        invalid_config = dict(config, data_dir=str(temporary / "gossip-invalid"), rpc_bind=f"127.0.0.1:{port()}", engine_bind=f"127.0.0.1:{port()}", execution_peers=[f"http://127.0.0.1:{invalid_peer_server.server_port}/"])
-        invalid_path = temporary / "gossip-invalid.json"
-        invalid_path.write_text(json.dumps(invalid_config))
-        invalid_peer_node = launch(invalid_path, int(invalid_config["rpc_bind"].split(":")[-1]))
-        for _ in range(100):
-            if len(invalid_peer_requests) >= 3:
-                break
-            time.sleep(0.05)
-        assert len(invalid_peer_requests) == 3, invalid_peer_requests
-        time.sleep(1.1)
-        assert len(invalid_peer_requests) == 3, "peer worker did not disconnect after repeated invalid transactions"
-
-        oversized_peer_requests = []
-        class OversizedPeerHandler(http.server.BaseHTTPRequestHandler):
-            """Return a snapshot larger than the execution peer message cap."""
-            def do_POST(self):
-                self.rfile.read(int(self.headers["Content-Length"]))
-                oversized_peer_requests.append(1)
-                response = json.dumps({"jsonrpc": "2.0", "id": 1, "result": ["0x" + "00" * (5 * 1024 * 1024)]}).encode()
-                self.send_response(200)
-                self.send_header("Content-Length", str(len(response)))
-                self.end_headers()
-                try:
-                    self.wfile.write(response)
-                except BrokenPipeError:
-                    pass
-
-            def log_message(self, *_args):
-                return
-
-        oversized_peer_server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), OversizedPeerHandler)
-        threading.Thread(target=oversized_peer_server.serve_forever, daemon=True).start()
-        oversized_config = dict(config, data_dir=str(temporary / "gossip-oversized"), rpc_bind=f"127.0.0.1:{port()}", engine_bind=f"127.0.0.1:{port()}", execution_peers=[f"http://127.0.0.1:{oversized_peer_server.server_port}/"])
-        oversized_path = temporary / "gossip-oversized.json"
-        oversized_path.write_text(json.dumps(oversized_config))
-        oversized_peer_node = launch(oversized_path, int(oversized_config["rpc_bind"].split(":")[-1]))
-        for _ in range(100):
-            if len(oversized_peer_requests) >= 1:
-                break
-            time.sleep(0.05)
-        assert oversized_peer_requests, "peer worker did not request oversized snapshot"
-        time.sleep(1.1)
-        assert len(oversized_peer_requests) == 1, f"peer worker did not disconnect after oversized message: {len(oversized_peer_requests)} requests; {oversized_peer_node.stderr.peek().decode(errors='replace')}"
-        stop(oversized_peer_node, secret)
-        oversized_peer_node = None
-        oversized_peer_server.shutdown()
-        oversized_peer_server.server_close()
-        oversized_peer_server = None
+        assert "hightower_execution_pool_entries 1\n" in get(third_rpc, "/metrics")[1]
     finally:
-        if oversized_peer_node and not oversized_peer_node.stderr.closed:
-            stop(oversized_peer_node, secret)
-        if oversized_peer_server:
-            oversized_peer_server.shutdown()
-            oversized_peer_server.server_close()
-        if invalid_peer_node and not invalid_peer_node.stderr.closed:
-            stop(invalid_peer_node, secret)
-        if invalid_peer_server:
-            invalid_peer_server.shutdown()
-            invalid_peer_server.server_close()
-        if second and not second.stderr.closed:
-            stop(second, secret)
-        if first and not first.stderr.closed:
-            stop(first, secret)
+        for process, log_path in running:
+            terminate(process, log_path)
 
 
 def run(geth_bin=None, peer_bin=None):

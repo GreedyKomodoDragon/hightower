@@ -14,6 +14,15 @@ const kzg = @import("kzg.zig");
 
 pub const Limits = struct { max_entries: usize = 4096, max_bytes: usize = 64 * 1024 * 1024 };
 const max_transaction_bytes = 3 * 1024 * 1024;
+pub const max_peer_transactions = 256;
+pub const max_peer_page_bytes = 3 * 1024 * 1024;
+
+/// A bounded, borrowed page of network bytes; the pool must stay locked while it is read.
+pub const PeerPage = struct {
+    transactions: [max_peer_transactions][]const u8 = .{&.{}} ** max_peer_transactions,
+    count: usize = 0,
+    next: usize = 0,
+};
 
 pub const Entry = struct {
     raw: []u8,
@@ -160,6 +169,26 @@ pub const Pool = struct {
         return &self.entries.items[index];
     }
 
+    /// Walk from a peer's cursor and stop before the first transaction that does not fit.
+    pub fn peerPage(self: *const Pool, cursor: usize) PeerPage {
+        var page: PeerPage = .{};
+        const len = self.entries.items.len;
+        if (len == 0) return page;
+        var index = cursor % len;
+        var bytes: usize = 0;
+        while (page.count < @min(len, max_peer_transactions)) {
+            const entry = self.entries.items[index];
+            const network_raw = entry.sidecar orelse entry.raw;
+            if (network_raw.len > max_peer_page_bytes - bytes) break;
+            page.transactions[page.count] = network_raw;
+            page.count += 1;
+            bytes += network_raw.len;
+            index = (index + 1) % len;
+        }
+        page.next = index;
+        return page;
+    }
+
     /// Finds a sender's transaction at one nonce.
     fn findNonce(self: *const Pool, sender: execution.Address, nonce: u64) ?usize {
         for (self.entries.items, 0..) |entry, i| if (entry.admission.nonce == nonce and std.mem.eql(u8, &entry.admission.sender, &sender)) return i;
@@ -218,4 +247,64 @@ test "replacement bump is exact at ten percent and includes blob cap" {
     try std.testing.expect(!replacementAllowed(old, new));
     new.blob_fee_cap = 22;
     try std.testing.expect(replacementAllowed(old, new));
+}
+
+test "peer pages cover later entries and resume after a pool removal" {
+    const a = std.testing.allocator;
+    var pool = Pool.init(a, .{});
+    defer pool.deinit();
+    const entry_count = max_peer_transactions + 44;
+    for (0..entry_count) |i| {
+        const raw = try a.alloc(u8, 1);
+        raw[0] = @intCast(i % 256);
+        try pool.entries.append(a, .{ .raw = raw, .sidecar = null, .hash = .{0} ** 32, .admission = undefined });
+    }
+    const first = pool.peerPage(0);
+    try std.testing.expectEqual(max_peer_transactions, first.count);
+    try std.testing.expectEqual(max_peer_transactions, first.next);
+    const second = pool.peerPage(first.next);
+    try std.testing.expectEqual(@as(usize, 44), second.count);
+    try std.testing.expectEqual(@as(usize, 0), second.next);
+    const removed = pool.entries.swapRemove(first.next);
+    a.free(removed.raw);
+    const after_removal = pool.peerPage(first.next);
+    try std.testing.expectEqual(@as(usize, 43), after_removal.count);
+}
+
+test "peer page byte budget resumes at the first unserved sidecar" {
+    const a = std.testing.allocator;
+    var pool = Pool.init(a, .{});
+    defer pool.deinit();
+    const sidecar_size = 2 * 1024 * 1024;
+    for (0..2) |_| {
+        const raw = try a.dupe(u8, &.{3});
+        const sidecar = try a.alloc(u8, sidecar_size);
+        try pool.entries.append(a, .{ .raw = raw, .sidecar = sidecar, .hash = .{0} ** 32, .admission = undefined });
+    }
+    const first = pool.peerPage(0);
+    try std.testing.expectEqual(@as(usize, 1), first.count);
+    try std.testing.expectEqual(@as(usize, 1), first.next);
+    const second = pool.peerPage(first.next);
+    try std.testing.expectEqual(@as(usize, 1), second.count);
+    try std.testing.expectEqual(@as(usize, 0), second.next);
+    try std.testing.expectEqual(sidecar_size, second.transactions[0].len);
+}
+
+test "peer page reads a replacement at the cursor without retaining old bytes" {
+    const a = std.testing.allocator;
+    var pool = Pool.init(a, .{});
+    defer pool.deinit();
+    const old = try a.dupe(u8, &.{1});
+    try pool.entries.append(a, .{ .raw = old, .sidecar = null, .hash = .{1} ** 32, .admission = undefined });
+    const next = try a.dupe(u8, &.{2});
+    try pool.entries.append(a, .{ .raw = next, .sidecar = null, .hash = .{2} ** 32, .admission = undefined });
+    const replacement = try a.dupe(u8, &.{3});
+    pool.entries.items[0].raw = replacement;
+    pool.entries.items[0].hash = .{3} ** 32;
+    a.free(old);
+    const page = pool.peerPage(0);
+    try std.testing.expectEqual(@as(usize, 2), page.count);
+    try std.testing.expectEqualSlices(u8, &.{3}, page.transactions[0]);
+    try std.testing.expectEqualSlices(u8, &.{2}, page.transactions[1]);
+    try std.testing.expectEqual(@as(usize, 0), page.next);
 }
