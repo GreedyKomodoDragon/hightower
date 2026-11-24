@@ -6,6 +6,7 @@
 const std = @import("std");
 const execution = @import("execution");
 const engine = @import("engine_server");
+const peer_gossip = @import("peer_gossip");
 
 const Config = struct {
     genesis: []const u8,
@@ -17,6 +18,7 @@ const Config = struct {
     trusted_setup: []const u8,
     engine_bind: []const u8,
     rpc_bind: []const u8,
+    execution_peers: []const []const u8 = &.{},
     transfer_contract: ?[]const u8 = null,
     archive: bool = false,
     retained_canonical_blocks: u64 = execution.durable.default_retained_canonical_blocks,
@@ -45,6 +47,12 @@ fn parseConfig(a: std.mem.Allocator, bytes: []const u8) !struct { value: Config,
     const engine_address = try bindAddress(config.engine_bind);
     const rpc_address = try bindAddress(config.rpc_bind);
     if (std.mem.eql(u8, config.engine_bind, config.rpc_bind)) return error.DuplicateBindAddress;
+    if (config.execution_peers.len > peer_gossip.max_peers) return error.TooManyExecutionPeers;
+    for (config.execution_peers, 0..) |url, index| {
+        const parsed_url = std.Uri.parse(url) catch return error.InvalidExecutionPeer;
+        if ((!std.mem.eql(u8, parsed_url.scheme, "http") and !std.mem.eql(u8, parsed_url.scheme, "https")) or parsed_url.host == null or parsed_url.user != null or parsed_url.password != null) return error.InvalidExecutionPeer;
+        for (config.execution_peers[0..index]) |previous| if (std.mem.eql(u8, previous, url)) return error.DuplicateExecutionPeer;
+    }
     return .{ .value = config, .engine_address = engine_address, .rpc_address = rpc_address };
 }
 
@@ -118,6 +126,9 @@ pub fn main(init: std.process.Init) !void {
     var sync_progress: execution.rpc.SyncProgress = .{};
     engine_server.sync_progress = &sync_progress;
     var rpc_server: execution.rpc.Server = .{ .chain = &chain, .pool = &pool, .world = &world, .store = &store, .settings = &settings, .mutex = &mutex, .payload_build_ns = &engine_server.payload_build_ns, .sync_progress = &sync_progress };
+    rpc_server.io = init.io;
+    var gossip = peer_gossip.Service{ .server = &rpc_server, .io = init.io, .peers = config.execution_peers };
+    try gossip.start();
     var engine_listener = try parsed.engine_address.listen(init.io, .{ .reuse_address = true });
     defer engine_listener.deinit(init.io);
     var rpc_listener = try parsed.rpc_address.listen(init.io, .{ .reuse_address = true });
@@ -137,6 +148,15 @@ test "service config validates separate IPv4 listeners" {
     const default_config = (try parseConfig(a, valid)).value;
     try std.testing.expect(!default_config.archive);
     try std.testing.expectEqual(execution.durable.default_retained_canonical_blocks, default_config.retained_canonical_blocks);
+    const peer_config_json = try std.json.Stringify.valueAlloc(a, Config{ .genesis = "g", .data_dir = "d", .jwt_secret = "j", .trusted_setup = "k", .engine_bind = "127.0.0.1:18551", .rpc_bind = "127.0.0.1:18545", .execution_peers = &.{"http://127.0.0.1:18546"} }, .{});
+    const peer_config = (try parseConfig(a, peer_config_json)).value;
+    try std.testing.expectEqual(@as(usize, 1), peer_config.execution_peers.len);
+    const too_many_peers = try std.json.Stringify.valueAlloc(a, Config{ .genesis = "g", .data_dir = "d", .jwt_secret = "j", .trusted_setup = "k", .engine_bind = "127.0.0.1:18551", .rpc_bind = "127.0.0.1:18545", .execution_peers = &.{ "http://127.0.0.1:18546", "http://127.0.0.1:18547", "http://127.0.0.1:18548" } }, .{});
+    try std.testing.expectError(error.TooManyExecutionPeers, parseConfig(a, too_many_peers));
+    const duplicate_peers = try std.json.Stringify.valueAlloc(a, Config{ .genesis = "g", .data_dir = "d", .jwt_secret = "j", .trusted_setup = "k", .engine_bind = "127.0.0.1:18551", .rpc_bind = "127.0.0.1:18545", .execution_peers = &.{ "http://127.0.0.1:18546", "http://127.0.0.1:18546" } }, .{});
+    try std.testing.expectError(error.DuplicateExecutionPeer, parseConfig(a, duplicate_peers));
+    const invalid_peer = try std.json.Stringify.valueAlloc(a, Config{ .genesis = "g", .data_dir = "d", .jwt_secret = "j", .trusted_setup = "k", .engine_bind = "127.0.0.1:18551", .rpc_bind = "127.0.0.1:18545", .execution_peers = &.{"ftp://127.0.0.1:18546"} }, .{});
+    try std.testing.expectError(error.InvalidExecutionPeer, parseConfig(a, invalid_peer));
     const configured = try std.json.Stringify.valueAlloc(a, Config{ .genesis = "g", .data_dir = "d", .jwt_secret = "j", .trusted_setup = "k", .engine_bind = "127.0.0.1:18551", .rpc_bind = "127.0.0.1:18545", .archive = true, .retained_canonical_blocks = 512 }, .{});
     const configured_value = (try parseConfig(a, configured)).value;
     try std.testing.expect(configured_value.archive);
@@ -145,4 +165,8 @@ test "service config validates separate IPv4 listeners" {
     try std.testing.expectError(error.MissingCheckpoint, parseConfig(a, partial));
     const invalid = try std.json.Stringify.valueAlloc(a, Config{ .genesis = "g", .checkpoint_header = "header.rlp", .checkpoint_state = "state.bin", .checkpoint_hash = "0xnot-a-hash", .data_dir = "d", .jwt_secret = "j", .trusted_setup = "k", .engine_bind = "127.0.0.1:18551", .rpc_bind = "127.0.0.1:18545" }, .{});
     try std.testing.expectError(error.InvalidCheckpoint, parseConfig(a, invalid));
+}
+
+test {
+    _ = peer_gossip;
 }

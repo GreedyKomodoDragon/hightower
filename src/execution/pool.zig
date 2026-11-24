@@ -3,6 +3,7 @@
 // budgets. Replacements need a 10% bump in every applicable fee cap. Eviction
 // discards the lowest effective
 // tip first, then the highest nonce and transaction hash to break ties.
+// The service admits at most 3 MiB per network transaction to bound peer work.
 //
 // sender nonce n -> n+1 -> gap -> pending later nonce
 // The pool owns canonical bytes and blob sidecars. It does not propagate peers.
@@ -12,6 +13,7 @@ const transition = @import("transition.zig");
 const kzg = @import("kzg.zig");
 
 pub const Limits = struct { max_entries: usize = 4096, max_bytes: usize = 64 * 1024 * 1024 };
+const max_transaction_bytes = 3 * 1024 * 1024;
 
 pub const Entry = struct {
     raw: []u8,
@@ -54,7 +56,7 @@ pub const Pool = struct {
 
     /// Admits a signed network transaction and evicts to the configured bounds.
     pub fn admit(self: *Pool, world: *execution.state.State, context: transition.Context, settings: ?*const kzg.Settings, network_raw: []const u8) !execution.Hash {
-        if (network_raw.len == 0 or network_raw.len > self.limits.max_bytes) return error.TransactionTooLarge;
+        if (network_raw.len == 0 or network_raw.len > @min(self.limits.max_bytes, max_transaction_bytes)) return error.TransactionTooLarge;
         const is_blob = network_raw[0] == 3;
         const raw = if (is_blob) try kzg.canonicalTransaction(self.allocator, settings orelse return error.KzgUnavailable, network_raw) else try self.allocator.dupe(u8, network_raw);
         var owned = true;

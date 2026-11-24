@@ -21,8 +21,13 @@ const max_fee_history = 128;
 const max_trace_frames = 1024;
 const max_trace_steps = 1_000_000;
 const max_trace_bytes = 1024 * 1024;
+const max_peer_transactions = 256;
+const max_peer_raw_bytes = 3 * 1024 * 1024;
 const trace_deadline_ns = 2 * std.time.ns_per_s;
 const priority_fee: u64 = 1_000_000_000;
+
+/// Result of validating and admitting one transaction received from a peer.
+pub const PeerAdmission = enum { admitted, duplicate, invalid, ignored };
 
 /// Tracks a live peer worker's last bounded catch-up report.
 pub const SyncProgress = struct {
@@ -56,6 +61,7 @@ const Method = enum {
     eth_call,
     eth_estimateGas,
     eth_sendRawTransaction,
+    hightower_peerTransactions,
     eth_getTransactionReceipt,
     eth_getLogs,
     debug_traceTransaction,
@@ -103,6 +109,21 @@ pub const Server = struct {
         self.errors +|= responseErrorCount(result);
         const encoded = try std.json.Stringify.valueAlloc(a, result, .{});
         return allocator.dupe(u8, encoded);
+    }
+
+    /// Admits one peer transaction through the same validation path as public RPC.
+    pub fn admitPeerTransaction(self: *Server, raw: []const u8) !PeerAdmission {
+        const io = self.io orelse std.Io.Threaded.global_single_threaded.io();
+        if (self.mutex) |mutex| try mutex.lock(io);
+        defer if (self.mutex) |mutex| mutex.unlock(io);
+        const header = self.chain.latest().header;
+        _ = self.pool.admit(self.world, self.context(header), self.settings, raw) catch |err| switch (err) {
+            error.AlreadyKnown => return .duplicate,
+            error.PoolFull, error.ReplacementUnderpriced => return .ignored,
+            error.OutOfMemory => return err,
+            else => return .invalid,
+        };
+        return .admitted;
     }
 
     /// Serves one HTTP POST with a limit that fits six hex-encoded blob sidecars.
@@ -363,6 +384,21 @@ pub const Server = struct {
                 const tx_context = self.context(header);
                 const hash = try self.pool.admit(self.world, tx_context, self.settings, raw);
                 return string(try hex(a, &hash));
+            },
+            .hightower_peerTransactions => {
+                try noParams(params);
+                var result = array(a);
+                var bytes: usize = 0;
+                var count: usize = 0;
+                for (self.pool.entries.items) |entry| {
+                    if (count == max_peer_transactions) break;
+                    const network_transaction = entry.sidecar orelse entry.raw;
+                    if (network_transaction.len > max_peer_raw_bytes - bytes) continue;
+                    try result.array.append(string(try hex(a, network_transaction)));
+                    bytes += network_transaction.len;
+                    count += 1;
+                }
+                return result;
             },
             .eth_getTransactionReceipt => {
                 if (params.len != 1) return error.InvalidParams;
