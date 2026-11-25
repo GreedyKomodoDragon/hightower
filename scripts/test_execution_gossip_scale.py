@@ -4,6 +4,7 @@
 import json
 import pathlib
 import secrets
+import socket
 import subprocess
 import tempfile
 import time
@@ -79,9 +80,12 @@ def main():
             for item in transactions[:256]:
                 request(seed_rpc, "eth_sendRawTransaction", [item["raw"]])
             wait_pending(leaf_rpc, transactions[255]["address"])
-            for item in transactions[256:300]:
-                request(seed_rpc, "eth_sendRawTransaction", [item["raw"]])
-            wait_pending(leaf_rpc, transactions[299]["address"])
+            with socket.create_connection(("127.0.0.1", leaf_peer), timeout=2):
+                started = time.monotonic()
+                for item in transactions[256:300]:
+                    request(seed_rpc, "eth_sendRawTransaction", [item["raw"]])
+                wait_pending(leaf_rpc, transactions[299]["address"])
+                assert time.monotonic() - started < 4.5, "idle inbound handshake stalled active transaction gossip"
             parent = request(leaf_rpc, "eth_getBlockByNumber", ["latest", False])
             choice = {"headBlockHash": parent["hash"], "safeBlockHash": parent["hash"], "finalizedBlockHash": parent["hash"]}
             attributes = {"timestamp": hex(int(parent["timestamp"], 16) + 1), "prevRandao": ZERO, "suggestedFeeRecipient": "0x" + "00" * 20, "withdrawals": [], "parentBeaconBlockRoot": ZERO}

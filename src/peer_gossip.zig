@@ -35,6 +35,33 @@ const Slot = struct {
     invalid: u8 = 0,
 };
 
+const Handshake = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    identity: Ecdsa.KeyPair,
+    status: eth.Status,
+    inbound: ?std.Io.net.Stream = null,
+    outbound: ?struct { id: [32]u8, key: Ecdsa.PublicKey, address: std.Io.net.IpAddress } = null,
+    thread: ?std.Thread = null,
+    done: std.atomic.Value(bool) = .init(false),
+    connection: ?peer.Peer = null,
+    failure: ?anyerror = null,
+
+    /// Complete one bounded RLPx setup without holding the gossip loop.
+    fn run(self: *Handshake) void {
+        const established = if (self.outbound) |target|
+            peer.Peer.dial(self.allocator, self.io, self.identity, target.key, target.address, self.status)
+        else
+            peer.Peer.accept(self.allocator, self.io, self.inbound.?, self.identity, self.status);
+        self.connection = established catch |err| {
+            self.failure = err;
+            self.done.store(true, .release);
+            return;
+        };
+        self.done.store(true, .release);
+    }
+};
+
 /// Owns the execution identity, discovery socket, TCP listener, and two sessions.
 pub const Service = struct {
     allocator: std.mem.Allocator,
@@ -46,6 +73,7 @@ pub const Service = struct {
     genesis_hash: [32]u8,
     fork_hash: [4]u8,
     slots: [max_peers]?Slot = .{ null, null },
+    pending: [max_peers]?*Handshake = .{ null, null },
     last_dial_ns: i96 = 0,
     next_candidate_index: usize = 0,
 
@@ -89,6 +117,7 @@ pub const Service = struct {
             self.discovery_service.step(timeout) catch |err| {
                 if (err != error.Timeout) std.log.warn("execution peer discovery: {s}", .{@errorName(err)});
             };
+            self.collectReady();
             self.acceptReady() catch |err| std.log.warn("execution peer accept: {s}", .{@errorName(err)});
             self.connectReady() catch |err| std.log.warn("execution peer dial: {s}", .{@errorName(err)});
             for (0..max_peers) |index| {
@@ -101,28 +130,34 @@ pub const Service = struct {
         }
     }
 
-    /// Accept only a discovered and signature-checked peer identity.
+    /// Move one accepted socket to a bounded handshake worker.
     fn acceptReady(self: *Service) !void {
         var descriptors = [_]std.posix.pollfd{.{ .fd = self.listener.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
         if (try std.posix.poll(&descriptors, 0) == 0) return;
         const stream = try self.listener.accept(self.io);
-        const index = self.freeSlot() orelse {
+        const index = self.freePending() orelse {
             stream.close(self.io);
             return;
         };
-        var connection = try peer.Peer.accept(self.allocator, self.io, stream, self.identity, try self.localStatus());
-        errdefer connection.deinit();
-        const id = nodeId(connection.remote);
-        const record = self.discovery_service.discoveredRecord(id) orelse return error.UndiscoveredPeer;
-        const compressed = connection.remote.toCompressedSec1();
-        if (!std.mem.eql(u8, &record.public_key, &compressed) or !safeEndpoint(self.discovery_service.local_record.ip, record.ip)) return error.InvalidPeerIdentity;
-        if (self.hasPeer(id)) return error.DuplicatePeer;
-        self.slots[index] = .{ .connection = connection, .id = id };
+        if (self.reservedCount() >= max_peers) {
+            stream.close(self.io);
+            return;
+        }
+        errdefer stream.close(self.io);
+        const task = try self.allocator.create(Handshake);
+        errdefer self.allocator.destroy(task);
+        task.* = .{ .allocator = self.allocator, .io = self.io, .identity = self.identity, .status = try self.localStatus(), .inbound = stream };
+        task.thread = try std.Thread.spawn(.{}, Handshake.run, .{task});
+        self.pending[index] = task;
     }
 
-    /// Dial one verified candidate at a time; node ID order prevents reciprocal dials.
+    /// Start one verified outbound connection without blocking active peers.
     fn connectReady(self: *Service) !void {
-        const index = self.freeSlot() orelse return;
+        const index = self.freePending() orelse return;
+        if (self.reservedCount() >= max_peers) return;
+        for (self.pending) |task| if (task) |active| {
+            if (active.outbound != null) return;
+        };
         const now_ns = now(self.io);
         if (now_ns - self.last_dial_ns < dial_interval_ns) return;
         const candidates = self.discovery_service.candidates.items.items;
@@ -135,9 +170,41 @@ pub const Service = struct {
             self.next_candidate_index = (candidate_index + 1) % candidates.len;
             const remote = try Ecdsa.PublicKey.fromSec1(&record.public_key);
             const address: std.Io.net.IpAddress = .{ .ip4 = .{ .bytes = record.ip, .port = record.tcp_port } };
-            const connection = try peer.Peer.dial(self.allocator, self.io, self.identity, remote, address, try self.localStatus());
-            self.slots[index] = .{ .connection = connection, .id = record.node_id };
+            const task = try self.allocator.create(Handshake);
+            errdefer self.allocator.destroy(task);
+            task.* = .{ .allocator = self.allocator, .io = self.io, .identity = self.identity, .status = try self.localStatus(), .outbound = .{ .id = record.node_id, .key = remote, .address = address } };
+            task.thread = try std.Thread.spawn(.{}, Handshake.run, .{task});
+            self.pending[index] = task;
             return;
+        }
+    }
+
+    /// Adopt completed authenticated sessions only after rechecking discovery and capacity.
+    fn collectReady(self: *Service) void {
+        for (&self.pending) |*item| {
+            const task = item.* orelse continue;
+            if (!task.done.load(.acquire)) continue;
+            task.thread.?.join();
+            item.* = null;
+            defer self.allocator.destroy(task);
+            if (task.failure) |err| {
+                std.log.warn("execution peer handshake: {s}", .{@errorName(err)});
+                continue;
+            }
+            var connection = task.connection.?;
+            const id = nodeId(connection.remote);
+            const record = self.discovery_service.discoveredRecord(id) orelse {
+                connection.deinit();
+                continue;
+            };
+            const compressed = connection.remote.toCompressedSec1();
+            const expected = if (task.outbound) |target| std.mem.eql(u8, &target.id, &id) else true;
+            const slot_index = self.freeSlot();
+            if (!expected or !std.mem.eql(u8, &record.public_key, &compressed) or !safeEndpoint(self.discovery_service.local_record.ip, record.ip) or self.hasPeer(id) or slot_index == null) {
+                connection.deinit();
+                continue;
+            }
+            self.slots[slot_index.?] = .{ .connection = connection, .id = id };
         }
     }
 
@@ -291,6 +358,24 @@ pub const Service = struct {
     fn freeSlot(self: *const Service) ?usize {
         for (self.slots, 0..) |slot, i| if (slot == null) return i;
         return null;
+    }
+
+    /// Return a vacant worker slot under the pending-handshake cap.
+    fn freePending(self: *const Service) ?usize {
+        for (self.pending, 0..) |task, i| if (task == null) return i;
+        return null;
+    }
+
+    /// Count active and pending connections before accepting more work.
+    fn reservedCount(self: *const Service) usize {
+        var count: usize = 0;
+        for (self.slots) |slot| if (slot != null) {
+            count += 1;
+        };
+        for (self.pending) |task| if (task != null) {
+            count += 1;
+        };
+        return count;
     }
 
     /// Check whether an authenticated node ID already owns a slot.

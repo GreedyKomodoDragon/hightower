@@ -14,6 +14,7 @@ const eth = @import("rlpx_eth.zig");
 
 const Ecdsa = std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
 const handshake_timeout_ns: i96 = 5 * std.time.ns_per_s;
+const connect_timeout_ms: u64 = 3000;
 const idle_timeout_ms: i32 = 5000;
 const send_timeout_seconds = 5;
 
@@ -37,7 +38,7 @@ pub const Peer = struct {
 
     /// Dial an already verified ENR endpoint and authenticate its static key.
     pub fn dial(allocator: std.mem.Allocator, io: std.Io, local: Ecdsa.KeyPair, remote: Ecdsa.PublicKey, address: std.Io.net.IpAddress, status: eth.Status) !Peer {
-        const stream = try address.connect(io, .{ .mode = .stream });
+        const stream = try connectBounded(address);
         errdefer stream.close(io);
         try limitSendTime(stream);
         var nonce: [32]u8 = undefined;
@@ -146,6 +147,38 @@ pub const Peer = struct {
         return error.ExpectedStatus;
     }
 };
+
+/// Connect an IPv4 TCP socket within a fixed deadline, then restore blocking I/O.
+fn connectBounded(address: std.Io.net.IpAddress) !std.Io.net.Stream {
+    if (address != .ip4) return error.UnsupportedAddress;
+    const fd = std.c.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
+    if (fd < 0) return error.SocketFailed;
+    var owned = true;
+    defer {
+        if (owned) _ = std.c.close(fd);
+    }
+    const original = std.c.fcntl(fd, std.posix.F.GETFL);
+    if (original < 0) return error.SocketFailed;
+    var flags: std.posix.O = @bitCast(@as(u32, @intCast(original)));
+    flags.NONBLOCK = true;
+    if (std.c.fcntl(fd, std.posix.F.SETFL, @as(c_int, @bitCast(flags))) < 0) return error.SocketFailed;
+    const endpoint: std.posix.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, address.ip4.port), .addr = @bitCast(address.ip4.bytes) };
+    switch (std.c.errno(std.c.connect(fd, @ptrCast(&endpoint), @sizeOf(@TypeOf(endpoint))))) {
+        .SUCCESS => {},
+        .INPROGRESS => {
+            var descriptors = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.OUT, .revents = 0 }};
+            if (try std.posix.poll(&descriptors, connect_timeout_ms) == 0) return error.Timeout;
+            var socket_error: c_int = 0;
+            var error_size: std.c.socklen_t = @sizeOf(c_int);
+            if (std.c.getsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.ERROR, &socket_error, &error_size) < 0 or socket_error != 0) return error.ConnectFailed;
+        },
+        .CONNREFUSED => return error.ConnectionRefused,
+        else => return error.ConnectFailed,
+    }
+    if (std.c.fcntl(fd, std.posix.F.SETFL, original) < 0) return error.SocketFailed;
+    owned = false;
+    return .{ .socket = .{ .handle = fd, .address = address } };
+}
 
 /// Bound writes so a nonreading peer cannot hold the single gossip loop indefinitely.
 fn limitSendTime(stream: std.Io.net.Stream) !void {
