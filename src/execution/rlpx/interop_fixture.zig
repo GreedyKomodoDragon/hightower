@@ -4,8 +4,9 @@
 //
 // Geth status -> Zig announcement -> Geth request -> Zig response
 const std = @import("std");
-const peer = @import("rlpx_peer.zig");
-const eth = @import("rlpx_eth.zig");
+const rlpx = @import("rlpx");
+const peer = rlpx.peer;
+const eth = rlpx.eth;
 const Ecdsa = std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
 
 /// Dial a local Geth fixture on the given port and supply one signed transaction.

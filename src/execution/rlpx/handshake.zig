@@ -6,8 +6,8 @@
 // static ECDH + signed nonce -> auth -> ack -> encrypted frames
 const std = @import("std");
 const rlp = @import("rlp");
-const ecies = @import("rlpx_ecies.zig");
-const frame = @import("rlpx_frame.zig");
+const ecies = @import("ecies.zig");
+const frame = @import("frame.zig");
 const crypto = @import("execution").crypto;
 
 const Ecdsa = std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256;

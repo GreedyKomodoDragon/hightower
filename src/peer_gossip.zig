@@ -11,8 +11,9 @@ const consensus = @import("consensus");
 const enr = consensus.ENR;
 const discovery = consensus.Discv5Discovery;
 const rpc = execution.rpc;
-const peer = @import("execution/rlpx_peer.zig");
-const eth = @import("execution/rlpx_eth.zig");
+const rlpx = @import("rlpx");
+const peer = rlpx.peer;
+const eth = rlpx.eth;
 const Ecdsa = std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
 
 pub const max_peers: usize = 2;

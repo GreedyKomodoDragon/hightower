@@ -452,13 +452,22 @@ pub fn build(b: *std.Build) void {
     });
     const engine_test_server_step = b.step("engine-test-server", "Build the loopback Engine API test server");
     engine_test_server_step.dependOn(&b.addInstallArtifact(engine_test_server, .{}).step);
+    const rlpx_mod = b.createModule(.{
+        .root_source_file = b.path("src/execution/rlpx/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "execution", .module = execution_mod },
+            .{ .name = "rlp", .module = rlp_mod },
+        },
+    });
     const peer_gossip_mod = b.createModule(.{
         .root_source_file = b.path("src/peer_gossip.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "execution", .module = execution_mod },
-            .{ .name = "rlp", .module = rlp_mod },
+            .{ .name = "rlpx", .module = rlpx_mod },
             .{ .name = "consensus", .module = consensus_mod },
         },
     });
@@ -479,12 +488,12 @@ pub fn build(b: *std.Build) void {
     const execution_rlpx_fixture = b.addExecutable(.{
         .name = "hightower-execution-rlpx-fixture",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/execution/rlpx_interop_fixture.zig"),
+            .root_source_file = b.path("src/execution/rlpx/interop_fixture.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "execution", .module = execution_mod },
-                .{ .name = "rlp", .module = rlp_mod },
+                .{ .name = "rlpx", .module = rlpx_mod },
             },
         }),
     });

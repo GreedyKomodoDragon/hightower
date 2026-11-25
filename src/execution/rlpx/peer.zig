@@ -6,11 +6,11 @@
 // TCP -> auth/ack -> Hello -> eth Status -> bounded pool messages
 const std = @import("std");
 const rlp = @import("rlp");
-const ecies = @import("rlpx_ecies.zig");
-const handshake = @import("rlpx_handshake.zig");
-const frame = @import("rlpx_frame.zig");
-const snappy = @import("rlpx_snappy.zig");
-const eth = @import("rlpx_eth.zig");
+const ecies = @import("ecies.zig");
+const handshake = @import("handshake.zig");
+const frame = @import("frame.zig");
+const snappy = @import("snappy.zig");
+const eth = @import("eth.zig");
 
 const Ecdsa = std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
 const handshake_timeout_ns: i96 = 5 * std.time.ns_per_s;
