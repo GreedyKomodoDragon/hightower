@@ -69,7 +69,12 @@ pub const Service = struct {
 
     /// Bind UDP, sign the local ENR, and allocate a discovery table of 1..256 peers.
     pub fn init(allocator: std.mem.Allocator, io: std.Io, key_pair: Ecdsa.KeyPair, local: enr.Local, max_peers: usize) !Service {
-        var socket = try udp.Socket.bind(io, local.ip, local.udp_port);
+        return initWithBind(allocator, io, key_pair, local, local.ip, max_peers);
+    }
+
+    /// Bind UDP locally while signing a separately configured advertised IPv4 address.
+    pub fn initWithBind(allocator: std.mem.Allocator, io: std.Io, key_pair: Ecdsa.KeyPair, local: enr.Local, bind_ip: [4]u8, max_peers: usize) !Service {
+        var socket = try udp.Socket.bind(io, bind_ip, local.udp_port);
         errdefer socket.deinit();
         var advertised = local;
         advertised.udp_port = socket.address().ip4.port;

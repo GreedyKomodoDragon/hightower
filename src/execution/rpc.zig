@@ -21,8 +21,6 @@ const max_fee_history = 128;
 const max_trace_frames = 1024;
 const max_trace_steps = 1_000_000;
 const max_trace_bytes = 1024 * 1024;
-const max_peer_transactions = 256;
-const max_peer_raw_bytes = 3 * 1024 * 1024;
 const trace_deadline_ns = 2 * std.time.ns_per_s;
 const priority_fee: u64 = 1_000_000_000;
 
@@ -61,7 +59,6 @@ const Method = enum {
     eth_call,
     eth_estimateGas,
     eth_sendRawTransaction,
-    hightower_peerTransactions,
     eth_getTransactionReceipt,
     eth_getLogs,
     debug_traceTransaction,
@@ -384,21 +381,6 @@ pub const Server = struct {
                 const tx_context = self.context(header);
                 const hash = try self.pool.admit(self.world, tx_context, self.settings, raw);
                 return string(try hex(a, &hash));
-            },
-            .hightower_peerTransactions => {
-                try noParams(params);
-                var result = array(a);
-                var bytes: usize = 0;
-                var count: usize = 0;
-                for (self.pool.entries.items) |entry| {
-                    if (count == max_peer_transactions) break;
-                    const network_transaction = entry.sidecar orelse entry.raw;
-                    if (network_transaction.len > max_peer_raw_bytes - bytes) continue;
-                    try result.array.append(string(try hex(a, network_transaction)));
-                    bytes += network_transaction.len;
-                    count += 1;
-                }
-                return result;
             },
             .eth_getTransactionReceipt => {
                 if (params.len != 1) return error.InvalidParams;

@@ -452,11 +452,24 @@ pub fn build(b: *std.Build) void {
     });
     const engine_test_server_step = b.step("engine-test-server", "Build the loopback Engine API test server");
     engine_test_server_step.dependOn(&b.addInstallArtifact(engine_test_server, .{}).step);
+    const rlpx_mod = b.createModule(.{
+        .root_source_file = b.path("src/execution/rlpx/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "execution", .module = execution_mod },
+            .{ .name = "rlp", .module = rlp_mod },
+        },
+    });
     const peer_gossip_mod = b.createModule(.{
         .root_source_file = b.path("src/peer_gossip.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "execution", .module = execution_mod }},
+        .imports = &.{
+            .{ .name = "execution", .module = execution_mod },
+            .{ .name = "rlpx", .module = rlpx_mod },
+            .{ .name = "consensus", .module = consensus_mod },
+        },
     });
     const execution_service = b.addExecutable(.{
         .name = "hightower-execution",
@@ -472,6 +485,20 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(execution_service);
+    const execution_rlpx_fixture = b.addExecutable(.{
+        .name = "hightower-execution-rlpx-fixture",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/execution/rlpx/interop_fixture.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "execution", .module = execution_mod },
+                .{ .name = "rlpx", .module = rlpx_mod },
+            },
+        }),
+    });
+    const execution_rlpx_step = b.step("execution-rlpx-fixture", "Build the execution RLPx interoperability fixture");
+    execution_rlpx_step.dependOn(&b.addInstallArtifact(execution_rlpx_fixture, .{}).step);
     const execution_service_tests = b.addTest(.{ .root_module = execution_service.root_module });
     const execution_service_test_step = b.step("test-execution-service", "Run execution service tests");
     execution_service_test_step.dependOn(&b.addRunArtifact(execution_service_tests).step);
