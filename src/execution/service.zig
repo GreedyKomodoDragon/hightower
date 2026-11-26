@@ -96,6 +96,7 @@ pub fn main(init: std.process.Init) !void {
     var world = execution.state.State.init(a);
     defer world.deinit();
     const genesis = try execution.genesis.load(a, init.io, config.genesis, &world);
+    if (!genesis.supported_osaka_genesis or genesis.forks.block_count != 0 or genesis.forks.time_count != 0) return error.UnsupportedExecutionFork;
     var anchor = genesis.header;
     if (config.checkpoint_header) |path| {
         var trusted_hash: execution.Hash = .{0} ** 32;
@@ -138,7 +139,9 @@ pub fn main(init: std.process.Init) !void {
     if (parsed.peer_address) |peer_address| {
         const identity = try peer_gossip.loadIdentity(std.heap.page_allocator, init.io, config.data_dir);
         const genesis_hash = try execution.transition.headerHash(a, .osaka, genesis.header);
-        gossip = try peer_gossip.Service.init(std.heap.page_allocator, init.io, &rpc_server, identity, peer_address, parsed.advertised_ip.?, config.execution_bootnodes, genesis_hash);
+        var forks = genesis.forks;
+        forks.genesis = genesis_hash;
+        gossip = try peer_gossip.Service.init(std.heap.page_allocator, init.io, &rpc_server, identity, peer_address, parsed.advertised_ip.?, config.execution_bootnodes, forks);
         try gossip.?.start();
     }
     var engine_listener = try parsed.engine_address.listen(init.io, .{ .reuse_address = true });

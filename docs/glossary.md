@@ -126,6 +126,8 @@ Chain:      [Block 0] ───────────────────�
 | Blob bundle | The blobs, commitments, and proofs returned by an execution payload builder for blob transactions. |
 | Execution receipt | The status, gas tally, bloom, and logs produced by a transaction. |
 | Execution peer | A node discovered through a signed ENR and authenticated over RLPx. Hightower uses `eth/69` to announce and request pending transactions, with at most two peers and one outstanding request per peer. |
+| Execution fork ID | An EIP-2124 summary of an execution chain's genesis, completed rule activations, and next known activation; peers compare it to avoid connecting across incompatible fork histories. |
+| `eth` ENR entry | A signed execution node record field carrying the execution fork ID for peer discovery. |
 | RLPx | Ethereum's encrypted TCP connection protocol that authenticates execution nodes and protects devp2p messages. |
 | Execution account | An address's nonce, balance, storage root, and code hash, encoded into the execution state trie. |
 | Ethereum Virtual Machine (EVM) | The execution engine that runs a contract's bytecode one instruction at a time. |

@@ -1,17 +1,20 @@
-// Ethereum Node Records bind a discovery identity, network endpoint, fork
-// schedule, and custody promise to one secp256k1 signature. Peers must verify
-// the signature and fork fields before using an advertised address. The record
-// is capped at 300 encoded bytes; its keys are sorted and unique.
+// Ethereum Node Records bind a discovery identity and endpoint to one
+// secp256k1 signature. Fulu records promise a fork and custody count;
+// execution records carry an EIP-2124 fork ID. Peers verify the signature
+// and the relevant fork policy before using an address. Records are capped at
+// 300 encoded bytes with sorted, unique keys.
 //
 //   RLP record -> verify signature -> fork/custody gate -> discovery candidate
 const std = @import("std");
 const rlp = @import("rlp");
 const columns = @import("data_columns.zig");
+const fork_id = @import("execution").fork_id;
 
 const Ecdsa = std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
 const Scalar = std.crypto.ecc.Secp256k1.scalar;
 const Keccak = std.crypto.hash.sha3.Keccak256;
-const Field = enum { cgc, eth2, id, ip, nfd, secp256k1, tcp, udp, unknown };
+const Field = enum { cgc, eth, eth2, id, ip, nfd, secp256k1, tcp, udp, unknown };
+pub const Policy = union(enum) { consensus: [4]u8, execution: struct { schedule: fork_id.Schedule, block: u64, timestamp: u64 } };
 
 pub const Local = struct {
     sequence: u64,
@@ -21,6 +24,7 @@ pub const Local = struct {
     fork_id: [16]u8,
     next_fork_digest: [4]u8,
     custody_group_count: u64,
+    execution_fork: ?fork_id.Id = null,
 };
 
 pub const Record = struct {
@@ -33,21 +37,37 @@ pub const Record = struct {
     fork_id: [16]u8,
     next_fork_digest: [4]u8,
     custody_group_count: u64,
+    execution_fork: ?fork_id.Id = null,
 };
 
-/// Encode a locally signed, IPv4 Fulu ENR; the caller owns the returned bytes.
+/// Encode a signed IPv4 Fulu or execution ENR; the caller owns the bytes.
 pub fn encode(allocator: std.mem.Allocator, key_pair: Ecdsa.KeyPair, record: Local) ![]u8 {
-    if (record.custody_group_count < columns.custody_requirement or record.custody_group_count > columns.column_count) return error.InvalidCustodyCount;
+    if (record.execution_fork == null and (record.custody_group_count < columns.custody_requirement or record.custody_group_count > columns.column_count)) return error.InvalidCustodyCount;
     if (record.udp_port == 0 or record.tcp_port == 0) return error.InvalidEndpoint;
     var payload = std.Io.Writer.Allocating.init(allocator);
     defer payload.deinit();
     try writeInt(&payload.writer, record.sequence);
     // ENR cgc is minimal big-endian; SSZ's fixed little-endian uint64 does not apply here.
-    try writePair(&payload.writer, "cgc", record.custody_group_count);
-    try writePair(&payload.writer, "eth2", &record.fork_id);
+    if (record.execution_fork) |id| {
+        var nested = std.Io.Writer.Allocating.init(allocator);
+        defer nested.deinit();
+        try rlp.encoding.encodeString(&nested.writer, &id.hash);
+        try writeInt(&nested.writer, id.next);
+        const pair = try wrapList(allocator, nested.written());
+        defer allocator.free(pair);
+        var entry = std.Io.Writer.Allocating.init(allocator);
+        defer entry.deinit();
+        try rlp.encoding.encodeListHeader(&entry.writer, pair.len);
+        try entry.writer.writeAll(pair);
+        try rlp.encoding.encodeString(&payload.writer, "eth");
+        try payload.writer.writeAll(entry.written());
+    } else {
+        try writePair(&payload.writer, "cgc", record.custody_group_count);
+        try writePair(&payload.writer, "eth2", &record.fork_id);
+    }
     try writePair(&payload.writer, "id", "v4");
     try writePair(&payload.writer, "ip", &record.ip);
-    try writePair(&payload.writer, "nfd", &record.next_fork_digest);
+    if (record.execution_fork == null) try writePair(&payload.writer, "nfd", &record.next_fork_digest);
     const public_key = key_pair.public_key.toCompressedSec1();
     try writePair(&payload.writer, "secp256k1", &public_key);
     try writePair(&payload.writer, "tcp", record.tcp_port);
@@ -75,6 +95,11 @@ pub fn encode(allocator: std.mem.Allocator, key_pair: Ecdsa.KeyPair, record: Loc
 
 /// Parse and authenticate one bounded ENR before exposing its endpoint.
 pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) !Record {
+    return decodeWithPolicy(allocator, bytes, .consensus);
+}
+
+/// Authenticate a standard execution ENR or a Fulu consensus ENR.
+pub fn decodeWithPolicy(allocator: std.mem.Allocator, bytes: []const u8, kind: enum { consensus, execution }) !Record {
     if (bytes.len > 300) return error.RecordTooLarge;
     var value = try rlp.decode.decodeAll(allocator, bytes);
     defer value.deinit(allocator);
@@ -85,20 +110,29 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) !Record {
     if (items.len < 4 or items.len % 2 != 0) return error.InvalidRecord;
     const signature = try string(items[0]);
     if (signature.len != 64) return error.InvalidSignature;
-    // SAFETY: All fields are decoded and assigned before the record is returned.
-    var record: Record = undefined;
+    // Missing policy fields stay zero until the required-field check below.
+    var record: Record = std.mem.zeroes(Record);
     record.sequence = try integer(u64, try string(items[1]));
-    var seen: u8 = 0;
+    var seen: u16 = 0;
     var prior: []const u8 = "";
     for (1..items.len / 2) |pair_index| {
         const key = try string(items[pair_index * 2]);
-        const data = try string(items[pair_index * 2 + 1]);
+        const data_item = items[pair_index * 2 + 1];
+        const data = if (data_item == .string) data_item.string else &.{};
         if (key.len == 0 or (pair_index > 1 and std.mem.order(u8, prior, key) != .lt)) return error.InvalidRecord;
         prior = key;
         switch (std.meta.stringToEnum(Field, key) orelse .unknown) {
             .cgc => {
                 record.custody_group_count = try integer(u64, data);
                 seen |= 1;
+            },
+            .eth => {
+                if (data_item != .list or data_item.list.len == 0 or data_item.list[0] != .list or data_item.list[0].list.len != 2) return error.InvalidForkContext;
+                const fields = data_item.list[0].list;
+                const hash = try string(fields[0]);
+                if (hash.len != 4) return error.InvalidForkContext;
+                record.execution_fork = .{ .hash = hash[0..4].*, .next = try integer(u64, try string(fields[1])) };
+                seen |= 256;
             },
             .eth2 => {
                 if (data.len != 16) return error.InvalidForkContext;
@@ -135,17 +169,20 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) !Record {
             .unknown => {},
         }
     }
-    if (seen != 255 or record.custody_group_count < columns.custody_requirement or record.custody_group_count > columns.column_count or record.udp_port == 0 or record.tcp_port == 0) return error.InvalidRecord;
+    const common: u16 = 4 | 8 | 32 | 64 | 128;
+    if ((seen & common) != common or record.udp_port == 0 or record.tcp_port == 0) return error.InvalidRecord;
+    if (kind == .consensus and ((seen & 19) != 19 or record.custody_group_count < columns.custody_requirement or record.custody_group_count > columns.column_count)) return error.InvalidRecord;
+    if (kind == .execution and record.execution_fork == null) return error.InvalidRecord;
     const public_key = try Ecdsa.PublicKey.fromSec1(&record.public_key);
     var payload = std.Io.Writer.Allocating.init(allocator);
     defer payload.deinit();
-    for (items) |item| try rlp.encoding.encodeString(&payload.writer, try string(item));
+    for (items) |item| try writeValue(allocator, &payload.writer, item);
     const canonical = try wrapList(allocator, payload.written());
     defer allocator.free(canonical);
     if (!std.mem.eql(u8, bytes, canonical)) return error.InvalidRecord;
     var signed_payload = std.Io.Writer.Allocating.init(allocator);
     defer signed_payload.deinit();
-    for (items[1..]) |item| try rlp.encoding.encodeString(&signed_payload.writer, try string(item));
+    for (items[1..]) |item| try writeValue(allocator, &signed_payload.writer, item);
     const content = try wrapList(allocator, signed_payload.written());
     defer allocator.free(content);
     var digest: [32]u8 = undefined;
@@ -161,12 +198,49 @@ pub fn requireFork(record: Record, fork_digest: [4]u8) !void {
     if (!std.mem.eql(u8, record.fork_id[0..4], &fork_digest)) return error.InvalidForkContext;
 }
 
+/// Check a signed ENR against its network's discovery policy.
+pub fn requirePolicy(record: Record, policy: Policy) !void {
+    switch (policy) {
+        .consensus => |digest| try requireFork(record, digest),
+        .execution => |context| {
+            const remote = record.execution_fork orelse return error.InvalidForkContext;
+            if (!context.schedule.compatible(context.block, context.timestamp, remote)) return error.InvalidForkContext;
+        },
+    }
+}
+
+/// Keep execution discovery within the local endpoint's routing scope.
+pub fn safeExecutionEndpoint(local: [4]u8, remote: [4]u8) bool {
+    if (remote[0] == 0 or remote[0] >= 224 or remote[0] == 169 and remote[1] == 254 or remote[0] == 100 and remote[1] >= 64 and remote[1] < 128) return false;
+    if (remote[0] == 192 and remote[1] == 0 and (remote[2] == 0 or remote[2] == 2)) return false;
+    if (remote[0] == 198 and (remote[1] == 18 or remote[1] == 19 or remote[1] == 51 and remote[2] == 100)) return false;
+    if (remote[0] == 203 and remote[1] == 0 and remote[2] == 113) return false;
+    if (remote[0] == 127) return local[0] == 127 and remote[1] == 0 and remote[2] == 0 and remote[3] != 0;
+    const private_remote = remote[0] == 10 or remote[0] == 172 and remote[1] >= 16 and remote[1] <= 31 or remote[0] == 192 and remote[1] == 168;
+    if (!private_remote) return true;
+    return remote[0] == local[0] and remote[1] == local[1] and remote[2] == local[2];
+}
+
 /// Return the byte string in an RLP item.
 fn string(value: rlp.decode.Value) ![]const u8 {
     return switch (value) {
         .string => |bytes| bytes,
         else => error.InvalidRecord,
     };
+}
+
+/// Serialize nested ENR entry values for canonical and signature checks.
+fn writeValue(allocator: std.mem.Allocator, writer: *std.Io.Writer, value: rlp.decode.Value) !void {
+    switch (value) {
+        .string => |data| return rlp.encoding.encodeString(writer, data),
+        .list => |items| {
+            var nested = std.Io.Writer.Allocating.init(allocator);
+            defer nested.deinit();
+            for (items) |item| try writeValue(allocator, &nested.writer, item);
+            try rlp.encoding.encodeListHeader(writer, nested.written().len);
+            return writer.writeAll(nested.written());
+        },
+    }
 }
 
 /// Decode a canonical big-endian ENR integer.
@@ -250,4 +324,24 @@ test "all locally signed ENRs use low-S signatures accepted by external secp256k
         try std.testing.expect(std.mem.readInt(u256, signature[32..64], .big) <= Scalar.field_order / 2);
         _ = try decode(allocator, bytes);
     }
+}
+
+test "execution ENR verifies its signed eth fork entry without consensus fields" {
+    const allocator = std.testing.allocator;
+    const key = try Ecdsa.KeyPair.generateDeterministic([_]u8{81} ** 32);
+    const schedule = fork_id.Schedule{ .genesis = .{3} ** 32, .genesis_time = 0 };
+    const local = Local{ .sequence = 1, .ip = .{ 127, 0, 0, 1 }, .udp_port = 30303, .tcp_port = 30303, .fork_id = .{0} ** 16, .next_fork_digest = .{0} ** 4, .custody_group_count = 0, .execution_fork = schedule.at(0, 0) };
+    const bytes = try encode(allocator, key, local);
+    defer allocator.free(bytes);
+    const record = try decodeWithPolicy(allocator, bytes, .execution);
+    try requirePolicy(record, .{ .execution = .{ .schedule = schedule, .block = 0, .timestamp = 0 } });
+    try std.testing.expectError(error.InvalidRecord, decode(allocator, bytes));
+    var other = schedule;
+    other.genesis = .{4} ** 32;
+    try std.testing.expectError(error.InvalidForkContext, requirePolicy(record, .{ .execution = .{ .schedule = other, .block = 0, .timestamp = 0 } }));
+    const tampered = try allocator.dupe(u8, bytes);
+    defer allocator.free(tampered);
+    tampered[tampered.len - 1] ^= 1;
+    try std.testing.expectError(error.SignatureVerificationFailed, decodeWithPolicy(allocator, tampered, .execution));
+    try std.testing.expect(!safeExecutionEndpoint(.{ 8, 8, 8, 8 }, .{ 127, 0, 0, 1 }));
 }

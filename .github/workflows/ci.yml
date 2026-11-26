@@ -115,6 +115,7 @@ jobs:
           chmod +x "$RUNNER_TEMP/geth-bin"
       - run: zig build
       - run: python3 scripts/test_execution_service.py --geth-bin "$RUNNER_TEMP/geth-bin"
+      - run: python3 scripts/test_execution_geth_gossip.py --geth-bin "$RUNNER_TEMP/geth-bin"
 
   discv5-interop:
     name: Geth discv5 interoperability

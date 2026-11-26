@@ -5,7 +5,7 @@
 // ID. A verified handshake can update the peer table and create a responder
 // session; configured bootstrap ENRs are verified before an initiator probes.
 // FINDNODE requests then exchange signed ENRs at authenticated XOR distances;
-// admission follows signature, fork, and distance checks.
+// admission follows signature, network-specific fork policy, and distance checks.
 //
 //   ENR probe -> WHOAREYOU -> verified handshake PING -> session PONG
 //   session FINDNODE -> bounded NODES -> verified candidate table
@@ -74,14 +74,30 @@ pub const Service = struct {
 
     /// Bind UDP locally while signing a separately configured advertised IPv4 address.
     pub fn initWithBind(allocator: std.mem.Allocator, io: std.Io, key_pair: Ecdsa.KeyPair, local: enr.Local, bind_ip: [4]u8, max_peers: usize) !Service {
+        return initWithPolicy(allocator, io, key_pair, local, bind_ip, max_peers, .{ .consensus = local.fork_id[0..4].* });
+    }
+
+    /// Bind execution discovery with an EIP-2124 fork policy.
+    pub fn initExecution(allocator: std.mem.Allocator, io: std.Io, key_pair: Ecdsa.KeyPair, local: enr.Local, bind_ip: [4]u8, max_peers: usize, context: @FieldType(enr.Policy, "execution")) !Service {
+        return initWithPolicy(allocator, io, key_pair, local, bind_ip, max_peers, .{ .execution = context });
+    }
+
+    /// Bind and sign the ENR using the selected network policy.
+    fn initWithPolicy(allocator: std.mem.Allocator, io: std.Io, key_pair: Ecdsa.KeyPair, local: enr.Local, bind_ip: [4]u8, max_peers: usize, policy: enr.Policy) !Service {
         var socket = try udp.Socket.bind(io, bind_ip, local.udp_port);
         errdefer socket.deinit();
         var advertised = local;
         advertised.udp_port = socket.address().ip4.port;
         const local_enr = try enr.encode(allocator, key_pair, advertised);
         errdefer allocator.free(local_enr);
-        const local_record = try enr.decode(allocator, local_enr);
-        const candidates = try bootstrap.Candidates.init(allocator, local.fork_id[0..4].*, max_peers);
+        const local_record = try enr.decodeWithPolicy(allocator, local_enr, switch (policy) {
+            .consensus => .consensus,
+            .execution => .execution,
+        });
+        const candidates = switch (policy) {
+            .consensus => |digest| try bootstrap.Candidates.init(allocator, digest, max_peers),
+            .execution => |context| try bootstrap.Candidates.initExecution(allocator, context, local.ip, max_peers),
+        };
         return .{ .allocator = allocator, .io = io, .key_pair = key_pair, .socket = socket, .local_enr = local_enr, .local_record = local_record, .candidates = candidates };
     }
 
@@ -284,7 +300,7 @@ pub const Service = struct {
         for (self.challenges.items, 0..) |pending, index| {
             if (!std.mem.eql(u8, &pending.id, &source_id) or !std.meta.eql(pending.endpoint, datagram.from)) continue;
             if (self.expired(pending.started_ns)) return error.ChallengeExpired;
-            const accepted = try handshake.decodePacket(self.allocator, self.local_record.node_id, self.key_pair.secret_key, pending.data, self.candidates.get(source_id), self.candidates.fork_digest, datagram.bytes);
+            const accepted = try handshake.decodePacketWithPolicy(self.allocator, self.local_record.node_id, self.key_pair.secret_key, pending.data, self.candidates.get(source_id), self.candidates.policy, datagram.bytes);
             defer accepted.deinit(self.allocator);
             try udp.requireEndpoint(accepted.record, datagram.from);
             try trace.emit("discovery_handshake_authenticated", .{ .peer = std.fmt.bytesToHex(source_id, .lower) }, accepted.plaintext);
@@ -379,7 +395,7 @@ pub const Service = struct {
 
     /// Send one signed ENR or an empty result through a directional session.
     fn sendNodesChunk(self: *Service, session: *Session, requester: enr.Record, request_id: messages.RequestId, total: u8, records: []const []const u8) !void {
-        const plaintext = try messages.encodeNodes(self.allocator, request_id, total, records, self.candidates.fork_digest);
+        const plaintext = try messages.encodeNodesWithPolicy(self.allocator, request_id, total, records, self.candidates.policy);
         defer self.allocator.free(plaintext);
         const packet = try session.send(plaintext);
         defer self.allocator.free(packet);
@@ -390,7 +406,7 @@ pub const Service = struct {
     fn handleNodes(self: *Service, peer: *Peer, plaintext: []const u8) !void {
         const query = if (peer.find_query) |*pending| pending else return error.UnsolicitedNodes;
         if (self.now() - query.started_ns > findnode_lifetime_ns) return error.RequestExpired;
-        const nodes = try messages.decodeNodes(self.allocator, plaintext, self.candidates.fork_digest);
+        const nodes = try messages.decodeNodesWithPolicy(self.allocator, plaintext, self.candidates.policy);
         if (!std.mem.eql(u8, query.request.request_id.slice(), nodes.request_id.slice())) return error.WrongRequestId;
         if (query.total != 0 and query.total != nodes.total or query.received >= nodes.total) return error.InvalidNodes;
         for (nodes.records[0..nodes.count]) |record| {

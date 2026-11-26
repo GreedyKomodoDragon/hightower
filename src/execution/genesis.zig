@@ -8,7 +8,7 @@
 const std = @import("std");
 const execution = @import("execution.zig");
 
-pub const Result = struct { header: execution.Header, chain_id: u256 };
+pub const Result = struct { header: execution.Header, chain_id: u256, forks: execution.fork_id.Schedule, supported_osaka_genesis: bool };
 
 /// Loads the supported Osaka genesis format and its configured chain ID.
 pub fn load(a: std.mem.Allocator, io: std.Io, path: []const u8, world: *execution.state.State) !Result {
@@ -83,7 +83,54 @@ pub fn load(a: std.mem.Allocator, io: std.Io, path: []const u8, world: *executio
     while (fields.next()) |item| {
         if (!allowedField(item.key_ptr.*, &.{ "config", "alloc", "nonce", "timestamp", "extraData", "gasLimit", "difficulty", "mixHash", "coinbase", "number", "gasUsed", "parentHash", "baseFeePerGas", "excessBlobGas", "blobGasUsed", "slotNumber" })) return error.UnsupportedGenesisHeaderField;
     }
-    return .{ .header = header, .chain_id = chain_id };
+    var forks = execution.fork_id.Schedule{ .genesis = .{0} ** 32, .genesis_time = header.timestamp };
+    var config_fields = config.object.iterator();
+    while (config_fields.next()) |item| {
+        const name = item.key_ptr.*;
+        if (std.mem.endsWith(u8, name, "Block") or std.mem.endsWith(u8, name, "Time")) {
+            if (!allowedField(name, &.{ "homesteadBlock", "daoForkBlock", "eip150Block", "eip155Block", "eip158Block", "byzantiumBlock", "constantinopleBlock", "petersburgBlock", "istanbulBlock", "muirGlacierBlock", "berlinBlock", "londonBlock", "arrowGlacierBlock", "grayGlacierBlock", "mergeNetsplitBlock", "shanghaiTime", "cancunTime", "pragueTime", "osakaTime" })) return error.UnsupportedExecutionFork;
+            if (item.value_ptr.* == .null) continue;
+            const activation = switch (item.value_ptr.*) {
+                .integer => |value| if (value >= 0) @as(u64, @intCast(value)) else return error.InvalidGenesis,
+                else => return error.InvalidGenesis,
+            };
+            try forks.add(std.mem.endsWith(u8, name, "Time"), activation);
+        }
+    }
+    return .{ .header = header, .chain_id = chain_id, .forks = forks, .supported_osaka_genesis = supportsOsakaGenesis(config, header) };
+}
+
+/// Check that the configured rules and blob limits match Hightower's Osaka engine.
+fn supportsOsakaGenesis(config: std.json.Value, header: execution.Header) bool {
+    if (header.number != 0 or header.difficulty != 0) return false;
+    for ([_][]const u8{ "homesteadBlock", "eip150Block", "eip155Block", "eip158Block", "byzantiumBlock", "constantinopleBlock", "petersburgBlock", "istanbulBlock", "muirGlacierBlock", "berlinBlock", "londonBlock", "arrowGlacierBlock", "grayGlacierBlock", "mergeNetsplitBlock" }) |name| {
+        const value = config.object.get(name) orelse if (std.mem.eql(u8, name, "mergeNetsplitBlock")) continue else return false;
+        if (value != .integer or value.integer != 0) return false;
+    }
+    for ([_][]const u8{ "shanghaiTime", "cancunTime", "pragueTime", "osakaTime" }) |name| {
+        const value = config.object.get(name) orelse return false;
+        if (value != .integer or value.integer < 0 or value.integer > header.timestamp) return false;
+    }
+    const terminal = config.object.get("terminalTotalDifficulty") orelse return false;
+    if (terminal != .integer or terminal.integer != 0) return false;
+    const schedule = config.object.get("blobSchedule") orelse return false;
+    if (schedule != .object or schedule.object.count() != 2) return false;
+    for ([_]struct { name: []const u8, target: i64, max: i64, fraction: i64 }{
+        .{ .name = "cancun", .target = 3, .max = 6, .fraction = 3_338_477 },
+        .{ .name = "prague", .target = 6, .max = 9, .fraction = 5_007_716 },
+    }) |expected| {
+        const entry = schedule.object.get(expected.name) orelse return false;
+        if (entry != .object or entry.object.count() != 3) return false;
+        for ([_]struct { name: []const u8, value: i64 }{
+            .{ .name = "target", .value = expected.target },
+            .{ .name = "max", .value = expected.max },
+            .{ .name = "baseFeeUpdateFraction", .value = expected.fraction },
+        }) |field_expected| {
+            const value = entry.object.get(field_expected.name) orelse return false;
+            if (value != .integer or value.integer != field_expected.value) return false;
+        }
+    }
+    return true;
 }
 
 /// Checks whether a supplied genesis field belongs to the supported format.
