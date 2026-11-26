@@ -95,6 +95,10 @@ jobs:
           echo "GETH_BIN=$RUNNER_TEMP/geth-bin" >> "$GITHUB_ENV"
       - name: Geth ${{ matrix.version }} Engine API interoperability
         run: bash scripts/test_engine_interop.sh ${{ matrix.version }}
+      - if: matrix.version == 'v1.17.10'
+        run: zig build
+      - if: matrix.version == 'v1.17.10'
+        run: python3 scripts/test_execution_geth_gossip.py --geth-bin "$GETH_BIN"
 
   execution-differential:
     if: github.event_name == 'workflow_dispatch' && inputs.execution_differential

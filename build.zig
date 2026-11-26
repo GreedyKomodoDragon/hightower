@@ -500,8 +500,10 @@ pub fn build(b: *std.Build) void {
     const execution_rlpx_step = b.step("execution-rlpx-fixture", "Build the execution RLPx interoperability fixture");
     execution_rlpx_step.dependOn(&b.addInstallArtifact(execution_rlpx_fixture, .{}).step);
     const execution_service_tests = b.addTest(.{ .root_module = execution_service.root_module });
+    const peer_gossip_tests = b.addTest(.{ .root_module = peer_gossip_mod });
     const execution_service_test_step = b.step("test-execution-service", "Run execution service tests");
     execution_service_test_step.dependOn(&b.addRunArtifact(execution_service_tests).step);
+    execution_service_test_step.dependOn(&b.addRunArtifact(peer_gossip_tests).step);
     const runtime_fixture = b.addExecutable(.{
         .name = "hightower-runtime-fixture",
         .root_module = b.createModule(.{

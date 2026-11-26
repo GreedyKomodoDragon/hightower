@@ -51,7 +51,7 @@ pub const ReceivedPacket = struct {
 /// Encode a handshake with the signed local ENR and an encrypted first message.
 /// The caller supplies a fresh ephemeral secret, unique nonce, IV, and pending challenge.
 pub fn encodePacket(allocator: std.mem.Allocator, initiator: Ecdsa.KeyPair, local_enr: []const u8, recipient: enr.Record, challenge: [63]u8, ephemeral_secret: Ecdsa.SecretKey, masking_iv: [16]u8, nonce: [12]u8, plaintext: []const u8) !SentPacket {
-    const local = try enr.decode(allocator, local_enr);
+    const local = enr.decode(allocator, local_enr) catch try enr.decodeWithPolicy(allocator, local_enr, .execution);
     if (!std.mem.eql(u8, &local.node_id, &nodeId(initiator.public_key))) return error.InvalidNodeId;
     const started = try deriveInitiator(challenge, local.node_id, recipient.node_id, recipient.public_key, ephemeral_secret);
     const signature = try signIdProof(initiator, challenge, started.ephemeral_public_key, recipient.node_id);
@@ -84,6 +84,11 @@ pub fn encodePacket(allocator: std.mem.Allocator, initiator: Ecdsa.KeyPair, loca
 /// Verify a pending challenge, ENR, identity proof, and encrypted first message.
 /// A cached record must already be signature-verified; the caller consumes each challenge once.
 pub fn decodePacket(allocator: std.mem.Allocator, recipient_id: [32]u8, recipient_secret: Ecdsa.SecretKey, challenge: [63]u8, cached_record: ?enr.Record, fork_digest: [4]u8, datagram: []const u8) !ReceivedPacket {
+    return decodePacketWithPolicy(allocator, recipient_id, recipient_secret, challenge, cached_record, .{ .consensus = fork_digest }, datagram);
+}
+
+/// Verify an execution or consensus handshake with the matching ENR policy.
+pub fn decodePacketWithPolicy(allocator: std.mem.Allocator, recipient_id: [32]u8, recipient_secret: Ecdsa.SecretKey, challenge: [63]u8, cached_record: ?enr.Record, policy: enr.Policy, datagram: []const u8) !ReceivedPacket {
     const summary = try packets.inspect(recipient_id, datagram);
     if (summary.kind != .handshake or summary.authdata_size < authdata_fixed_size or summary.authdata_size > max_authdata_size) return error.InvalidPacketHeader;
     const header_size = static_header_size + summary.authdata_size;
@@ -93,8 +98,11 @@ pub fn decodePacket(allocator: std.mem.Allocator, recipient_id: [32]u8, recipien
     if (header[55] != 64 or header[56] != 33) return error.InvalidPacketHeader;
     const source_id: [32]u8 = header[23..55].*;
     const record_bytes = header[154..header_size];
-    const record = if (record_bytes.len > 0) try enr.decode(allocator, record_bytes) else cached_record orelse return error.MissingRecord;
-    try enr.requireFork(record, fork_digest);
+    const record = if (record_bytes.len > 0) try enr.decodeWithPolicy(allocator, record_bytes, switch (policy) {
+        .consensus => .consensus,
+        .execution => .execution,
+    }) else cached_record orelse return error.MissingRecord;
+    try enr.requirePolicy(record, policy);
     if (!std.mem.eql(u8, &record.node_id, &source_id)) return error.InvalidNodeId;
     if (record_bytes.len == 0) {
         const advertised_sequence = std.mem.readInt(u64, challenge[55..63], .big);

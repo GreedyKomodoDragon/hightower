@@ -14,6 +14,7 @@ const rpc = execution.rpc;
 const rlpx = @import("rlpx");
 const peer = rlpx.peer;
 const eth = rlpx.eth;
+const fork_id = execution.fork_id;
 const Ecdsa = std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
 
 pub const max_peers: usize = 2;
@@ -32,8 +33,27 @@ const Slot = struct {
     pending_since_ns: i96 = 0,
     pending_hashes: [eth.max_hashes][32]u8 = .{.{0} ** 32} ** eth.max_hashes,
     pending_count: usize = 0,
+    queued_hashes: [eth.max_announced_hashes][32]u8 = .{.{0} ** 32} ** eth.max_announced_hashes,
+    queued_count: usize = 0,
+    queued_index: usize = 0,
     request_id: u64 = 0,
     invalid: u8 = 0,
+
+    /// Reuse consumed queue slots before admitting another bounded announcement.
+    fn queueAnnouncements(self: *Slot, announced: []const eth.Announcement) void {
+        if (self.queued_index != 0) {
+            const remaining = self.queued_count - self.queued_index;
+            std.mem.copyForwards([32]u8, self.queued_hashes[0..remaining], self.queued_hashes[self.queued_index..self.queued_count]);
+            self.queued_count = remaining;
+            self.queued_index = 0;
+        }
+        // shortcut: hashes beyond the 4,096-entry queue are dropped, add backpressure if larger announcements must be retained.
+        for (announced) |item| {
+            if (self.queued_count == eth.max_announced_hashes) break;
+            self.queued_hashes[self.queued_count] = item.hash;
+            self.queued_count += 1;
+        }
+    }
 };
 
 const Handshake = struct {
@@ -71,35 +91,31 @@ pub const Service = struct {
     identity: Ecdsa.KeyPair,
     listener: std.Io.net.Server,
     discovery_service: discovery.Service,
-    genesis_hash: [32]u8,
-    fork_hash: [4]u8,
+    forks: fork_id.Schedule,
     slots: [max_peers]?Slot = .{ null, null },
     pending: [max_peers]?*Handshake = .{ null, null },
     last_dial_ns: i96 = 0,
     next_candidate_index: usize = 0,
 
     /// Bind execution TCP and UDP on one port and verify configured seed ENRs.
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, server: *rpc.Server, identity: Ecdsa.KeyPair, bind: std.Io.net.IpAddress, advertised_ip: [4]u8, seeds: []const []const u8, genesis_hash: [32]u8) !Service {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, server: *rpc.Server, identity: Ecdsa.KeyPair, bind: std.Io.net.IpAddress, advertised_ip: [4]u8, seeds: []const []const u8, forks: fork_id.Schedule) !Service {
         var listener = try bind.listen(io, .{ .reuse_address = true });
         errdefer listener.deinit(io);
-        var fork_hash: [4]u8 = undefined;
-        std.mem.writeInt(u32, &fork_hash, std.hash.Crc32.hash(&genesis_hash), .big);
-        var fork_id: [16]u8 = .{0} ** 16;
-        @memcpy(fork_id[0..4], &fork_hash);
+        const current = forks.at(server.chain.latest().header.number, server.chain.latest().header.timestamp);
         const advertised = enr.Local{
             .sequence = @intCast(@max(1, std.Io.Clock.real.now(io).nanoseconds)),
             .ip = advertised_ip,
             .udp_port = listener.socket.address.ip4.port,
             .tcp_port = listener.socket.address.ip4.port,
-            .fork_id = fork_id,
+            .fork_id = .{0} ** 16,
             .next_fork_digest = .{0} ** 4,
             .custody_group_count = 4,
+            .execution_fork = current,
         };
-        // shortcut: execution ENRs reuse the signed fork-gated codec; use generic ENRs when public EL bootnodes are supported.
-        var disc = try discovery.Service.initWithBind(allocator, io, identity, advertised, bind.ip4.bytes, max_candidates);
+        var disc = try discovery.Service.initExecution(allocator, io, identity, advertised, bind.ip4.bytes, max_candidates, .{ .schedule = forks, .block = server.chain.latest().header.number, .timestamp = server.chain.latest().header.timestamp });
         errdefer disc.deinit();
         for (seeds) |seed| try disc.addBootstrap(seed);
-        return .{ .allocator = allocator, .io = io, .server = server, .identity = identity, .listener = listener, .discovery_service = disc, .genesis_hash = genesis_hash, .fork_hash = fork_hash };
+        return .{ .allocator = allocator, .io = io, .server = server, .identity = identity, .listener = listener, .discovery_service = disc, .forks = forks };
     }
 
     /// Log the signed bootstrap ENR and run the peer loop beside RPC.
@@ -224,9 +240,10 @@ pub const Service = struct {
             2 => try slot.connection.send(3, &.{0xc0}),
             3 => {},
             eth.announce_code => try self.requestMissing(slot, message.body),
+            eth.transactions_code => try self.admitDirect(slot, message.body),
             eth.get_code => try self.respond(slot, message.body),
             eth.pooled_code => try self.admit(slot, message.body),
-            else => return error.UnsupportedPeerMessage,
+            else => {},
         }
     }
 
@@ -262,25 +279,37 @@ pub const Service = struct {
     fn requestMissing(self: *Service, slot: *Slot, body: []const u8) !void {
         const announced = try eth.decodeAnnouncements(self.allocator, body);
         defer self.allocator.free(announced);
+        slot.queueAnnouncements(announced);
+        try self.sendNextRequest(slot);
+    }
+
+    /// Send the next page of missing hashes while holding one request per peer.
+    fn sendNextRequest(self: *Service, slot: *Slot) !void {
         if (slot.pending_id != null) return;
         slot.request_id +%= 1;
         var request: eth.Request = .{ .id = slot.request_id };
         if (self.server.mutex) |mutex| try mutex.lock(self.io);
         {
             defer if (self.server.mutex) |mutex| mutex.unlock(self.io);
-            for (announced) |item| {
-                if (self.server.pool.get(item.hash) != null) continue;
+            while (slot.queued_index < slot.queued_count and request.count < eth.max_hashes) {
+                const hash = slot.queued_hashes[slot.queued_index];
+                slot.queued_index += 1;
+                if (self.server.pool.get(hash) != null) continue;
                 var repeated = false;
-                for (request.hashes[0..request.count]) |hash| {
-                    if (std.mem.eql(u8, &hash, &item.hash)) {
+                for (request.hashes[0..request.count]) |existing| {
+                    if (std.mem.eql(u8, &existing, &hash)) {
                         repeated = true;
                         break;
                     }
                 }
                 if (repeated) continue;
-                request.hashes[request.count] = item.hash;
+                request.hashes[request.count] = hash;
                 request.count += 1;
             }
+        }
+        if (slot.queued_index == slot.queued_count) {
+            slot.queued_index = 0;
+            slot.queued_count = 0;
         }
         if (request.count == 0) return;
         const encoded = try eth.encodeRequest(self.allocator, request);
@@ -339,11 +368,24 @@ pub const Service = struct {
                 }
             }
             if (!requested) return error.UnrequestedTransaction;
-            const result = try self.server.admitPeerTransaction(raw);
-            if (result == .invalid) {
-                slot.invalid +|= 1;
-                if (slot.invalid >= max_invalid) return error.InvalidPeerTransactions;
-            }
+            try self.admitOne(slot, raw);
+        }
+        try self.sendNextRequest(slot);
+    }
+
+    /// Admit directly sent eth/69 transactions through the shared pool.
+    fn admitDirect(self: *Service, slot: *Slot, body: []const u8) !void {
+        const transactions = try eth.decodeTransactions(self.allocator, body);
+        defer self.allocator.free(transactions);
+        for (transactions) |raw| try self.admitOne(slot, raw);
+    }
+
+    /// Count invalid pool submissions consistently across direct and requested data.
+    fn admitOne(self: *Service, slot: *Slot, raw: []const u8) !void {
+        const result = try self.server.admitPeerTransaction(raw);
+        if (result == .invalid) {
+            slot.invalid +|= 1;
+            if (slot.invalid >= max_invalid) return error.InvalidPeerTransactions;
         }
     }
 
@@ -352,7 +394,8 @@ pub const Service = struct {
         if (self.server.mutex) |mutex| try mutex.lock(self.io);
         defer if (self.server.mutex) |mutex| mutex.unlock(self.io);
         const head = self.server.chain.latest();
-        return .{ .network_id = @intCast(self.server.chain.chain_id), .genesis = self.genesis_hash, .fork_hash = self.fork_hash, .next_fork = 0, .earliest = 0, .latest = head.header.number, .head = head.hash };
+        const id = self.forks.at(head.header.number, head.header.timestamp);
+        return .{ .network_id = @intCast(self.server.chain.chain_id), .genesis = self.forks.genesis, .fork_hash = id.hash, .next_fork = id.next, .earliest = 0, .latest = head.header.number, .head = head.hash, .forks = self.forks, .head_time = head.header.timestamp };
     }
 
     /// Return the first vacant slot under the active peer cap.
@@ -409,14 +452,26 @@ fn now(io: std.Io) i96 {
 
 /// Reject special and unrelated internal addresses before a TCP dial.
 fn safeEndpoint(local: [4]u8, remote: [4]u8) bool {
-    if (remote[0] == 0 or remote[0] >= 224 or remote[0] == 169 and remote[1] == 254 or remote[0] == 100 and remote[1] >= 64 and remote[1] < 128) return false;
-    if (remote[0] == 192 and remote[1] == 0 and (remote[2] == 0 or remote[2] == 2)) return false;
-    if (remote[0] == 198 and (remote[1] == 18 or remote[1] == 19 or remote[1] == 51 and remote[2] == 100)) return false;
-    if (remote[0] == 203 and remote[1] == 0 and remote[2] == 113) return false;
-    if (remote[0] == 127) return local[0] == 127 and remote[1] == 0 and remote[2] == 0 and remote[3] != 0;
-    const private_remote = remote[0] == 10 or remote[0] == 172 and remote[1] >= 16 and remote[1] <= 31 or remote[0] == 192 and remote[1] == 168;
-    if (!private_remote) return true;
-    return remote[0] == local[0] and remote[1] == local[1] and remote[2] == local[2];
+    return enr.safeExecutionEndpoint(local, remote);
+}
+
+test "consumed announcement slots accept new hashes while a request is pending" {
+    var slot = Slot{ .connection = undefined, .id = .{0} ** 32 };
+    slot.pending_id = 1;
+    slot.queued_count = eth.max_announced_hashes;
+    slot.queued_index = eth.max_hashes;
+    for (&slot.queued_hashes, 0..) |*hash, index| std.mem.writeInt(u32, hash[0..4], @intCast(index), .big);
+    var announced: [eth.max_hashes]eth.Announcement = undefined;
+    for (&announced, 0..) |*item, index| {
+        item.* = .{ .tx_type = 2, .size = 100, .hash = .{0} ** 32 };
+        std.mem.writeInt(u32, item.hash[0..4], @intCast(eth.max_announced_hashes + index), .big);
+    }
+    slot.queueAnnouncements(&announced);
+    try std.testing.expectEqual(@as(usize, eth.max_announced_hashes), slot.queued_count);
+    try std.testing.expectEqual(@as(usize, 0), slot.queued_index);
+    try std.testing.expectEqual(@as(?u64, 1), slot.pending_id);
+    try std.testing.expectEqual(@as(u32, eth.max_hashes), std.mem.readInt(u32, slot.queued_hashes[0][0..4], .big));
+    try std.testing.expectEqual(@as(u32, eth.max_announced_hashes + eth.max_hashes - 1), std.mem.readInt(u32, slot.queued_hashes[slot.queued_count - 1][0..4], .big));
 }
 
 /// Load or create one persistent secp256k1 key in the execution data directory.

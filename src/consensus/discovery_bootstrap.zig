@@ -1,5 +1,5 @@
-// Bootstrap ENRs are untrusted claims about peer identity, fork, custody, and
-// address. Verify each signed record before admitting it to a bounded peer
+// Bootstrap ENRs are untrusted claims about peer identity, fork, and address;
+// Fulu records also promise custody. Verify each signed record before admitting it to a bounded peer
 // table. A higher sequence replaces an earlier record for the same node ID;
 // a conflicting record at the same sequence is rejected.
 //
@@ -11,6 +11,8 @@ const enr = @import("enr.zig");
 pub const Candidates = struct {
     allocator: std.mem.Allocator,
     fork_digest: [4]u8,
+    policy: enr.Policy,
+    local_ip: ?[4]u8 = null,
     max_peers: usize,
     items: std.ArrayList(enr.Record) = .empty,
     signed: std.ArrayList(?[]u8) = .empty,
@@ -18,7 +20,15 @@ pub const Candidates = struct {
     /// Create a candidate table with a limit no greater than 256 peers.
     pub fn init(allocator: std.mem.Allocator, fork_digest: [4]u8, max_peers: usize) !Candidates {
         if (max_peers == 0 or max_peers > 256) return error.InvalidPeerLimit;
-        return .{ .allocator = allocator, .fork_digest = fork_digest, .max_peers = max_peers };
+        return .{ .allocator = allocator, .fork_digest = fork_digest, .policy = .{ .consensus = fork_digest }, .max_peers = max_peers };
+    }
+
+    /// Create a bounded candidate table for signed execution records.
+    pub fn initExecution(allocator: std.mem.Allocator, context: @FieldType(enr.Policy, "execution"), local_ip: [4]u8, max_peers: usize) !Candidates {
+        var result = try init(allocator, context.schedule.at(context.block, context.timestamp).hash, max_peers);
+        result.policy = .{ .execution = context };
+        result.local_ip = local_ip;
+        return result;
     }
 
     /// Free the candidate table; returned record values need no separate release.
@@ -48,7 +58,10 @@ pub const Candidates = struct {
 
     /// Decode and retain signed ENR bytes for later NODES replies.
     pub fn addSigned(self: *Candidates, bytes: []const u8) !void {
-        const record = try enr.decode(self.allocator, bytes);
+        const record = try enr.decodeWithPolicy(self.allocator, bytes, switch (self.policy) {
+            .consensus => .consensus,
+            .execution => .execution,
+        });
         return self.admit(record, bytes);
     }
 
@@ -62,7 +75,8 @@ pub const Candidates = struct {
 
     /// Apply sequence and capacity rules after the caller has authenticated the ENR.
     fn admit(self: *Candidates, record: enr.Record, bytes: ?[]const u8) !void {
-        try enr.requireFork(record, self.fork_digest);
+        try enr.requirePolicy(record, self.policy);
+        if (self.local_ip) |ip| if (!enr.safeExecutionEndpoint(ip, record.ip)) return error.UnsafeEndpoint;
         for (self.items.items, 0..) |*existing, index| {
             if (!std.mem.eql(u8, &existing.node_id, &record.node_id)) continue;
             if (record.sequence < existing.sequence) return error.StaleEnr;
@@ -139,6 +153,20 @@ test "bootstrap table verifies signed ENRs and updates only newer records" {
     var other_fork = try Candidates.init(allocator, .{ 9, 2, 3, 4 }, 1);
     defer other_fork.deinit();
     try std.testing.expectError(error.InvalidForkContext, other_fork.add(first_text));
+}
+
+test "execution bootstrap rejects unsafe signed endpoints before discovery" {
+    const allocator = std.testing.allocator;
+    const Ecdsa = std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
+    const key = try Ecdsa.KeyPair.generateDeterministic([_]u8{82} ** 32);
+    const schedule = @import("execution").fork_id.Schedule{ .genesis = .{5} ** 32, .genesis_time = 0 };
+    const local = enr.Local{ .sequence = 1, .ip = .{ 127, 0, 0, 1 }, .udp_port = 30303, .tcp_port = 30303, .fork_id = .{0} ** 16, .next_fork_digest = .{0} ** 4, .custody_group_count = 0, .execution_fork = schedule.at(0, 0) };
+    const bytes = try enr.encode(allocator, key, local);
+    defer allocator.free(bytes);
+    var candidates = try Candidates.initExecution(allocator, .{ .schedule = schedule, .block = 0, .timestamp = 0 }, .{ 8, 8, 8, 8 }, 2);
+    defer candidates.deinit();
+    try std.testing.expectError(error.UnsafeEndpoint, candidates.addSigned(bytes));
+    try std.testing.expectEqual(@as(usize, 0), candidates.items.items.len);
 }
 
 /// Return an owned ENR URI for the test's signed bytes.

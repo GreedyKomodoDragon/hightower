@@ -141,7 +141,10 @@ pub const Peer = struct {
             }
             if (message.code != eth.status_code) return error.ExpectedStatus;
             const remote = try eth.decodeStatus(self.allocator, message.body);
-            if (remote.network_id != local.network_id or !std.mem.eql(u8, &remote.genesis, &local.genesis) or !std.mem.eql(u8, &remote.fork_hash, &local.fork_hash)) return error.IncompatibleStatus;
+            if (remote.network_id != local.network_id or !std.mem.eql(u8, &remote.genesis, &local.genesis)) return error.IncompatibleStatus;
+            if (local.forks) |schedule| {
+                if (!schedule.compatible(local.latest, local.head_time, .{ .hash = remote.fork_hash, .next = remote.next_fork })) return error.IncompatibleStatus;
+            } else if (!std.mem.eql(u8, &remote.fork_hash, &local.fork_hash)) return error.IncompatibleStatus;
             return;
         }
         return error.ExpectedStatus;

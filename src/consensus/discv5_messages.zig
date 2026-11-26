@@ -141,12 +141,20 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) !Message {
 
 /// Encode a NODES reply from signed ENRs, each verified for the current fork.
 pub fn encodeNodes(allocator: std.mem.Allocator, request_id: RequestId, total: u8, records: []const []const u8, fork_digest: [4]u8) ![]u8 {
+    return encodeNodesWithPolicy(allocator, request_id, total, records, .{ .consensus = fork_digest });
+}
+
+/// Encode signed NODES entries under the selected discovery policy.
+pub fn encodeNodesWithPolicy(allocator: std.mem.Allocator, request_id: RequestId, total: u8, records: []const []const u8, policy: enr.Policy) ![]u8 {
     if (total == 0 or total > 16 or records.len > 16) return error.InvalidNodes;
     var nested = std.Io.Writer.Allocating.init(allocator);
     defer nested.deinit();
     for (records) |bytes| {
-        const record = try enr.decode(allocator, bytes);
-        try enr.requireFork(record, fork_digest);
+        const record = try enr.decodeWithPolicy(allocator, bytes, switch (policy) {
+            .consensus => .consensus,
+            .execution => .execution,
+        });
+        try enr.requirePolicy(record, policy);
         try nested.writer.writeAll(bytes);
     }
     var payload = std.Io.Writer.Allocating.init(allocator);
@@ -170,6 +178,11 @@ pub fn encodeNodes(allocator: std.mem.Allocator, request_id: RequestId, total: u
 
 /// Verify a canonical NODES reply and its signed ENRs before exposing peers.
 pub fn decodeNodes(allocator: std.mem.Allocator, bytes: []const u8, fork_digest: [4]u8) !Nodes {
+    return decodeNodesWithPolicy(allocator, bytes, .{ .consensus = fork_digest });
+}
+
+/// Authenticate NODES records under the selected discovery policy.
+pub fn decodeNodesWithPolicy(allocator: std.mem.Allocator, bytes: []const u8, policy: enr.Policy) !Nodes {
     if (bytes.len < 2 or bytes.len > max_plaintext_size or bytes[0] != 4) return error.InvalidNodes;
     var value = try rlp.decode.decodeAll(allocator, bytes[1..]);
     defer value.deinit(allocator);
@@ -193,8 +206,11 @@ pub fn decodeNodes(allocator: std.mem.Allocator, bytes: []const u8, fork_digest:
         var encoded_record = std.Io.Writer.Allocating.init(allocator);
         defer encoded_record.deinit();
         try writeValue(allocator, &encoded_record.writer, item);
-        result.records[index] = try enr.decode(allocator, encoded_record.written());
-        try enr.requireFork(result.records[index], fork_digest);
+        result.records[index] = try enr.decodeWithPolicy(allocator, encoded_record.written(), switch (policy) {
+            .consensus => .consensus,
+            .execution => .execution,
+        });
+        try enr.requirePolicy(result.records[index], policy);
         result.encoded_len[index] = @intCast(encoded_record.written().len);
         @memcpy(result.encoded[index][0..result.encoded_len[index]], encoded_record.written());
     }
