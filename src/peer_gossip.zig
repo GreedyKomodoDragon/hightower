@@ -38,6 +38,22 @@ const Slot = struct {
     queued_index: usize = 0,
     request_id: u64 = 0,
     invalid: u8 = 0,
+
+    /// Reuse consumed queue slots before admitting another bounded announcement.
+    fn queueAnnouncements(self: *Slot, announced: []const eth.Announcement) void {
+        if (self.queued_index != 0) {
+            const remaining = self.queued_count - self.queued_index;
+            std.mem.copyForwards([32]u8, self.queued_hashes[0..remaining], self.queued_hashes[self.queued_index..self.queued_count]);
+            self.queued_count = remaining;
+            self.queued_index = 0;
+        }
+        // shortcut: hashes beyond the 4,096-entry queue are dropped, add backpressure if larger announcements must be retained.
+        for (announced) |item| {
+            if (self.queued_count == eth.max_announced_hashes) break;
+            self.queued_hashes[self.queued_count] = item.hash;
+            self.queued_count += 1;
+        }
+    }
 };
 
 const Handshake = struct {
@@ -263,12 +279,7 @@ pub const Service = struct {
     fn requestMissing(self: *Service, slot: *Slot, body: []const u8) !void {
         const announced = try eth.decodeAnnouncements(self.allocator, body);
         defer self.allocator.free(announced);
-        // shortcut: hashes beyond the 4,096-entry queue are dropped, add backpressure if larger announcements must be retained.
-        for (announced) |item| {
-            if (slot.queued_count == eth.max_announced_hashes) break;
-            slot.queued_hashes[slot.queued_count] = item.hash;
-            slot.queued_count += 1;
-        }
+        slot.queueAnnouncements(announced);
         try self.sendNextRequest(slot);
     }
 
@@ -442,6 +453,25 @@ fn now(io: std.Io) i96 {
 /// Reject special and unrelated internal addresses before a TCP dial.
 fn safeEndpoint(local: [4]u8, remote: [4]u8) bool {
     return enr.safeExecutionEndpoint(local, remote);
+}
+
+test "consumed announcement slots accept new hashes while a request is pending" {
+    var slot = Slot{ .connection = undefined, .id = .{0} ** 32 };
+    slot.pending_id = 1;
+    slot.queued_count = eth.max_announced_hashes;
+    slot.queued_index = eth.max_hashes;
+    for (&slot.queued_hashes, 0..) |*hash, index| std.mem.writeInt(u32, hash[0..4], @intCast(index), .big);
+    var announced: [eth.max_hashes]eth.Announcement = undefined;
+    for (&announced, 0..) |*item, index| {
+        item.* = .{ .tx_type = 2, .size = 100, .hash = .{0} ** 32 };
+        std.mem.writeInt(u32, item.hash[0..4], @intCast(eth.max_announced_hashes + index), .big);
+    }
+    slot.queueAnnouncements(&announced);
+    try std.testing.expectEqual(@as(usize, eth.max_announced_hashes), slot.queued_count);
+    try std.testing.expectEqual(@as(usize, 0), slot.queued_index);
+    try std.testing.expectEqual(@as(?u64, 1), slot.pending_id);
+    try std.testing.expectEqual(@as(u32, eth.max_hashes), std.mem.readInt(u32, slot.queued_hashes[0][0..4], .big));
+    try std.testing.expectEqual(@as(u32, eth.max_announced_hashes + eth.max_hashes - 1), std.mem.readInt(u32, slot.queued_hashes[slot.queued_count - 1][0..4], .big));
 }
 
 /// Load or create one persistent secp256k1 key in the execution data directory.
