@@ -38,6 +38,7 @@ pub const Chain = struct {
     allocator: std.mem.Allocator,
     chain_id: u256,
     fork: transition.Fork,
+    kzg_settings: ?*const execution.kzg.Settings = null,
     records: std.ArrayList(Record) = .empty,
     canonical: std.ArrayList(usize) = .empty,
     record_by_hash: std.AutoHashMap(execution.Hash, usize),
@@ -88,7 +89,7 @@ pub const Chain = struct {
             .prague, .osaka => 9,
             else => 21,
         };
-        var result = try transition.applyBlock(self.allocator, world, .{ .fork = self.fork, .parent_fork = self.fork, .chain_id = self.chain_id, .older_hashes = older_hashes, .max_blobs_per_block = max_blobs, .expected_blob_hashes = expected_blob_hashes, .expected_requests = expected_requests }, parent, header, transactions, withdrawals);
+        var result = try transition.applyBlock(self.allocator, world, .{ .fork = self.fork, .parent_fork = self.fork, .chain_id = self.chain_id, .older_hashes = older_hashes, .max_blobs_per_block = max_blobs, .expected_blob_hashes = expected_blob_hashes, .expected_requests = expected_requests, .kzg_settings = self.kzg_settings }, parent, header, transactions, withdrawals);
         var result_owned = true;
         errdefer if (result_owned) result.deinit();
         var record = try self.copyRecord(header, transactions, withdrawals, result, world);

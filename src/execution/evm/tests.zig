@@ -427,7 +427,7 @@ test "environment opcodes use supplied context and reject missing context" {
     var machine = Machine.init(std.testing.allocator, &world);
     defer machine.deinit();
     const caller: state.Address = .{0} ** 19 ++ .{7};
-    const callee: state.Address = .{0} ** 19 ++ .{8};
+    const callee: state.Address = .{0} ** 19 ++ .{0x20};
     const input = Input{ .code = &.{}, .gas = 100_000, .caller = caller, .callee = callee, .value = 11, .data = "abc" };
     var absent = try machine.run(.{ .code = &.{0x32}, .gas = 100 });
     defer absent.deinit(std.testing.allocator);
@@ -436,7 +436,7 @@ test "environment opcodes use supplied context and reject missing context" {
     const blobs = [_]state.Hash{.{0} ** 31 ++ .{0xbb}};
     machine.environment = .{ .origin = caller, .gas_price = 12, .coinbase = callee, .timestamp = 13, .number = 50, .prev_randao = 14, .gas_limit = 15, .chain_id = 16, .base_fee = 17, .blob_base_fee = 18, .block_hashes = &hashes, .blob_hashes = &blobs };
     const cases = [_]struct { op: u8, operand: ?u8 = null, want: u256 }{
-        .{ .op = 0x30, .want = 8 },
+        .{ .op = 0x30, .want = 0x20 },
         .{ .op = 0x32, .want = 7 },
         .{ .op = 0x33, .want = 7 },
         .{ .op = 0x34, .want = 11 },
@@ -447,7 +447,7 @@ test "environment opcodes use supplied context and reject missing context" {
         .{ .op = 0x40, .operand = 49, .want = 0xaa },
         .{ .op = 0x40, .operand = 50, .want = 0 },
         .{ .op = 0x40, .operand = 51, .want = 0 },
-        .{ .op = 0x41, .want = 8 },
+        .{ .op = 0x41, .want = 0x20 },
         .{ .op = 0x42, .want = 13 },
         .{ .op = 0x43, .want = 50 },
         .{ .op = 0x44, .want = 14 },
@@ -633,7 +633,7 @@ test "copy and external-code opcodes pad reads and enforce return-data bounds" {
     try std.testing.expectEqual(Fault.invalid_opcode, invalid.status.fault);
 }
 
-test "EIP-150 caps forwarded gas and precompile calls fail explicitly" {
+test "EIP-150 caps forwarded gas and unsupported BLS calls fail explicitly" {
     var world = state.State.init(std.testing.allocator);
     defer world.deinit();
     const child: state.Address = .{0} ** 19 ++ .{0x21};
@@ -645,14 +645,41 @@ test "EIP-150 caps forwarded gas and precompile calls fail explicitly" {
     defer result.deinit(std.testing.allocator);
     const available: u64 = 100_000 - 15 - 3 - 2600;
     try std.testing.expectEqual(@as(u256, available - available / 64 - 2), std.mem.readInt(u256, result.output[0..32], .big));
-    const precompile = [_]u8{ 0x5f, 0x5f, 0x5f, 0x5f, 0x60, 1, 0x60, 1, 0xfa };
-    var unsupported = try machine.run(.{ .code = &precompile, .gas = 10_000 });
-    defer unsupported.deinit(std.testing.allocator);
-    try std.testing.expectEqual(Fault.unsupported_precompile, unsupported.status.fault);
     const bls_precompile = [_]u8{ 0x5f, 0x5f, 0x5f, 0x5f, 0x60, 0x11, 0x60, 1, 0xfa };
     var bls = try machine.run(.{ .code = &bls_precompile, .gas = 10_000 });
     defer bls.deinit(std.testing.allocator);
     try std.testing.expectEqual(Fault.unsupported_precompile, bls.status.fault);
+}
+
+test "nested STATICCALL returns SHA-256 bytes and burns a child gas shortfall" {
+    var world = state.State.init(std.testing.allocator);
+    defer world.deinit();
+    var machine = Machine.init(std.testing.allocator, &world);
+    defer machine.deinit();
+    const code = [_]u8{
+        0x60, 'a', 0x5f, 0x53, 0x60, 'b', 0x60, 1,    0x53, 0x60, 'c', 0x60, 2,    0x53,
+        0x60, 32,  0x60, 32,   0x60, 3,   0x5f, 0x60, 2,    0x61, 3,   0xe8, 0xfa, 0x50,
+        0x60, 32,  0x60, 32,   0xf3,
+    };
+    var success = try machine.run(.{ .code = &code, .gas = 10_000, .callee = .{0} ** 19 ++ .{0x20} });
+    defer success.deinit(std.testing.allocator);
+    try std.testing.expect(success.status == .success);
+    var digest: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&digest, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    try std.testing.expectEqualSlices(u8, &digest, success.output);
+    var low_gas = code;
+    low_gas[24] = 0;
+    low_gas[25] = 71;
+    low_gas[27] = 0x5f;
+    low_gas[28] = 0x52;
+    low_gas[29] = 0x60;
+    low_gas[30] = 32;
+    low_gas[31] = 0x5f;
+    low_gas[32] = 0xf3;
+    var failed = try machine.run(.{ .code = &low_gas, .gas = 10_000, .callee = .{0} ** 19 ++ .{0x20} });
+    defer failed.deinit(std.testing.allocator);
+    try std.testing.expect(failed.status == .success);
+    try std.testing.expectEqual(@as(u256, 0), std.mem.readInt(u256, failed.output[0..32], .big));
 }
 
 test "delegated CALL charges target access before forwarding gas" {

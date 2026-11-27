@@ -157,6 +157,9 @@ Chain:      [Block 0] ───────────────────�
 | Gas refund | A credit earned by certain storage writes and applied after execution, limited to one fifth of the gas used. |
 | EVM log | An event record emitted by contract code with an address, up to four searchable topics, and byte data. |
 | Precompile | A built-in execution function reached through a reserved address rather than contract bytecode. |
+| BN254 | The elliptic curve used by Ethereum's addition, multiplication, and pairing precompiles at addresses `0x06`–`0x08`. |
+| ModExp | The precompile at address `0x05` that raises a number to a power modulo another number. |
+| Point evaluation | A KZG check that a committed blob polynomial has a claimed value at a chosen point. |
 | Call stipend | Extra gas made available to a child call that transfers value. |
 | State snapshot | A checkpoint that lets a reverted or failed frame undo its state changes. |
 | REVERT | An EVM instruction that returns bytes and remaining gas while undoing the frame's state changes. |

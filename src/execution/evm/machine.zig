@@ -11,6 +11,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const state = @import("../state.zig");
+const precompiles = @import("precompiles.zig");
+const ckzg = @import("ckzg");
 
 /// Named EVM byte values used by dispatch and opcode-specific gas rules.
 const Op = struct {
@@ -127,6 +129,7 @@ pub const Environment = struct {
     blob_base_fee_supported: bool = true,
     blob_hashes: []const state.Hash = &.{},
     block_hashes: ?[]const state.Hash = null,
+    kzg_settings: ?*const ckzg.Settings = null,
 };
 
 /// Access-list entry borrowed by the machine for transaction prewarming.
@@ -747,7 +750,7 @@ const Frame = struct {
             .cancun => 10,
             .prague, .osaka, .fulu => 17,
         };
-        if (target[19] >= 1 and target[19] <= precompile_limit and same(target, precompile)) return error.UnsupportedPrecompile;
+        if (target[19] > 10 and target[19] <= precompile_limit and same(target, precompile)) return error.UnsupportedPrecompile;
         const transfer = (op == Op.CALL or op == Op.CALLCODE) and value != 0;
         const account = if (op == Op.CALL and value != 0) try self.machine.world.getAccount(target) else null;
         const is_empty = if (account) |a| a.nonce == 0 and a.balance == 0 and std.mem.eql(u8, &a.code_hash, &state.EMPTY_CODE_HASH) else true;
@@ -815,6 +818,14 @@ const Frame = struct {
     }
     /// Executes opcodes until STOP, RETURN, REVERT, or a deterministic fault.
     fn execute(self: *Frame) !Result {
+        const target = self.input.target orelse self.input.callee;
+        const fork: u8 = @intFromEnum(if (self.machine.environment) |env| env.fork else Fork.fulu);
+        if (self.input.kind != .create and self.input.kind != .create2 and precompiles.active(target, fork)) {
+            const settings = if (self.machine.environment) |env| env.kzg_settings else null;
+            const result = try precompiles.run(self.machine.allocator, target[19], fork, self.input.data, self.gas, settings);
+            self.gas = result.remaining;
+            return .{ .status = .success, .gas_remaining = result.remaining, .output = result.output };
+        }
         while (self.pc < self.input.code.len) {
             if (self.machine.hook) |hook| try hook.step(hook.context);
             const op = self.input.code[self.pc];

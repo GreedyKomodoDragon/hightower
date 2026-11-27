@@ -13,6 +13,7 @@ const std = @import("std");
 const execution = @import("execution.zig");
 const state = execution.state;
 const evm = execution.evm;
+const ckzg = @import("ckzg");
 
 pub const Fork = evm.Fork;
 pub const Context = struct {
@@ -27,6 +28,7 @@ pub const Context = struct {
     difficulty: u256 = 0,
     blob_base_fee: ?u256 = null,
     block_hashes: ?[]const execution.Hash = null,
+    kzg_settings: ?*const ckzg.Settings = null,
 };
 
 /// Selects block rules; callers supply up to 255 older hashes and optional typed requests.
@@ -39,6 +41,7 @@ pub const BlockContext = struct {
     expected_blob_hashes: []const execution.Hash = &.{},
     expected_requests: ?[]const []const u8 = null,
     verify_requests_hash: bool = false,
+    kzg_settings: ?*const ckzg.Settings = null,
 };
 
 /// Owns a receipt's logs and return bytes until deinit.
@@ -198,7 +201,7 @@ fn validateTransaction(allocator: std.mem.Allocator, world: *state.State, contex
         .cancun => 10,
         .prague, .osaka, .fulu => 17,
     };
-    if (f.to != null and recipient[19] != 0 and recipient[19] <= precompile_limit and std.mem.allEqual(u8, recipient[0..19], 0)) return error.UnsupportedExecution;
+    if (f.to != null and recipient[19] > 10 and recipient[19] <= precompile_limit and std.mem.allEqual(u8, recipient[0..19], 0)) return error.UnsupportedExecution;
     return .{ .fields = f, .sender = sender, .recipient = recipient, .creation = f.to == null, .intrinsic_gas = intrinsic, .max_cost = max_cost, .effective_price = @min(f.max_fee, std.math.add(u256, context.base_fee, f.priority_fee) catch std.math.maxInt(u256)), .blob_gas = blob_gas };
 }
 
@@ -257,7 +260,7 @@ fn executeFrame(allocator: std.mem.Allocator, owner: std.mem.Allocator, world: *
         for (item.storage_keys, 0..) |key, j| keys[j] = std.mem.readInt(u256, &key, .big);
         access[i] = .{ .address = item.address, .storage_keys = keys };
     }
-    try machine.configure(.{ .fork = context.fork, .origin = tx.sender, .gas_price = tx.effective_price, .coinbase = context.coinbase, .timestamp = context.timestamp, .number = context.number, .prev_randao = if (context.fork == .london) context.difficulty else std.mem.readInt(u256, &context.prev_randao, .big), .gas_limit = context.gas_limit, .chain_id = context.chain_id, .base_fee = context.base_fee, .blob_base_fee = context.blob_base_fee orelse 0, .blob_base_fee_supported = context.blob_base_fee != null, .blob_hashes = tx.fields.blob_hashes, .block_hashes = context.block_hashes }, tx.sender, tx.recipient, access);
+    try machine.configure(.{ .fork = context.fork, .origin = tx.sender, .gas_price = tx.effective_price, .coinbase = context.coinbase, .timestamp = context.timestamp, .number = context.number, .prev_randao = if (context.fork == .london) context.difficulty else std.mem.readInt(u256, &context.prev_randao, .big), .gas_limit = context.gas_limit, .chain_id = context.chain_id, .base_fee = context.base_fee, .blob_base_fee = context.blob_base_fee orelse 0, .blob_base_fee_supported = context.blob_base_fee != null, .blob_hashes = tx.fields.blob_hashes, .block_hashes = context.block_hashes, .kzg_settings = context.kzg_settings }, tx.sender, tx.recipient, access);
     machine.refund += effects.refund;
     for (effects.warmed) |address| _ = try machine.touchAccount(address);
     var result = if (tx.creation)
@@ -559,7 +562,7 @@ pub fn applyBlock(allocator: std.mem.Allocator, world: *state.State, block: Bloc
     const snapshot = try world.snapshot();
     var open = true;
     errdefer if (open) world.revert(snapshot) catch |err| std.log.err("best-effort operation failed: {s}", .{@errorName(err)});
-    const context: Context = .{ .fork = block.fork, .chain_id = block.chain_id, .coinbase = header.fee_recipient, .number = header.number, .timestamp = header.timestamp, .gas_limit = header.gas_limit, .base_fee = header.base_fee_per_gas, .prev_randao = header.prev_randao, .difficulty = header.difficulty, .blob_base_fee = if (@intFromEnum(block.fork) < @intFromEnum(Fork.cancun)) null else try blobBaseFee(block.fork, header.excess_blob_gas), .block_hashes = block_hashes };
+    const context: Context = .{ .fork = block.fork, .chain_id = block.chain_id, .coinbase = header.fee_recipient, .number = header.number, .timestamp = header.timestamp, .gas_limit = header.gas_limit, .base_fee = header.base_fee_per_gas, .prev_randao = header.prev_randao, .difficulty = header.difficulty, .blob_base_fee = if (@intFromEnum(block.fork) < @intFromEnum(Fork.cancun)) null else try blobBaseFee(block.fork, header.excess_blob_gas), .block_hashes = block_hashes, .kzg_settings = block.kzg_settings };
     try applySystemTransitions(arena.allocator(), world, context, parent_hash, header.parent_beacon_block_root);
     const gas_used = try applyBlockTransactions(arena.allocator(), world, context, transactions, receipts);
     var blob_gas_used: u64 = 0;
