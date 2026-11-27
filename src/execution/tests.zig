@@ -1693,6 +1693,40 @@ fn tokenTransaction(a: std.mem.Allocator, nonce: u64, to: ?execution.Address, da
     return execution.encode(a, tx);
 }
 
+test "direct precompile transactions return data and roll back failed value" {
+    const a = testing.allocator;
+    var world = execution.state.State.init(a);
+    defer world.deinit();
+    const sender: execution.Address = .{ 0x7e, 0x5f, 0x45, 0x52, 0x09, 0x1a, 0x69, 0x12, 0x5d, 0x5d, 0xfc, 0xb7, 0xb8, 0xc2, 0x65, 0x90, 0x29, 0x39, 0x5b, 0xdf };
+    try world.setBalance(sender, 3_000_000);
+    const context: execution.transition.Context = .{ .fork = .fulu, .chain_id = 1, .coinbase = .{0x33} ** 20, .number = 1, .timestamp = 1, .gas_limit = 1_000_000, .base_fee = 1 };
+    const sha_address: execution.Address = .{0} ** 19 ++ .{2};
+    var tx = execution.Transaction{ .dynamic_fee = .{ .chain_id = 1, .nonce = 0, .max_priority_fee_per_gas = 1, .max_fee_per_gas = 2, .gas_limit = 500_000, .to = sha_address, .value = 5, .data = "abc", .access_list = &.{}, .y_parity = 0, .r = 1, .s = 1 } };
+    try expectSyntheticSender(a, &tx);
+    const raw = try execution.encode(a, tx);
+    defer a.free(raw);
+    var result = try execution.transition.applyTransaction(a, &world, context, raw, context.gas_limit, 0);
+    defer result.deinit();
+    var digest: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&digest, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    try testing.expectEqualSlices(u8, &digest, result.output);
+    try testing.expectEqual(@as(u64, 21_120), result.gas_used);
+    try testing.expectEqual(@as(u256, 5), world.getBalance(sha_address));
+    const blake_address: execution.Address = .{0} ** 19 ++ .{9};
+    tx.dynamic_fee.nonce = 1;
+    tx.dynamic_fee.to = blake_address;
+    tx.dynamic_fee.value = 7;
+    tx.dynamic_fee.data = "abc";
+    try expectSyntheticSender(a, &tx);
+    const bad_raw = try execution.encode(a, tx);
+    defer a.free(bad_raw);
+    var failed = try execution.transition.applyTransaction(a, &world, context, bad_raw, context.gas_limit, 0);
+    defer failed.deinit();
+    try testing.expectEqual(@as(u8, 0), failed.receipt.dynamic_fee.status);
+    try testing.expectEqual(@as(u64, 500_000), failed.gas_used);
+    try testing.expectEqual(@as(u256, 0), world.getBalance(blake_address));
+}
+
 /// Builds transfer calldata with ABI words for destination and amount.
 fn tokenTransfer(to: execution.Address, amount: u256) [68]u8 {
     var data: [68]u8 = .{0} ** 68;

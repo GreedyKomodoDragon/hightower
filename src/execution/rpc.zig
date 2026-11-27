@@ -449,7 +449,7 @@ pub const Server = struct {
 
     /// Builds an EVM host context from a stored block header.
     fn context(self: *Server, header: execution.Header) transition.Context {
-        return .{ .fork = self.chain.fork, .chain_id = self.chain.chain_id, .coinbase = header.fee_recipient, .number = header.number, .timestamp = header.timestamp, .gas_limit = header.gas_limit, .base_fee = header.base_fee_per_gas, .prev_randao = header.prev_randao, .difficulty = header.difficulty, .blob_base_fee = transition.blobBaseFee(self.chain.fork, header.excess_blob_gas) catch null };
+        return .{ .fork = self.chain.fork, .chain_id = self.chain.chain_id, .coinbase = header.fee_recipient, .number = header.number, .timestamp = header.timestamp, .gas_limit = header.gas_limit, .base_fee = header.base_fee_per_gas, .prev_randao = header.prev_randao, .difficulty = header.difficulty, .blob_base_fee = transition.blobBaseFee(self.chain.fork, header.excess_blob_gas) catch null, .kzg_settings = self.settings };
     }
 
     /// Runs an unsigned call on a discarded snapshot and returns its output bytes.
@@ -468,7 +468,7 @@ pub const Server = struct {
         defer machine.deinit();
         const header = record.header;
         const to = call.to orelse execution.state.createAddress(call.from, world.getNonce(call.from));
-        try machine.configure(.{ .fork = self.chain.fork, .origin = call.from, .gas_price = header.base_fee_per_gas, .coinbase = header.fee_recipient, .timestamp = header.timestamp, .number = header.number, .prev_randao = std.mem.readInt(u256, &header.prev_randao, .big), .gas_limit = header.gas_limit, .chain_id = self.chain.chain_id, .base_fee = header.base_fee_per_gas, .blob_base_fee = transition.blobBaseFee(self.chain.fork, header.excess_blob_gas) catch 0 }, call.from, to, &.{});
+        try machine.configure(.{ .fork = self.chain.fork, .origin = call.from, .gas_price = header.base_fee_per_gas, .coinbase = header.fee_recipient, .timestamp = header.timestamp, .number = header.number, .prev_randao = std.mem.readInt(u256, &header.prev_randao, .big), .gas_limit = header.gas_limit, .chain_id = self.chain.chain_id, .base_fee = header.base_fee_per_gas, .blob_base_fee = transition.blobBaseFee(self.chain.fork, header.excess_blob_gas) catch 0, .kzg_settings = self.settings }, call.from, to, &.{});
         var result = if (call.to == null) try machine.create(call.from, to, call.value, call.data, gas - intrinsic, 0) else try machine.run(.{ .code = world.getExecutionCode(to), .gas = gas - intrinsic, .caller = call.from, .callee = to, .value = call.value, .data = call.data });
         defer result.deinit(scratch);
         switch (result.status) {

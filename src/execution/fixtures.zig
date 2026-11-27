@@ -23,6 +23,7 @@ const Fixture = struct {
     checksum: []const u8,
     bytes: []const u8,
     expected_gas: ?u64 = null,
+    kzg_settings: ?*const execution.kzg.Settings = null,
 };
 
 const fixtures = [_]Fixture{
@@ -532,6 +533,7 @@ fn runStateFixture(allocator: std.mem.Allocator, root: std.json.Value, fixture: 
         .base_fee = try quantity(try member(env, "currentBaseFee")),
         .prev_randao = try fixedHex(32, allocator, try member(env, "currentRandom")),
         .blob_base_fee = if (fork != .cancun) null else try execution.transition.blobBaseFee(fork, @intCast(try quantity(try member(env, "currentExcessBlobGas")))),
+        .kzg_settings = fixture.kzg_settings,
     };
     if (fixture.expected == .invalid_transaction or fixture.expected == .InitcodeSizeExceeded) {
         const expected_exception: []const u8 = if (fixture.expected == .InitcodeSizeExceeded) "TransactionException.INITCODE_SIZE_EXCEEDED" else "TransactionException.INTRINSIC_GAS_TOO_LOW";
@@ -858,13 +860,45 @@ test "unsupported precompile nested in a transaction rolls back" {
     const allocator = std.testing.allocator;
     var world = execution.state.State.init(allocator);
     defer world.deinit();
-    const sample = try sampleTransaction(allocator, &world);
+    var sample = try sampleTransaction(allocator, &world);
     defer allocator.free(sample.raw);
+    sample.context.fork = .fulu;
     const recipient: execution.Address = try fixedHex(20, allocator, .{ .string = "0x1000000000000000000000000000000000000000" });
-    _ = try world.setCode(recipient, &.{ 0x5f, 0x5f, 0x5f, 0x5f, 0x5f, 0x60, 1, 0x61, 0xff, 0xff, 0xfa, 0x00 });
+    _ = try world.setCode(recipient, &.{ 0x5f, 0x5f, 0x5f, 0x5f, 0x5f, 0x60, 0x11, 0x61, 0xff, 0xff, 0xfa, 0x00 });
     const original = try world.stateRoot();
     try std.testing.expectError(error.UnsupportedExecution, execution.transition.applyTransaction(allocator, &world, sample.context, sample.raw, sample.context.gas_limit, 0));
     try std.testing.expectEqualSlices(u8, &original, &(try world.stateRoot()));
+}
+
+test "Ethereum execution-spec point evaluation state fixtures match direct and nested calls" {
+    const allocator = std.testing.allocator;
+    var settings = try execution.kzg.loadTrustedSetup("src/execution/trusted_setup.txt");
+    defer settings.deinit();
+    // execution-spec-tests v5.4.0 fixtures_stable.tar.gz, Cancun state tests.
+    const sources = [_]struct { bytes: []const u8, checksum: []const u8, count: usize }{
+        .{ .bytes = @embedFile("fixtures/precompiles/eest_tx_entry_point.json"), .checksum = "1f7742b14e49b4613b7b358eb542a2c17ea4d461d55455a7fd7619e8503b5dc1", .count = 6 },
+        .{ .bytes = @embedFile("fixtures/precompiles/eest_point_evaluation_gas.json"), .checksum = "a8cd15fb7dff01009953f2945c7a5135cd17391c6652c4494c6bf8d5b8bf79f5", .count = 24 },
+    };
+    for (sources) |source| {
+        try std.testing.expect(checksumMatches(source.bytes, source.checksum));
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, source.bytes, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return error.MalformedJson;
+        var count: usize = 0;
+        var iter = parsed.value.object.iterator();
+        while (iter.next()) |entry| {
+            const name = entry.key_ptr.*;
+            if (std.mem.indexOf(u8, name, "[fork_Cancun-") == null) continue;
+            var single: std.json.ObjectMap = .empty;
+            defer single.deinit(allocator);
+            try single.put(allocator, name, entry.value_ptr.*);
+            const fixture: Fixture = .{ .name = name, .format = "state", .fork = "Cancun", .expected = .valid, .checksum = source.checksum, .bytes = source.bytes, .kzg_settings = &settings };
+            errdefer std.log.err("execution-spec precompile fixture: {s}", .{name});
+            try std.testing.expect(try runStateFixture(allocator, .{ .object = single }, fixture));
+            count += 1;
+        }
+        try std.testing.expectEqual(source.count, count);
+    }
 }
 
 // The first hash is the parent; an older hash is supplied by the caller.

@@ -110,11 +110,12 @@ pub fn main(init: std.process.Init) !void {
     try store.checkIdentity(genesis.chain_id, .osaka);
     var chain = try execution.chain.Chain.init(a, genesis.chain_id, .osaka, anchor, &world);
     defer chain.deinit();
+    var settings = try execution.kzg.loadTrustedSetup(try a.dupeZ(u8, config.trusted_setup));
+    defer settings.deinit();
+    chain.kzg_settings = &settings;
     try store.recover(&chain, &world);
     var pool = execution.pool.Pool.init(a, .{});
     defer pool.deinit();
-    var settings = try execution.kzg.loadTrustedSetup(try a.dupeZ(u8, config.trusted_setup));
-    defer settings.deinit();
     var mutex: std.Io.Mutex = .init;
     // SAFETY: The stream is initialized before its pointer is used.
     var stream: execution.transfers.Stream = undefined;

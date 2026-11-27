@@ -53,6 +53,7 @@ pub fn main(init: std.process.Init) !void {
     defer pool.deinit();
     var settings = try execution.kzg.loadTrustedSetup("src/execution/trusted_setup.txt");
     defer settings.deinit();
+    chain.kzg_settings = &settings;
     var server: execution.rpc.Server = .{ .chain = &chain, .pool = &pool, .world = &world, .settings = &settings };
     const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
     var listener = try address.listen(init.io, .{ .reuse_address = true });

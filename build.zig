@@ -46,6 +46,11 @@ pub fn build(b: *std.Build) void {
     const blst_dep = b.dependency("blst", .{});
     const blst = blst_dep.module("blst");
     const ckzg_dep = b.dependency("ckzg", .{});
+    const crypto_dep = b.dependency("zig_libs", .{});
+    const montint_mod = b.createModule(.{ .root_source_file = crypto_dep.path("modules/montint/src/root.zig"), .target = target, .optimize = optimize });
+    const bn254_mod = b.createModule(.{ .root_source_file = crypto_dep.path("modules/bn254/src/root.zig"), .target = target, .optimize = optimize });
+    bn254_mod.addImport("montint", montint_mod);
+    const ripemd160_mod = b.createModule(.{ .root_source_file = crypto_dep.path("modules/ripemd160/src/root.zig"), .target = target, .optimize = optimize });
     const ckzg_blst_dep = ckzg_dep.builder.dependency("blst", .{});
     const ckzg_mod = b.createModule(.{ .root_source_file = ckzg_dep.path("bindings/zig/src/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
     ckzg_mod.addIncludePath(ckzg_dep.path("src"));
@@ -224,6 +229,8 @@ pub fn build(b: *std.Build) void {
     });
     execution_mod.addImport("blob", blob_mod);
     execution_mod.addImport("ckzg", ckzg_mod);
+    execution_mod.addImport("bn254", bn254_mod);
+    execution_mod.addImport("ripemd160", ripemd160_mod);
     execution_mod.addImport("blst", blst);
     execution_mod.addIncludePath(ckzg_dep.path("src"));
     execution_mod.addIncludePath(ckzg_blst_dep.path("bindings"));
@@ -259,9 +266,19 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/execution/evm.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "rlp", .module = rlp_mod }},
+            .imports = &.{
+                .{ .name = "rlp", .module = rlp_mod },
+                .{ .name = "ckzg", .module = ckzg_mod },
+                .{ .name = "bn254", .module = bn254_mod },
+                .{ .name = "ripemd160", .module = ripemd160_mod },
+                .{ .name = "blst", .module = blst },
+            },
         }),
     });
+    evm_tests.root_module.addIncludePath(ckzg_dep.path("src"));
+    evm_tests.root_module.addIncludePath(ckzg_blst_dep.path("bindings"));
+    evm_tests.root_module.addCSourceFiles(.{ .root = ckzg_dep.path("."), .files = &.{"src/ckzg.c"}, .flags = &.{ "-O2", "-D__BLST_PORTABLE__" } });
+    evm_tests.root_module.link_libc = true;
     const execution_fixture_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/execution/fixtures.zig"),

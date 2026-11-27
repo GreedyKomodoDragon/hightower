@@ -6,6 +6,7 @@
 //
 // source examples → Fulu gas expectations → interpreter → output/state
 const std = @import("std");
+const execution = @import("execution");
 const evm = @import("execution").evm;
 const state = @import("execution").state;
 
@@ -102,4 +103,76 @@ test "pinned EVM storage and memory fixtures" {
     for (fixture.sstore) |case| try checkSStore(allocator, case);
     for (fixture.mcopy) |case| try checkMCopy(allocator, case);
     std.log.info("EVM fixtures: {d} SSTORE and {d} MCOPY cases passed", .{ fixture.sstore.len, fixture.mcopy.len });
+}
+
+const PrecompileVector = struct {
+    Input: []const u8,
+    Expected: ?[]const u8 = null,
+    ExpectedError: ?[]const u8 = null,
+    Gas: ?u64 = null,
+    Name: []const u8,
+    NoBenchmark: ?bool = null,
+};
+
+const PrecompileSet = struct {
+    name: []const u8,
+    address: u8,
+    fork: evm.Fork,
+    bytes: []const u8,
+};
+
+// go-ethereum 6fe8b63d41be9218808adb9b25d6b21c55b37b54,
+// core/vm/testdata/precompiles/*.json; the files below retain its exact bytes.
+const precompile_sets = [_]PrecompileSet{
+    .{ .name = "ecRecover", .address = 1, .fork = .cancun, .bytes = @embedFile("fixtures/precompiles/ecRecover.json") },
+    .{ .name = "modexp_eip2565", .address = 5, .fork = .cancun, .bytes = @embedFile("fixtures/precompiles/modexp_eip2565.json") },
+    .{ .name = "modexp_eip7883", .address = 5, .fork = .osaka, .bytes = @embedFile("fixtures/precompiles/modexp_eip7883.json") },
+    .{ .name = "bn256Add", .address = 6, .fork = .cancun, .bytes = @embedFile("fixtures/precompiles/bn256Add.json") },
+    .{ .name = "bn256ScalarMul", .address = 7, .fork = .cancun, .bytes = @embedFile("fixtures/precompiles/bn256ScalarMul.json") },
+    .{ .name = "bn256Pairing", .address = 8, .fork = .cancun, .bytes = @embedFile("fixtures/precompiles/bn256Pairing.json") },
+    .{ .name = "blake2F", .address = 9, .fork = .cancun, .bytes = @embedFile("fixtures/precompiles/blake2F.json") },
+    .{ .name = "fail-blake2f", .address = 9, .fork = .cancun, .bytes = @embedFile("fixtures/precompiles/fail-blake2f.json") },
+    .{ .name = "pointEvaluation", .address = 10, .fork = .cancun, .bytes = @embedFile("fixtures/precompiles/pointEvaluation.json") },
+};
+
+test "go-ethereum precompile vectors match output gas and failure status" {
+    const allocator = std.testing.allocator;
+    var settings = try execution.kzg.loadTrustedSetup("src/execution/trusted_setup.txt");
+    defer settings.deinit();
+    for (precompile_sets) |set| {
+        const parsed = try std.json.parseFromSlice([]PrecompileVector, allocator, set.bytes, .{});
+        defer parsed.deinit();
+        for (parsed.value) |vector| {
+            errdefer std.log.err("precompile fixture {s}/{s}", .{ set.name, vector.Name });
+            const input = try hexBytes(allocator, vector.Input);
+            defer allocator.free(input);
+            var world = state.State.init(allocator);
+            defer world.deinit();
+            var machine = evm.Machine.init(allocator, &world);
+            defer machine.deinit();
+            machine.environment = .{ .fork = set.fork, .origin = .{0} ** 20, .gas_price = 0, .coinbase = .{0} ** 20, .timestamp = 0, .number = 0, .prev_randao = 0, .gas_limit = 1_000_000, .chain_id = 1, .base_fee = 0, .blob_base_fee = 0, .kzg_settings = &settings };
+            var address: state.Address = .{0} ** 20;
+            address[19] = set.address;
+            const gas = vector.Gas orelse 100_000;
+            var result = try machine.run(.{ .code = &.{}, .gas = gas, .callee = address, .data = input });
+            defer result.deinit(allocator);
+            if (vector.ExpectedError != null) {
+                try std.testing.expect(result.status == .fault);
+                try std.testing.expectEqual(evm.Fault.invalid_opcode, result.status.fault);
+                try std.testing.expectEqual(@as(u64, 0), result.gas_remaining);
+                continue;
+            }
+            const expected = try hexBytes(allocator, vector.Expected orelse return error.MissingExpectation);
+            defer allocator.free(expected);
+            try std.testing.expect(result.status == .success);
+            try std.testing.expectEqualSlices(u8, expected, result.output);
+            try std.testing.expectEqual(@as(u64, 0), result.gas_remaining);
+            if (gas > 0) {
+                var short = try machine.run(.{ .code = &.{}, .gas = gas - 1, .callee = address, .data = input });
+                defer short.deinit(allocator);
+                try std.testing.expect(short.status == .fault);
+                try std.testing.expectEqual(evm.Fault.out_of_gas, short.status.fault);
+            }
+        }
+    }
 }

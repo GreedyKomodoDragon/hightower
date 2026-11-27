@@ -57,6 +57,7 @@ pub fn importBlock(allocator: std.mem.Allocator, chain: *chain_mod.Chain, store:
         .max_blobs_per_block = max_blobs,
         .expected_blob_hashes = blob_hashes.items,
         .verify_requests_hash = true,
+        .kzg_settings = chain.kzg_settings,
     }, parent.header, block.header, transactions, block.withdrawals);
     errdefer result.deinit();
     if (store) |db| try db.stage(chain.fork, block.header, transactions, block.withdrawals, result.receipts, &parent_world, &world);

@@ -32,6 +32,10 @@
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
     .dependencies = .{
+        .zig_libs = .{
+            .url = "https://github.com/zaxified/zig-libs/archive/refs/tags/2026-10-07.tar.gz",
+            .hash = "zig_libs-0.0.0-WiQ0Gl1dMAU6pyTI-eL40pFMZMNUzaEbp8lRnsOIwfnI",
+        },
         .ckzg = .{
             .url = "https://github.com/ethereum/c-kzg-4844/archive/refs/tags/v2.1.8.tar.gz",
             .hash = "ckzg_4844-0.0.0-I7LPWMw0EQBnqYagHE3VRwTrTAYpH0u6ZBPtfAeJsuDa",
