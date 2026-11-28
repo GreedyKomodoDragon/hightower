@@ -51,6 +51,8 @@ The production Osaka execution binary is `zig-out/bin/hightower-execution`. See 
 
 CI (`.github/workflows/ci.yml`): `zig fmt --check`, `zig build`, `zig build test`, `zig build test-transition`, pinned Geth v1.17.7–v1.17.10 Engine API interoperability checks, and Bruno HTTP checks on Zig 0.16.0.
 
+Precompile differential checks compare Hightower with pinned go-ethereum v1.17.10 on London, Cancun, Osaka, and Fulu (using Osaka rules). The normal CI run is `bash scripts/test_precompile_differential.sh 114 2`. Run a longer local sweep with `bash scripts/test_precompile_differential.sh 114 100`; replace `114` with any seed. A mismatch writes `precompile-mismatch.json` and prints both outcomes. Replay it with `zig-out/bin/precompile-differential precompile-mismatch.json` after `zig build precompile-differential`.
+
 ## JSON conventions
 
 Build valid JSON from structured values and serialize it; parse responses and check their fields. Do not embed valid JSON as escaped string literals or assemble it by concatenating strings, including in tests. Use raw literals only when the exact bytes matter, such as a malformed-JSON test or a wire-format fixture.
