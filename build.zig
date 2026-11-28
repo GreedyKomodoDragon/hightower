@@ -279,6 +279,20 @@ pub fn build(b: *std.Build) void {
     evm_tests.root_module.addIncludePath(ckzg_blst_dep.path("bindings"));
     evm_tests.root_module.addCSourceFiles(.{ .root = ckzg_dep.path("."), .files = &.{"src/ckzg.c"}, .flags = &.{ "-O2", "-D__BLST_PORTABLE__" } });
     evm_tests.root_module.link_libc = true;
+    const precompile_differential = b.addExecutable(.{
+        .name = "precompile-differential",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/execution/precompile_differential.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "execution", .module = execution_mod },
+                .{ .name = "ckzg", .module = ckzg_mod },
+            },
+        }),
+    });
+    const precompile_differential_step = b.step("precompile-differential", "Build the Geth precompile comparison runner");
+    precompile_differential_step.dependOn(&b.addInstallArtifact(precompile_differential, .{}).step);
     const execution_fixture_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/execution/fixtures.zig"),

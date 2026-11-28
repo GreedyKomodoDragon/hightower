@@ -47,6 +47,11 @@ jobs:
       - run: zig build test-transition
       - run: zig build test-execution
       - run: zig build test-execution -Doptimize=ReleaseSafe
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: scripts/geth-discovery-probe/go.mod
+          cache-dependency-path: scripts/geth-discovery-probe/go.sum
+      - run: bash scripts/test_precompile_differential.sh 114 2
       - run: zig build test-token
       - run: zig build test-token -Doptimize=ReleaseSafe
       - run: bash scripts/test_engine_local.sh
